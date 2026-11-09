@@ -1,6 +1,6 @@
 # Bluven CRM 销售侧设计文档
 
-版本：v0.2（设计定稿，尚未开工）
+版本：v0.3（设计定稿，尚未开工）
 日期：2026-11-09
 范围：销售业务全流程，外加运营"接收 / 退回订单"的最小界面。运营侧其余功能另行设计。
 
@@ -134,7 +134,7 @@ Customer（客户，人）
 ### 5.2 CRM 线索接收接口
 
 现有的 Bluven 线索接口是"外部系统把线索推进 Bluven"的方向。CRM 需要的是反方向：Bluven 把新线索推给 CRM。
-为了让 Bluven 侧改动最小，CRM 的接收接口与 Bluven 现有接口**同构**：同样的请求体、同样的字段枚举、同样的返回格式。Bluven 只需把新入库的线索转发到 CRM，并多带一个 `externalId`（Bluven 的线索编号）。
+为了让 Bluven 侧改动最小，CRM 的接收接口与 Bluven 现有接口**同构**：同样的请求体、同样的字段枚举、同样的返回格式。Bluven 只需把新入库的线索转发到 CRM，并多带一个 `externalId`（Bluven 的线索编号）。给 Bluven 开发者的完整规范见 `docs/bluven-lead-forwarding-spec.md`，以下为摘要。
 
 ```
 POST /api/intake/leads
@@ -210,7 +210,7 @@ Content-Type: application/json
 ### 7.1 Zoho Mail 接入（每人各自授权）
 
 - 每个销售在 CRM 里用 OAuth 2.0 授权自己的 Zoho 邮箱，CRM 保存 refresh token。
-- Zoho 的 API 域名随账号所在数据中心变化（`mail.zoho.com` / `mail.zoho.com.au` / `mail.zoho.eu` 等），作为系统配置项。
+- 公司账号在澳洲数据中心：OAuth 用 `accounts.zoho.com.au`，邮件 API 用 `mail.zoho.com.au`。域名仍作为系统配置项，便于将来变更。
 - 所需 scope（以 Zoho 控制台为准）：`ZohoMail.accounts.READ`、`ZohoMail.folders.READ`、`ZohoMail.messages.READ`、`ZohoMail.messages.CREATE`、`ZohoMail.attachments.READ`。
 - 收件：后台任务每 1–2 分钟按邮箱拉取 Inbox 和 Sent 的增量（`GET /api/accounts/{accountId}/messages/view`，按时间游标），逐封取正文、头部（Message-ID / In-Reply-To / References）和附件。
 - 过滤：只保留与 CRM 已知客户邮箱往来的邮件；或 In-Reply-To 指向 CRM 发出的邮件（此时提示销售把新邮箱加到该客户名下）。其它邮件不落库。
@@ -302,7 +302,7 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 ## 10. 定金与财务确认
 
 - 定金金额默认取 Pylon 报价里的 `deposit_amount`，可手动修改。
-- 付款方式：银行转账（销售上传截图）、Pylon 支付网关（自动）、贷款 / 分期（上传贷款批准件）。
+- 付款方式：银行直接转账（销售上传截图，最常见）、Pylon 支付网关（支持但不一定用，用了就自动生成记录）、贷款 / 分期（上传贷款批准件）。
 - 财务账号有自己的工作台："Pending deposits" 列表，逐条确认（填实收金额、到账日期、银行参考号）或驳回（填原因，订单回到 SIGNED 并通知销售）。
 - 没有财务确认，推送按钮不可用。
 - 确认和驳回都写 AuditLog 并进时间线。
@@ -416,17 +416,24 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 
 ---
 
-## 18. 未决问题
+## 18. 已定事项与未决问题
 
-1. **Pylon 支付网关**：是否通过 Pylon 的 Payment Gateway 收定金？是，则定金自动进入待确认；否，则靠销售上传截图。
-2. **Zoho 数据中心**：公司 Zoho 账号在哪个数据中心（登录后看域名是 zoho.com、zoho.com.au 还是 zoho.eu）。
-3. **Bluven 推送方向**：现有文档是"推进 Bluven"的接口。需确认 Bluven 侧能否按 5.2 的同构接口把新线索转发到 CRM；若 Bluven 已有"按 id 查询 / 列表"接口，也可改为 CRM 轮询。
-4. **Pylon API 权限**：开发者文档提到 API 访问需在设置页申请并联系 Pylon 支持；截图显示已可直接创建 token，若创建后报权限不足再联系支持。
-5. **默认配置项**：丢单原因列表、必填清单默认项、定金默认比例，开工前给一版初始值即可，之后管理员可改。
+已定：
+
+- **定金**：客户多数直接银行转账，销售上传截图；Pylon 支付网关支持但不一定用，用了则自动生成待确认记录。两条路并存。
+- **Zoho**：账号在澳洲数据中心，域名 `zoho.com.au`。
+- **Bluven 线索**：Bluven 网站按 `docs/bluven-lead-forwarding-spec.md` 把新线索实时转发到 CRM，历史线索用补录模式导入。
+
+未决（不挡开工）：
+
+1. **CRM 域名**：Pylon webhook 和 Bluven 转发都需要一个公网 HTTPS 地址，需尽早确定正式域名和测试域名。
+2. **Pylon API 权限**：开发者文档提到 API 访问需在设置页申请并联系 Pylon 支持；截图显示已可直接创建 token，若创建后报权限不足再联系支持。
+3. **默认配置项**：丢单原因列表、必填清单默认项、定金默认比例，开工前给一版初始值即可，之后管理员可改。
 
 ---
 
 ## 变更记录
 
+- v0.3（2026-11-09）：定金、Zoho 数据中心、Bluven 转发三项定论；新增 Bluven 转发接口规范文档。
 - v0.2（2026-11-09）：报价发送与签约改为双路径。方案仍全部出自 Pylon，但报价通常由销售裁剪后从 CRM 邮件发出，客户签字后邮件回传，签约以 CRM 归档的合同为准；Pylon 网页报价与签约事件作为并行路径保留。
 - v0.1（2026-11-09）：首版。
