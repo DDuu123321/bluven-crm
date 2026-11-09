@@ -1,6 +1,6 @@
 # Bluven CRM 销售侧设计文档
 
-版本：v0.1（设计定稿，尚未开工）
+版本：v0.2（设计定稿，尚未开工）
 日期：2026-11-09
 范围：销售业务全流程，外加运营"接收 / 退回订单"的最小界面。运营侧其余功能另行设计。
 
@@ -12,7 +12,7 @@ Bluven 是一家澳洲住宅光伏 / 储能安装商。CRM 要解决的问题：
 
 1. 线索从 Bluven 平台和外部渠道进入，去重后分派给销售。
 2. 销售在 CRM 里完成全部跟进：邮件（Zoho）、电话记录、待办、资料归档。
-3. 报价与签约在 Pylon 完成，结果自动回流到 CRM。
+3. 方案一律在 Pylon 设计，报价版本自动回流到 CRM；报价多数由销售从 CRM 用邮件发给客户，客户签字后邮件回传，签约以 CRM 内归档的合同为准。
 4. 定金由财务确认到账。
 5. 资料齐全后一键推送运营，运营可接收或退回。
 6. AI 自动总结往来、抽取关键信息、整理资料，让销售和运营都能快速接手。
@@ -60,8 +60,8 @@ Customer（客户，人）
 | Customer | firstName, lastName, emails[], phones[], notes, createdFromSource | 邮箱和电话都是多值，带 isPrimary |
 | Property | customerId, addressLine1, suburb, state, postcode, country, propertyType, lat/lng, nmi, retailer, phase, roofType, notes | nmi（电表号）、retailer 可由 AI 从账单抽取 |
 | Order | customerId, propertyId, orderNo, stage, sideState, ownerId, source, externalLeadId, leadDetails(json), lostReason, onHoldUntil, pylonProjectId, pylonReference, acceptedQuoteId, pushedAt, handedOverAt, returnCount | orderNo 形如 `BLV-2026-00123`，同时作为 Pylon 的 reference_number |
-| Quote | orderId, version, pylonDesignId, dcKw, storageKwh, totalCents, depositCents, currency, pdfUrl, webProposalUrl, isAccepted, createdAt | 每个 Pylon 设计版本一条，客户签了哪版就把哪版标为 accepted |
-| Contract | orderId, quoteId, signedAt, documentId, source(pylon/manual) | 签字版 PDF 落到 Document |
+| Quote | orderId, version, pylonDesignId, dcKw, storageKwh, totalCents, depositCents, currency, pdfUrl, webProposalUrl, sentAt, sentVia(email/pylon/manual), sentDocumentId, isAccepted, createdAt | 每个 Pylon 设计版本一条；实际发给客户的文件（通常只截取报价部分）单独存为文档并关联到该版本；客户签了哪版就把哪版标为 accepted |
+| Contract | orderId, quoteId, signedAt, documentId, source(email/pylon/upload) | 签字版 PDF 落到 Document；quoteId 指明客户签的是哪一版报价 |
 | Deposit | orderId, amountCents, method(bank/gateway/finance), proofDocumentId, receiptUrl, status(pending/confirmed/rejected), confirmedBy, confirmedAt, rejectReason | 财务确认后状态变 confirmed |
 | Document | orderId, propertyId?, type, scope(property/order), fileName, mimeType, sizeBytes, storagePath, sha256, uploadedBy, takenAt, expiresAt, retentionPolicy, source(upload/email/pylon/ai) | 同一文件同一订单内按 sha256 去重 |
 | DocumentType（可配置） | key, label, scope, isRequiredForHandoff, retentionYears, neverAutoDelete | 管理员维护必填清单与保留期 |
@@ -93,14 +93,15 @@ Customer（客户，人）
 |---|---|---|---|
 | 新线索 | NEW | 线索入库且已分派 | 系统 / 经理 |
 | 已联系 | CONTACTED | 任一外发邮件或电话记录 | 自动 |
-| 已报价 | QUOTED | Pylon 生成第一版设计 / 报价，或销售手动标记 | Pylon webhook / 销售 |
-| 已签约 | SIGNED | Pylon `web_proposals.signed`，或销售手动上传签字版 | Pylon webhook / 销售 |
+| 已报价 | QUOTED | 报价已发给客户：从 CRM 发出的邮件附带了某个报价版本的文件；或 Pylon 网页报价已发送；或销售手动标记 | 自动 / 销售 |
+| 已签约 | SIGNED | 签字合同已归档：客户邮件回传的签字版被归档为 Contract 并选定对应报价版本；或 Pylon `web_proposals.signed` 自动归档 | 销售 / Pylon webhook |
 | 定金待确认 | DEPOSIT_PENDING | 上传付款凭证，或 Pylon 网关收到 deposit | 销售 / Pylon webhook |
 | 定金已确认 | DEPOSIT_CONFIRMED | 财务确认到账 | 财务 |
 | 已推送运营 | PUSHED | 必填清单齐全 + 定金已确认，销售点击推送 | 销售 |
 | 运营退回 | RETURNED | 运营退回并填原因 | 运营 |
 | 运营已接收 | HANDED_OVER | 运营点击接收。销售侧终态，订单对销售只读 | 运营 |
 
+- Pylon 生成设计只会创建 Quote 版本，不会把订单推到 QUOTED；只有报价真正发给客户才算已报价。
 - RETURNED 之后销售补齐资料再推送，回到 PUSHED，`returnCount + 1`，每次退回原因留在订单上。
 - HANDED_OVER 之后客户再来的邮件仍进时间线，销售和运营都能看。
 
@@ -213,7 +214,7 @@ Content-Type: application/json
 - 所需 scope（以 Zoho 控制台为准）：`ZohoMail.accounts.READ`、`ZohoMail.folders.READ`、`ZohoMail.messages.READ`、`ZohoMail.messages.CREATE`、`ZohoMail.attachments.READ`。
 - 收件：后台任务每 1–2 分钟按邮箱拉取 Inbox 和 Sent 的增量（`GET /api/accounts/{accountId}/messages/view`，按时间游标），逐封取正文、头部（Message-ID / In-Reply-To / References）和附件。
 - 过滤：只保留与 CRM 已知客户邮箱往来的邮件；或 In-Reply-To 指向 CRM 发出的邮件（此时提示销售把新邮箱加到该客户名下）。其它邮件不落库。
-- 发件：从 CRM 写信走 Zoho API 发送，保证出现在 Zoho 的已发送文件夹；CRM 记录自己的 Message-ID 用于线程归并。
+- 发件：从 CRM 写信走 Zoho API 发送，保证出现在 Zoho 的已发送文件夹；CRM 记录自己的 Message-ID 用于线程归并。写信时可直接从订单资料中选附件，例如某个报价版本的 PDF 或销售裁剪后只含报价部分的版本；选了报价附件，发送成功后该 Quote 记 sentAt，订单进入 QUOTED。
 - 线程归并：先按 References / In-Reply-To，再按"同一客户 + 归一化主题"。
 - 附件：落盘到该客户 / 订单的"Email attachments"区，销售一键加入正式资料夹（或由 AI 建议归类，见 12）。
 
@@ -243,6 +244,18 @@ Content-Type: application/json
 
 以下依据 Pylon 开发者文档（2026-11 查阅）：API 基址 `https://api.getpylon.com/v1`，JSON:API 格式，`Authorization: Bearer <token>`，`Accept: application/vnd.api+json`；限流每团队 50 次/秒、600 次/分钟；Webhook 签名为 HMAC-SHA256。
 
+### 9.0 使用前提：设计一定在 Pylon，发送和签约不一定
+
+所有方案都在 Pylon 设计，所以报价版本（容量、电池、价格、PDF）始终通过 Pylon 事件自动进入 CRM。但发给客户和签字有两条路，CRM 两条都支持，最终落到同一个 Contract 记录，运营看到的交接包不区分来源。
+
+| 环节 | 路径 A：邮件（常见） | 路径 B：Pylon 网页报价 |
+|---|---|---|
+| 发报价 | 销售把 Pylon 方案 PDF 下载后只保留报价部分，从 CRM 用 Zoho 邮件发出；CRM 记录实际发送的文件和对应报价版本 | 客户在 Pylon 页面查看；`web_proposal_url` 存在 Quote 上 |
+| 签约 | 客户签字后邮件回传；附件进入 CRM，AI 识别为签字合同并建议归档；销售确认时选定报价版本，订单进入 SIGNED | Pylon 发 `web_proposals.signed`，CRM 自动取签字 PDF 归档 |
+| 定金 | 销售上传转账截图，或贷款批准件 | Pylon 支付网关事件自动生成定金记录 |
+
+路径 A 下 Pylon 不会发签约事件，CRM 不依赖它。
+
 ### 9.1 接入方式（两步）
 
 1. 在 Pylon 的 Settings → Integrations & API → API settings 创建 API token（权限 `read` 即可；若将来由 CRM 直接创建 Pylon 项目再加 `write`，不需要 `payment`）。
@@ -270,9 +283,9 @@ https://app.getpylon.com/map/address?search=<URL编码的完整地址>&country=A
 |---|---|
 | `solar_projects.created` | 按 `project_reference_number` 找到订单，写入 Pylon 项目 id 和 `project_in_app_url`（订单页显示 "Open in Pylon"） |
 | `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote,...`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.pdf_proposal_url`、`summary.web_proposal_url`；下载报价 PDF 归档；订单进入 QUOTED |
-| `web_proposals.signed` | 订单进入 SIGNED；调 `GET /v1/solar_projects/{id}` 取 `acceptance.latest_esignature_pdf_url`（有效期 1 小时，须立即下载）存为 Contract 文档；`latest_signed_design` 对应的 Quote 标为 accepted |
+| `web_proposals.signed`（仅路径 B 触发） | 订单进入 SIGNED；调 `GET /v1/solar_projects/{id}` 取 `acceptance.latest_esignature_pdf_url`（有效期 1 小时，须立即下载）存为 Contract 文档；`latest_signed_design` 对应的 Quote 标为 accepted |
 | `gateway_payments.created`，`purpose = "deposit"` | 自动创建 Deposit（`amount` 分、`currency`、`receipt_url`，method = gateway），订单进入 DEPOSIT_PENDING，等财务确认。未使用 Pylon 网关时此步由销售手动上传凭证 |
-| `solar_projects.updated` | 同步 `is_committed`、`job_sheet_url` 等 |
+| `solar_projects.updated` | 同步 `is_committed`、`job_sheet_url` 等；若 `acceptance.manually_sold` 为真而 CRM 尚无 Contract，提醒销售归档签字合同 |
 
 Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设计的创建 / 更新为准。
 
@@ -282,7 +295,7 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 - 10 秒内必须返回 2xx，否则 Pylon 视为失败并重试（共 5 次，最后一次约 31 小时后）。所以接口只做校验和入队，处理放到后台任务。
 - 幂等：以事件 id 去重，重复投递不重复处理。
 - 对账：每晚拉 `GET /v1/events`（Pylon 只保留 30 天）补漏；同时对所有进行中的订单核对 `acceptance.is_accepted`。
-- 手动兜底：销售可在订单页手动上传签字合同和报价 PDF，适用于 Pylon 之外签约的情况。
+- 路径 A 不产生 Pylon 签约事件，签约状态以 CRM 内归档的 Contract 为准；销售也可在订单页直接上传签字合同（source = upload）。
 
 ---
 
@@ -331,7 +344,7 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 |---|---|---|
 | 客户往来总结 | 每封新收邮件后自动增量更新；也可手动点击 | 当前状态、客户关切与异议、已承诺事项、建议下一步。默认按客户汇总，可按订单查看 |
 | 关键信息抽取 | 同上 | 地址、月电费、意向产品、预算、决策时间等，回填到订单 / 房产字段（标注"AI 填写，待确认"） |
-| 附件自动归类 | 邮件附件落库后 | 判断是账单 / 电表箱 / 屋顶 / 合同 / 付款凭证 / 其它，生成"加入资料夹"建议，销售一键确认 |
+| 附件自动归类 | 邮件附件落库后 | 判断是账单 / 电表箱 / 屋顶 / 签字合同 / 付款凭证 / 其它，生成"加入资料夹"建议，销售一键确认。识别为签字合同时，默认关联最近一次发给该客户的报价版本，确认后订单进入 SIGNED |
 | 账单信息抽取 | 账单类文件入库后 | NMI、零售商、账期、用电量 kWh、费率类型、账单地址，回填 Property，并与线索地址比对提示不一致 |
 | 回信草稿 | 新收邮件后 | 基于上下文的英文回复草稿，销售修改后发送 |
 | 交接简报 | 点击推送时 | 给运营的一页简报：系统配置、现场要点、客户沟通偏好、未决事项 |
@@ -396,8 +409,8 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 
 | 阶段 | 内容 | 交付标准 |
 |---|---|---|
-| Phase 1 核心骨架 | 用户与角色、数据模型、Bluven 接收接口 + CSV 导入 + 去重、分派与闲置规则、订单状态机、时间线（备注 / 电话）、待办与通知、资料与文件夹与清单校验、定金与财务确认、推送 / 退回 / 运营接收界面、操作日志、基础仪表盘、Pylon 深链接 + webhook（报价版本、签约自动归档、网关定金） | 不接邮件也能把一张订单从线索走到运营接收 |
-| Phase 2 邮件 | Zoho 每人授权、增量同步、过滤与线程归并、从 CRM 发信、附件入库 | 销售日常跟进可以完全在 CRM 里完成 |
+| Phase 1 核心骨架 | 用户与角色、数据模型、Bluven 接收接口 + CSV 导入 + 去重、分派与闲置规则、订单状态机、时间线（备注 / 电话）、待办与通知、资料与文件夹与清单校验、手动标记已报价与上传签字合同、定金与财务确认、推送 / 退回 / 运营接收界面、操作日志、基础仪表盘、Pylon 深链接 + webhook（报价版本、网页报价签约归档、网关定金） | 不接邮件也能把一张订单从线索走到运营接收 |
+| Phase 2 邮件 | Zoho 每人授权、增量同步、过滤与线程归并、从 CRM 发信并可选订单资料作附件（发报价自动进 QUOTED）、附件入库并可归档为签字合同 | 销售日常跟进可以完全在 CRM 里完成 |
 | Phase 3 AI | 往来总结、信息抽取、附件归类、账单抽取、回信草稿、交接简报 | 运营拿到的每张订单都有 AI 简报 |
 | Phase 4 完善 | 资料到期提醒与清理、报表细化、邮件模板、Pylon API 创建项目、手机端 | |
 
@@ -410,3 +423,10 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 3. **Bluven 推送方向**：现有文档是"推进 Bluven"的接口。需确认 Bluven 侧能否按 5.2 的同构接口把新线索转发到 CRM；若 Bluven 已有"按 id 查询 / 列表"接口，也可改为 CRM 轮询。
 4. **Pylon API 权限**：开发者文档提到 API 访问需在设置页申请并联系 Pylon 支持；截图显示已可直接创建 token，若创建后报权限不足再联系支持。
 5. **默认配置项**：丢单原因列表、必填清单默认项、定金默认比例，开工前给一版初始值即可，之后管理员可改。
+
+---
+
+## 变更记录
+
+- v0.2（2026-11-09）：报价发送与签约改为双路径。方案仍全部出自 Pylon，但报价通常由销售裁剪后从 CRM 邮件发出，客户签字后邮件回传，签约以 CRM 归档的合同为准；Pylon 网页报价与签约事件作为并行路径保留。
+- v0.1（2026-11-09）：首版。
