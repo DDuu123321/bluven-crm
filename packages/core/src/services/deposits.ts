@@ -7,10 +7,11 @@ import { ConflictError, FieldErrors, ForbiddenError, NotFoundError, ValidationEr
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
-import { attachStaged, cleanupStaged, finishImage, type StagedFile } from './documents';
+import { attachStaged, cleanupStaged, finishImage, supersedeDocuments, type StagedFile } from './documents';
 import { managerIds, notifyRoles, notifyUsers } from './notify';
-import { lockOrder, lockOrderForEdit, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { lockOrder, lockOrderForEdit, loadOrderState, orderHref, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 import { DOC_TYPE } from './reference';
+import { completeSystemTasks } from './timeline';
 
 export const DEPOSIT_METHOD_LABEL: Record<DepositMethod, string> = {
   BANK_TRANSFER: 'Bank transfer',
@@ -65,6 +66,7 @@ export async function submitDeposit(ctx: Ctx, input: SubmitDepositInput): Promis
       });
       const summary = `Deposit of ${formatCents(input.amountCents)} submitted for confirmation (${DEPOSIT_METHOD_LABEL[method!].toLowerCase()})`;
       await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'DEPOSIT', summary, body: note, payload: { depositId: id } });
+      await completeSystemTasks(tx, ctx, order.id, ['DEPOSIT_REJECTED']);
       await touchStaffActivity(tx, ctx, order);
       await syncOrderStage(tx, ctx, order.id);
       await audit(tx, ctx, {
@@ -166,10 +168,13 @@ async function findDeposit(ctx: Ctx, depositId: string): Promise<Deposit> {
 export async function withdrawDeposit(ctx: Ctx, input: { depositId: string }): Promise<void> {
   const found = await findDeposit(ctx, input.depositId);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForStaff(tx, ctx, found.orderId);
+    // On a cancelled order the submission is finance's to close out, so that whether money
+    // arrived is on record before anyone talks about a refund.
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Deposit');
     const deposit = await tx.deposit.findUniqueOrThrow({ where: { id: found.id } });
     if (deposit.status !== 'PENDING') throw new ConflictError('Only a deposit that is still waiting for finance can be withdrawn.');
     await tx.deposit.update({ where: { id: deposit.id }, data: { status: 'WITHDRAWN', decidedAt: nowOf(ctx), decisionNote: 'Withdrawn by sales' } });
+    await supersedeDocuments(tx, ctx, order.id, DOC_TYPE.depositProof);
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'DEPOSIT', summary: `Deposit submission of ${formatCents(deposit.amountCents, deposit.currency)} withdrawn` });
     await touchStaffActivity(tx, ctx, order);
     await syncOrderStage(tx, ctx, order.id);
@@ -219,7 +224,9 @@ export async function decideDeposit(ctx: Ctx, input: DecideDepositInput): Promis
     const order = (await loadOrderState(tx, found.orderId))!;
     const deposit = await tx.deposit.findUniqueOrThrow({ where: { id: found.id } });
     if (deposit.status !== 'PENDING') throw new ConflictError('This deposit has already been decided or withdrawn.');
-    if (order.sideState === 'CANCELLED') throw new ConflictError('This order has been cancelled.');
+    // A cancelled order can still have a submission waiting. Finance decides it all the same:
+    // whether the money arrived is exactly what a refund depends on.
+    const cancelled = order.sideState === 'CANCELLED';
     const now = nowOf(ctx);
 
     if (input.decision === 'CONFIRM') {
@@ -240,6 +247,8 @@ export async function decideDeposit(ctx: Ctx, input: DecideDepositInput): Promis
         differs ? ` (submitted as ${formatCents(deposit.amountCents, deposit.currency)})` : ''
       }`;
       await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'DEPOSIT', summary, body: note, payload: { depositId: deposit.id, bankReference } });
+      // The wait for finance is over and the ball is back with sales: the idle clock starts now.
+      if (!cancelled) await tx.order.update({ where: { id: order.id }, data: { lastStaffActivityAt: now, idleLevel: 0 } });
       await syncOrderStage(tx, ctx, order.id);
       await audit(tx, ctx, {
         action: 'deposit.confirm',
@@ -251,35 +260,48 @@ export async function decideDeposit(ctx: Ctx, input: DecideDepositInput): Promis
         before: { status: 'PENDING', amountCents: deposit.amountCents },
         after: { status: 'CONFIRMED', receivedAmountCents: input.receivedAmountCents, receivedOn: input.receivedOn, bankReference, note },
       });
-      const recipients = order.ownerId ? [order.ownerId] : await managerIds(tx);
-      await notifyUsers(tx, ctx, recipients, {
-        type: 'deposit.confirmed',
-        title: `${order.orderNo}: deposit confirmed`,
-        body: 'You can push the order to operations once the checklist is complete.',
-        href: orderHref(order.id),
-        orderId: order.id,
-      });
+      if (cancelled) {
+        await notifyUsers(tx, ctx, [order.ownerId, ...(await managerIds(tx))], {
+          type: 'deposit.confirmed',
+          title: `${order.orderNo}: deposit confirmed on a cancelled order`,
+          body: 'The money did arrive. Check that the refund status of the order is right.',
+          href: orderHref(order.id),
+          orderId: order.id,
+        });
+      } else {
+        const recipients = order.ownerId ? [order.ownerId] : await managerIds(tx);
+        await notifyUsers(tx, ctx, recipients, {
+          type: 'deposit.confirmed',
+          title: `${order.orderNo}: deposit confirmed`,
+          body: 'You can push the order to operations once the checklist is complete.',
+          href: orderHref(order.id),
+          orderId: order.id,
+        });
+      }
     } else {
       await tx.deposit.update({
         where: { id: deposit.id },
         data: { status: 'REJECTED', decisionNote: note, decidedById: actor.id, decidedAt: now },
       });
+      await supersedeDocuments(tx, ctx, order.id, DOC_TYPE.depositProof);
       await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'DEPOSIT', summary: 'Deposit rejected by finance', body: note, payload: { depositId: deposit.id } });
-      await tx.task.create({
-        data: {
-          id: newId('tsk'),
-          orderId: order.id,
-          assigneeId: order.ownerId,
-          title: 'Deposit rejected by finance: check with the customer and resubmit',
-          notes: note,
-          dueAt: now,
-          kind: 'DEPOSIT_REJECTED',
-          remindedAt: now,
-          createdAt: now,
-        },
-      });
-      // The ball is back with sales: the idle clock starts now.
-      await tx.order.update({ where: { id: order.id }, data: { lastStaffActivityAt: now, idleLevel: 0 } });
+      if (!cancelled) {
+        await tx.task.create({
+          data: {
+            id: newId('tsk'),
+            orderId: order.id,
+            assigneeId: order.ownerId,
+            title: 'Deposit rejected by finance: check with the customer and resubmit',
+            notes: note,
+            dueAt: now,
+            kind: 'DEPOSIT_REJECTED',
+            remindedAt: now,
+            createdAt: now,
+          },
+        });
+        // The ball is back with sales: the idle clock starts now.
+        await tx.order.update({ where: { id: order.id }, data: { lastStaffActivityAt: now, idleLevel: 0 } });
+      }
       await syncOrderStage(tx, ctx, order.id);
       await audit(tx, ctx, {
         action: 'deposit.reject',
@@ -313,6 +335,7 @@ export async function reopenDeposit(ctx: Ctx, input: { depositId: string; reason
     const order = (await loadOrderState(tx, found.orderId))!;
     const deposit = await tx.deposit.findUniqueOrThrow({ where: { id: found.id } });
     if (deposit.status !== 'CONFIRMED') throw new ConflictError('Only a confirmed deposit can be reopened.');
+    if (order.sideState === 'CANCELLED') throw new ConflictError('This order has been cancelled. Record what happens to the money under its refund status.');
     if (order.stage === 'PUSHED' || order.stage === 'RETURNED' || order.stage === 'HANDED_OVER') {
       throw new ConflictError('This order has already gone to operations, so the confirmation can no longer be undone here.');
     }

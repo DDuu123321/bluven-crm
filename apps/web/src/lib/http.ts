@@ -60,8 +60,12 @@ export async function readForm(request: Request): Promise<FormData> {
   return request.formData();
 }
 
+/** No form in this application needs more attachments than this. */
+export const MAX_FORM_FILES = 10;
+
 /** Parks the attached files of a form in temporary storage. On failure nothing is left behind. */
 export async function stageFiles(list: File[]): Promise<StagedFile[]> {
+  if (list.length > MAX_FORM_FILES) throw new ValidationError(`Attach at most ${MAX_FORM_FILES} files at a time.`, { files: `At most ${MAX_FORM_FILES} files.` });
   const staged: StagedFile[] = [];
   try {
     for (const file of list) {

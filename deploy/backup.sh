@@ -15,13 +15,22 @@ KEEP_DAYS="${KEEP_DAYS:-14}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$TARGET"
 
+# A file only gets its final name once it is complete, so an interrupted run never leaves
+# something behind that looks like a good backup.
+cleanup() { rm -f "$TARGET/db-$STAMP.dump.part" "$TARGET/storage-$STAMP.tar.gz.part"; }
+trap cleanup EXIT
+
 echo "[$STAMP] database"
-docker compose exec -T db pg_dump -U bluven -d bluven --format=custom > "$TARGET/db-$STAMP.dump"
+docker compose exec -T db pg_dump -U bluven -d bluven --format=custom > "$TARGET/db-$STAMP.dump.part"
 
 echo "[$STAMP] files"
-docker compose exec -T worker tar -C /data -czf - storage > "$TARGET/storage-$STAMP.tar.gz"
+# A one-off container, so this works whether or not the worker is running.
+docker compose run --rm -T --no-deps worker tar -C /data -czf - storage > "$TARGET/storage-$STAMP.tar.gz.part"
 
-# Remove backups older than KEEP_DAYS days.
+mv "$TARGET/db-$STAMP.dump.part" "$TARGET/db-$STAMP.dump"
+mv "$TARGET/storage-$STAMP.tar.gz.part" "$TARGET/storage-$STAMP.tar.gz"
+
+# Remove backups older than KEEP_DAYS days. Only reached when today's backup succeeded.
 find "$TARGET" -maxdepth 1 -type f \( -name 'db-*.dump' -o -name 'storage-*.tar.gz' \) -mtime "+$KEEP_DAYS" -delete
 
-echo "[$STAMP] done: $(ls -1 "$TARGET" | wc -l) files in $TARGET"
+echo "[$STAMP] done: $(du -sh "$TARGET" | cut -f1) in $TARGET"

@@ -8,6 +8,7 @@ import { addActivity } from './activity';
 import { audit } from './audit';
 import { managerIds, notifyRoles, notifyUsers } from './notify';
 import { lockOrder, lockOrderForEdit, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity } from './orders';
+import { CURRENT_DOCUMENT } from './reference';
 
 export interface ChecklistItem {
   /** Stable key: "address", "contract", "deposit" or "doc:<type key>". */
@@ -74,7 +75,7 @@ export async function getHandoffChecklist(db: DbOrTx, orderId: string): Promise<
   if (requiredTypes.length > 0) {
     const counts = await db.document.groupBy({
       by: ['typeId'],
-      where: { orderId, deletedAt: null, replacedBy: { is: null }, typeId: { in: requiredTypes.map((t) => t.id) } },
+      where: { orderId, ...CURRENT_DOCUMENT, typeId: { in: requiredTypes.map((t) => t.id) } },
       _count: { _all: true },
     });
     const byType = new Map(counts.map((c) => [c.typeId, c._count._all]));
@@ -125,7 +126,7 @@ async function buildSnapshot(tx: Tx, orderId: string, notes: string, now: Date):
       quotes: { where: { isAccepted: true }, take: 1 },
       contracts: { where: { voidedAt: null }, take: 1 },
       deposits: { where: { status: 'CONFIRMED' }, take: 1, include: { decidedBy: { select: { name: true } } } },
-      documents: { where: { deletedAt: null, replacedBy: { is: null } }, include: { type: true }, orderBy: [{ type: { sortOrder: 'asc' } }, { createdAt: 'asc' }] },
+      documents: { where: CURRENT_DOCUMENT, include: { type: true }, orderBy: [{ type: { sortOrder: 'asc' } }, { createdAt: 'asc' }] },
     },
   });
   const q = o.quotes[0];

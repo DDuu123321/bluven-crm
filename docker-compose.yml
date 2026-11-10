@@ -13,10 +13,18 @@ x-app-env: &app-env
   PYLON_WEBHOOK_SECRET: ${PYLON_WEBHOOK_SECRET:-}
   PYLON_API_BASE: ${PYLON_API_BASE:-https://api.getpylon.com}
 
+# Container logs are rotated so they cannot fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: bluven
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
@@ -35,6 +43,7 @@ services:
     build:
       context: .
       target: tools
+    logging: *logging
     command:
       - sh
       - -c
@@ -54,6 +63,7 @@ services:
       context: .
       target: web
     restart: unless-stopped
+    logging: *logging
     environment:
       <<: *app-env
     volumes:
@@ -67,6 +77,7 @@ services:
       context: .
       target: tools
     restart: unless-stopped
+    logging: *logging
     environment:
       <<: *app-env
     volumes:
@@ -78,6 +89,7 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging: *logging
     ports:
       - "80:80"
       - "443:443"

@@ -8,7 +8,7 @@ import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
 import { attachStaged, cleanupStaged, finishImage, type StagedFile } from './documents';
-import { lockOrderForEdit, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { lockOrderForEdit, requireEditableOrder, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 import { DOC_TYPE } from './reference';
 
 export interface QuoteFields {
@@ -99,12 +99,18 @@ async function loadQuote(ctx: Ctx, quoteId: string): Promise<Quote> {
   return quote;
 }
 
+/** Gate for the "mark as sent" endpoint, which may carry a file: see requireEditableOrder. */
+export async function requireEditableQuote(ctx: Ctx, quoteId: string): Promise<void> {
+  const quote = await loadQuote(ctx, quoteId);
+  await requireEditableOrder(ctx, quote.orderId, 'Quote');
+}
+
 /** Edits a version that has not gone to the customer yet. Sent versions are history: add a new one. */
 export async function updateQuote(ctx: Ctx, input: { quoteId: string } & QuoteFields): Promise<void> {
   validate(input);
   const found = await loadQuote(ctx, input.quoteId);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
     const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id } });
     if (quote.sentAt || quote.isAccepted) throw new ConflictError('This version has already gone to the customer. Add a new version instead.');
     const next = {
@@ -136,6 +142,8 @@ export interface MarkSentOptions {
   via: QuoteSentVia;
   /** The file that actually went to the customer, typically the quote pages cut from the Pylon proposal. */
   file?: StagedFile | null;
+  /** Set when nobody recorded the sending and it is inferred from the customer having signed this version. */
+  inferredFromContract?: boolean;
 }
 
 /**
@@ -161,7 +169,9 @@ export async function markQuoteSentInTx(tx: Tx, ctx: Ctx, order: OrderState, quo
     customerId: order.customerId,
     orderId: order.id,
     type: 'QUOTE',
-    summary: `${describe(quote)} sent to the customer${opts.via === 'PYLON' ? ' as a Pylon web proposal' : ''}`,
+    summary: opts.inferredFromContract
+      ? `${describe(quote)} recorded as sent: the customer signed this version`
+      : `${describe(quote)} sent to the customer${opts.via === 'PYLON' ? ' as a Pylon web proposal' : ''}`,
     occurredAt: sentAt,
     payload: { quoteId: quote.id },
   });
@@ -183,7 +193,10 @@ export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?:
   try {
     const found = await loadQuote(ctx, input.quoteId);
     const doc = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, found.orderId);
+      const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+      // Said out loud rather than ignored: a file sent along would otherwise vanish without a word.
+      const current = await tx.quote.findUniqueOrThrow({ where: { id: found.id }, select: { sentAt: true } });
+      if (current.sentAt) throw new ConflictError('This version is already marked as sent.');
       return markQuoteSentInTx(tx, ctx, order, found.id, { sentAt: input.sentAt, via: 'MANUAL', file: input.file });
     });
     if (doc) await finishImage(ctx, doc);
@@ -197,7 +210,7 @@ export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?:
 export async function deleteQuote(ctx: Ctx, input: { quoteId: string }): Promise<void> {
   const found = await loadQuote(ctx, input.quoteId);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
     const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id }, include: { contracts: { select: { id: true } } } });
     if (quote.sentAt || quote.isAccepted || quote.contracts.length > 0) {
       throw new ConflictError('This version has gone to the customer or is referenced by a contract, so it is kept as history.');

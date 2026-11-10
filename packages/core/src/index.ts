@@ -6,6 +6,7 @@ export * from './context';
 export * from './config';
 export * from './ids';
 export * from './storage';
+export * from './body';
 export * from './services/audit';
 export * from './services/activity';
 export * from './services/notify';

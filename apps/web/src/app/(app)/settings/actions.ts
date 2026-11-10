@@ -14,25 +14,28 @@ import {
   updateSettings,
   updateUser,
 } from '@bluven/core';
-import { runAction } from '@/lib/action';
+import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { bool, int, list, str } from '@/lib/form';
 
 // ---- users
 
 export async function createUserAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await createUser(ctx, { email: str(formData, 'email'), name: str(formData, 'name'), roles: list(formData, 'roles'), password: String(formData.get('password') ?? '') });
   });
 }
 
 export async function updateUserAction(userId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(userId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateUser(ctx, { userId, name: str(formData, 'name'), roles: list(formData, 'roles'), isActive: bool(formData, 'isActive') });
   });
 }
 
 export async function resetPasswordAction(userId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(userId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await resetUserPassword(ctx, { userId, password: String(formData.get('password') ?? '') });
   });
@@ -41,12 +44,14 @@ export async function resetPasswordAction(userId: string, formData: FormData): P
 // ---- lead sources
 
 export async function createLeadSourceAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await createLeadSource(ctx, { name: str(formData, 'name'), kind: str(formData, 'kind') });
   });
 }
 
 export async function updateLeadSourceAction(sourceId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(sourceId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateLeadSource(ctx, { sourceId, name: str(formData, 'name'), isActive: bool(formData, 'isActive') });
   });
@@ -54,6 +59,7 @@ export async function updateLeadSourceAction(sourceId: string, formData: FormDat
 
 /** Returns the new token in `data.token`. It is shown once and cannot be retrieved again. */
 export async function rotateTokenAction(sourceId: string): Promise<ActionResult> {
+  if (!validArgs(sourceId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     const { token } = await rotateIntakeToken(ctx, { sourceId });
     return { data: { token } };
@@ -61,6 +67,7 @@ export async function rotateTokenAction(sourceId: string): Promise<ActionResult>
 }
 
 export async function revokePreviousTokenAction(sourceId: string): Promise<ActionResult> {
+  if (!validArgs(sourceId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await revokePreviousIntakeToken(ctx, { sourceId });
   });
@@ -82,12 +89,14 @@ function docTypeInput(formData: FormData) {
 }
 
 export async function createDocumentTypeAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await createDocumentType(ctx, { ...docTypeInput(formData), isActive: true });
   });
 }
 
 export async function updateDocumentTypeAction(typeId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(typeId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateDocumentType(ctx, { typeId, ...docTypeInput(formData) });
   });
@@ -96,12 +105,14 @@ export async function updateDocumentTypeAction(typeId: string, formData: FormDat
 // ---- lost reasons
 
 export async function createLostReasonAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await createLostReason(ctx, { label: str(formData, 'label') });
   });
 }
 
 export async function updateLostReasonAction(reasonId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(reasonId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateLostReason(ctx, { reasonId, label: str(formData, 'label'), isActive: bool(formData, 'isActive'), sortOrder: int(formData, 'sortOrder') ?? 0 });
   });
@@ -110,6 +121,7 @@ export async function updateLostReasonAction(reasonId: string, formData: FormDat
 // ---- rules
 
 export async function updateRulesAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateSettings(ctx, {
       idle: {

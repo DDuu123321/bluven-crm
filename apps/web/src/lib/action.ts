@@ -6,6 +6,18 @@ import type { ActionResult } from './action-types';
 
 type Outcome = void | { message?: string; redirectTo?: string; data?: Record<string, unknown> };
 
+/**
+ * Server Action arguments come straight off the network. TypeScript's types describe what our own
+ * pages send, not what a hand-made request can send, so every action checks its arguments first:
+ * ids must be short plain strings (never an object that a query could read as a filter) and a
+ * form must really be a form.
+ */
+export function validArgs(...values: unknown[]): boolean {
+  return values.every((v) => (typeof v === 'string' ? /^[A-Za-z0-9_-]{1,64}$/.test(v) : v instanceof FormData));
+}
+
+export const INVALID_REQUEST: Extract<ActionResult, { ok: false }> = { ok: false, error: 'This request could not be understood. Reload the page and try again.' };
+
 /** Turns a thrown error into the result shape forms understand. Unknown errors are logged, not leaked. */
 export function toActionError(e: unknown): Extract<ActionResult, { ok: false }> {
   if (e instanceof ValidationError) return { ok: false, error: e.message, fieldErrors: e.fieldErrors };

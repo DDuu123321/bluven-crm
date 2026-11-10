@@ -8,6 +8,13 @@
 		max_size 600MB
 	}
 
+	# The endpoints other systems call take small JSON bodies only. The application enforces its
+	# own, tighter limits; this keeps oversized requests from reaching it at all.
+	@machine path /api/intake/* /api/webhooks/*
+	request_body @machine {
+		max_size 2MB
+	}
+
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		-Server

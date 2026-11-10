@@ -64,10 +64,11 @@ describe('documents', () => {
     expect(readdirSync(`${getStorage().root}/.tmp`)).toEqual([]);
   });
 
-  it('refuses contract and deposit files through the general uploader', async () => {
+  it('refuses quote, contract and deposit files through the general uploader', async () => {
     const { orderId } = await orderAt(w, 'ASSIGNED');
-    await expect(upload(orderId, 'signed_contract', 'c.pdf', pdf('c'))).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('Contract section') });
-    await expect(upload(orderId, 'deposit_proof', 'd.pdf', pdf('d'))).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('Deposit section') });
+    for (const key of ['signed_contract', 'deposit_proof', 'quote']) {
+      await expect(upload(orderId, key, 'x.pdf', pdf(key))).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('Quote, contract & deposit') });
+    }
   });
 
   it('replaces a file with a new version and hides the old one from the checklist', async () => {
@@ -132,6 +133,55 @@ describe('documents', () => {
     // Thumbnails are not logged.
     await openDocument(as(w.sam), { documentId: bill.id, purpose: 'thumbnail' });
     expect(await db.auditLog.count({ where: { entityId: bill.id, action: { startsWith: 'document.' }, actorId: w.sam.id } })).toBe(2);
+  });
+
+  it('logs one viewing once, however many requests the browser makes for it', async () => {
+    const { orderId } = await orderAt(w, 'READY');
+    const bill = await db.document.findFirstOrThrow({ where: { orderId, type: { key: 'electricity_bill' } } });
+    const sam = as(w.sam, w.clock);
+    const views = () => db.auditLog.count({ where: { entityId: bill.id, action: 'document.view', actorId: w.sam.id } });
+    const downloads = () => db.auditLog.count({ where: { entityId: bill.id, action: 'document.download', actorId: w.sam.id } });
+
+    // A PDF viewer asks for the file in several pieces within seconds.
+    for (let i = 0; i < 4; i++) await openDocument(sam, { documentId: bill.id, purpose: 'view' });
+    expect(await views()).toBe(1);
+    // Saving it is a different kind of access and is recorded as such.
+    await openDocument(sam, { documentId: bill.id, purpose: 'download' });
+    expect(await downloads()).toBe(1);
+    // Someone else looking at the same file is their own entry.
+    await openDocument(as(w.manager, w.clock), { documentId: bill.id, purpose: 'view' });
+    expect(await db.auditLog.count({ where: { entityId: bill.id, action: 'document.view' } })).toBe(2);
+    // Coming back later is a new viewing.
+    w.clock.advanceMinutes(6);
+    await openDocument(sam, { documentId: bill.id, purpose: 'view' });
+    expect(await views()).toBe(2);
+    // A HEAD request sends no bytes and is only an access check.
+    w.clock.advanceMinutes(10);
+    await openDocument(sam, { documentId: bill.id, purpose: 'head' });
+    expect(await views()).toBe(2);
+    await expect(openDocument(as(w.alex, w.clock), { documentId: bill.id, purpose: 'head' })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('reports a file on somebody else\'s order exactly like one that does not exist', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { id } = await upload(orderId, 'other', 'notes.txt', Buffer.from('hello'));
+    const alex = as(w.alex, w.clock);
+    const missing = await deleteDocument(alex, { documentId: 'doc_does_not_exist' }).catch((e: Error) => e.message);
+    const hidden = await deleteDocument(alex, { documentId: id }).catch((e: Error) => e.message);
+    expect(hidden).toBe(missing);
+    const retypeHidden = await changeDocumentType(alex, { documentId: id, typeId: (await docType('meter_box')).id }).catch((e: Error) => e.message);
+    expect(retypeHidden).toBe(missing);
+  });
+
+  it('will not move a file into a folder that already holds the same file', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const image = await png(21);
+    await upload(orderId, 'meter_box', 'meter.png', image);
+    const stray = await upload(orderId, 'other', 'meter-copy.png', image);
+    await expect(changeDocumentType(as(w.sam, w.clock), { documentId: stray.id, typeId: (await docType('meter_box')).id })).rejects.toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining('already holds this file'),
+    });
   });
 
   it('offers site photos from an earlier order on the same property for reuse', async () => {

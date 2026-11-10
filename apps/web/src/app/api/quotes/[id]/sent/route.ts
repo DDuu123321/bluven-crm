@@ -1,4 +1,4 @@
-import { cleanupStaged, getConfig, markQuoteSent, zonedTimeToUtc, type StagedFile } from '@bluven/core';
+import { cleanupStaged, getConfig, markQuoteSent, requireEditableQuote, zonedTimeToUtc, type StagedFile } from '@bluven/core';
 import { files, str } from '@/lib/form';
 import { authenticate, errorResponse, json, readForm, stageFiles } from '@/lib/http';
 
@@ -9,6 +9,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const { id } = await params;
   let staged: StagedFile[] = [];
   try {
+    // Who may do this is settled before the upload is read, so a refused request costs nothing.
+    await requireEditableQuote(auth.ctx, id);
     const form = await readForm(request);
     staged = await stageFiles(files(form, 'file').slice(0, 1));
     // A time left at its pre-filled value means "now", to the second.

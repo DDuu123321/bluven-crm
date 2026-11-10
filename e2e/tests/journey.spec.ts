@@ -344,10 +344,21 @@ test('the manager sees the whole story in the dashboard and the audit log', asyn
   await expect(page.getByRole('cell', { name: 'Bluven website' })).toBeVisible();
   await shot(page, '10-dashboard');
 
+  // Fetching a file in pieces is still an access that gets logged, and a HEAD request gets headers only.
+  await page.goto(`${orderUrl}?tab=documents`);
+  const fileUrl = (await page.locator('a[href^="/api/documents/"]').first().getAttribute('href'))!.split('?')[0]!;
+  const head = await page.context().request.fetch(fileUrl, { method: 'HEAD', headers: { Range: 'bytes=1-' } });
+  expect(head.status()).toBe(206);
+  expect((await head.body()).length).toBe(0);
+  const part = await page.context().request.get(fileUrl, { headers: { Range: 'bytes=1-' } });
+  expect(part.status()).toBe(206);
+  expect(part.headers()['content-range']).toMatch(/^bytes 1-\d+\/\d+$/);
+
   await page.goto(`${orderUrl}?tab=history`);
-  for (const action of ['order.create', 'order.assign', 'quote.sent', 'contract.archive', 'deposit.confirm', 'handoff.push', 'handoff.return', 'handoff.accept']) {
+  for (const action of ['order.create', 'order.assign', 'quote.sent', 'contract.archive', 'deposit.confirm', 'handoff.push', 'handoff.return', 'handoff.accept', 'document.view']) {
     await expect(page.getByText(action, { exact: true }).first()).toBeVisible();
   }
+  await expect(page.getByRole('row').filter({ hasText: 'document.view' }).filter({ hasText: 'Morgan Manager' })).toHaveCount(1);
 
   await page.goto('/audit');
   await page.getByLabel('Order number').fill(orderNo);
@@ -380,6 +391,9 @@ test('Pylon events are accepted only with a valid signature', async ({ browser }
   expect((await send(body, sign(body, 'the-wrong-secret'))).status).toBe(401);
   // A signature for one body does not cover another.
   expect((await send(body.replace(orderNo, 'BLV-0000-00000'), sign(body, E2E.pylonWebhookSecret))).status).toBe(401);
+
+  // Too large is refused before anything else is looked at.
+  expect((await send('x'.repeat(1024 * 1024 + 1), sign('x', E2E.pylonWebhookSecret))).status).toBe(413);
 
   const accepted = await send(body, sign(body, E2E.pylonWebhookSecret));
   expect(accepted.status).toBe(200);

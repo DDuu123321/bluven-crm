@@ -91,12 +91,16 @@ export async function requireOrderView(db: DbOrTx, ctx: Ctx, orderId: string): P
   return { order, view };
 }
 
-/** Locks the order and requires the actor to be its salesperson, a manager, or the system. */
-export async function lockOrderForStaff(tx: Tx, ctx: Ctx, orderId: string): Promise<OrderState> {
+/**
+ * Locks the order and requires the actor to be its salesperson, a manager, or the system.
+ * `what` names the thing the caller asked for (a quote, a document…), so that something on an
+ * order the actor may not see is reported exactly like something that does not exist.
+ */
+export async function lockOrderForStaff(tx: Tx, ctx: Ctx, orderId: string, what = 'Order'): Promise<OrderState> {
   await lockOrder(tx, orderId);
   const order = (await loadOrderState(tx, orderId))!;
   if (ctx.actor.kind === 'user') {
-    if (!orderViewFor(ctx.actor, accessFacts(order))) throw new NotFoundError('Order not found.');
+    if (!orderViewFor(ctx.actor, accessFacts(order))) throw new NotFoundError(`${what} not found.`);
     if (!isOrderStaff(ctx.actor, order)) throw new ForbiddenError('Only the salesperson for this order or a manager can do this.');
   }
   return order;
@@ -111,9 +115,26 @@ export function editBlockReason(o: Pick<OrderState, 'stage' | 'sideState'>): str
   return isSalesEditableStage(o.stage) ? null : 'This order cannot be changed in its current stage.';
 }
 
+/**
+ * Cheap gate for endpoints that receive files: fails before a single byte of the body is read
+ * when the actor could not change the order anyway. The same checks run again under the row lock
+ * when the change is actually made.
+ */
+export async function requireEditableOrder(ctx: Ctx, orderId: string, what = 'Order'): Promise<OrderState> {
+  const order = await loadOrderState(ctx.db, orderId);
+  if (!order) throw new NotFoundError(`${what} not found.`);
+  if (ctx.actor.kind === 'user') {
+    if (!orderViewFor(ctx.actor, accessFacts(order))) throw new NotFoundError(`${what} not found.`);
+    if (!isOrderStaff(ctx.actor, order)) throw new ForbiddenError('Only the salesperson for this order or a manager can do this.');
+  }
+  const reason = editBlockReason(order);
+  if (reason) throw new ConflictError(reason);
+  return order;
+}
+
 /** Like lockOrderForStaff, and additionally requires the order to be in an editable state. */
-export async function lockOrderForEdit(tx: Tx, ctx: Ctx, orderId: string): Promise<OrderState> {
-  const order = await lockOrderForStaff(tx, ctx, orderId);
+export async function lockOrderForEdit(tx: Tx, ctx: Ctx, orderId: string, what = 'Order'): Promise<OrderState> {
+  const order = await lockOrderForStaff(tx, ctx, orderId, what);
   const reason = editBlockReason(order);
   if (reason) throw new ConflictError(reason);
   return order;

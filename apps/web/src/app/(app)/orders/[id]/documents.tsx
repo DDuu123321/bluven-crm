@@ -9,7 +9,7 @@ import { changeDocumentTypeAction, deleteDocumentAction, reuseDocumentsAction } 
 
 export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header: OrderHeader; editable: boolean }) {
   const { order } = header;
-  const [{ types, documents }, reusable, checklist] = await Promise.all([
+  const [{ types, documents, superseded }, reusable, checklist] = await Promise.all([
     getOrderDocuments(ctx, order.id),
     editable ? listReusableDocuments(ctx, order.id) : Promise.resolve([]),
     getHandoffChecklist(ctx.db, order.id),
@@ -56,8 +56,9 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
 
       {types.map((type) => {
         const docs = documents.filter((d) => d.typeId === type.id);
+        const setAside = superseded.filter((d) => d.typeId === type.id);
         const viaFlow = type.key === DOC_TYPE.signedContract || type.key === DOC_TYPE.depositProof || type.key === DOC_TYPE.quote;
-        if (viaFlow && docs.length === 0) return null;
+        if (viaFlow && docs.length === 0 && setAside.length === 0) return null;
         return (
           <Card key={type.id} id={`type-${type.key}`}>
             <CardHeader
@@ -118,6 +119,26 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
                     />
                   ))}
                 </ul>
+              )}
+              {setAside.length > 0 && (
+                <details className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                  <summary className="cursor-pointer text-xs font-medium text-slate-600">
+                    No longer current ({setAside.length}): kept as a record of {type.key === DOC_TYPE.signedContract ? 'a contract that was removed or replaced' : 'a submission that was withdrawn or rejected'}
+                  </summary>
+                  <ul className="mt-2 space-y-1">
+                    {setAside.map((d) => (
+                      <li key={d.id} className="flex flex-wrap items-baseline gap-x-2 text-xs text-slate-500">
+                        <a href={`/api/documents/${d.id}`} target="_blank" rel="noreferrer" className="font-medium text-slate-700 hover:underline">
+                          {d.fileName}
+                        </a>
+                        <span>
+                          {formatBytes(d.sizeBytes)} · added {fmtDate(d.createdAt)}
+                          {d.supersededAt ? ` · set aside ${fmtDate(d.supersededAt)}` : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
               {viaFlow ? (
                 <p className="text-xs text-slate-500">
