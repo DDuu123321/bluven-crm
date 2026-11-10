@@ -234,7 +234,7 @@ export async function cancelOrder(ctx: Ctx, input: { orderId: string; note: stri
         type: 'refund.pending',
         title: `Refund needed for ${order.orderNo}`,
         body: note,
-        href: `/finance/orders/${order.id}`,
+        href: '/finance?tab=refunds',
         orderId: order.id,
       });
     }
