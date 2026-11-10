@@ -1,1 +1,27 @@
+// Server-side entry point: domain rules plus the application services.
+// Browser code must import from '@bluven/core/domain' instead.
 export * from './domain';
+export * from './errors';
+export * from './context';
+export * from './config';
+export * from './ids';
+export * from './storage';
+export * from './services/audit';
+export * from './services/activity';
+export * from './services/notify';
+export * from './services/settings';
+export * from './services/reference';
+export * from './services/auth';
+export * from './services/orders';
+export * from './services/intake';
+export * from './services/assignment';
+export * from './services/timeline';
+export * from './services/sidestate';
+export * from './services/documents';
+export * from './services/quotes';
+export * from './services/contracts';
+export * from './services/deposits';
+export * from './services/handoff';
+export * from './services/customers';
+export * from './services/admin';
+export * from './services/jobs';
