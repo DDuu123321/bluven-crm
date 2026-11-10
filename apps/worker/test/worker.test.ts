@@ -1,3 +1,4 @@
+import net from 'node:net';
 import nodemailer from 'nodemailer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { notifyUsers, resetConfigCache, systemCtx } from '@bluven/core';
@@ -85,6 +86,143 @@ describe('notification emails', () => {
     await notifyUsers(db, ctx(), [sam.id], { type: 't', title: 'Hello' });
     expect(await sendNotificationEmails(db, later)).toEqual({ sent: 0, skipped: 1, failed: 0 });
     expect((await db.notification.findFirstOrThrow()).emailStatus).toBe('SKIPPED');
+  });
+});
+
+interface SmtpDelivery {
+  user: string;
+  pass: string;
+  from: string;
+  to: string[];
+  data: string;
+}
+
+/** A mail server just capable enough to accept a message, so the real SMTP path gets exercised. */
+function startSmtpServer(): Promise<{ port: number; deliveries: SmtpDelivery[]; close: () => Promise<void> }> {
+  const deliveries: SmtpDelivery[] = [];
+  const server = net.createServer((socket) => {
+    let buffer = '';
+    let inData = false;
+    let current: SmtpDelivery = { user: '', pass: '', from: '', to: [], data: '' };
+    const reply = (line: string) => socket.write(`${line}\r\n`);
+    reply('220 test ESMTP');
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      buffer += chunk;
+      for (;;) {
+        if (inData) {
+          const end = buffer.indexOf('\r\n.\r\n');
+          if (end === -1) return;
+          current.data = buffer.slice(0, end);
+          buffer = buffer.slice(end + 5);
+          inData = false;
+          deliveries.push(current);
+          current = { user: current.user, pass: current.pass, from: '', to: [], data: '' };
+          reply('250 queued');
+          continue;
+        }
+        const eol = buffer.indexOf('\r\n');
+        if (eol === -1) return;
+        const line = buffer.slice(0, eol);
+        buffer = buffer.slice(eol + 2);
+        const verb = line.toUpperCase();
+        if (verb.startsWith('EHLO')) socket.write('250-test\r\n250-AUTH PLAIN\r\n250 OK\r\n');
+        else if (verb.startsWith('AUTH PLAIN')) {
+          const [, user = '', pass = ''] = Buffer.from(line.slice('AUTH PLAIN '.length), 'base64').toString('utf8').split('\0');
+          current.user = user;
+          current.pass = pass;
+          reply('235 authenticated');
+        } else if (verb.startsWith('MAIL FROM:')) {
+          current.from = /<([^>]*)>/.exec(line)?.[1] ?? '';
+          reply('250 ok');
+        } else if (verb.startsWith('RCPT TO:')) {
+          current.to.push(/<([^>]*)>/.exec(line)?.[1] ?? '');
+          reply('250 ok');
+        } else if (verb === 'DATA') {
+          inData = true;
+          reply('354 go ahead');
+        } else if (verb === 'QUIT') {
+          reply('221 bye');
+          socket.end();
+        } else reply('250 ok');
+      }
+    });
+    socket.on('error', () => undefined);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address() as net.AddressInfo;
+      resolve({ port, deliveries, close: () => new Promise<void>((done) => server.close(() => done())) });
+    });
+  });
+}
+
+describe('notification emails over SMTP', () => {
+  const saved = { SMTP_URL: process.env.SMTP_URL, MAIL_FROM: process.env.MAIL_FROM, APP_URL: process.env.APP_URL };
+
+  beforeEach(async () => {
+    await resetDb();
+  });
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    setTransport(undefined);
+    resetConfigCache();
+  });
+
+  it('signs in with the account from SMTP_URL and delivers a readable message', async () => {
+    const smtp = await startSmtpServer();
+    try {
+      // The address is written the way the deployment guide says: "@" as "%40".
+      process.env.SMTP_URL = `smtp://crm%40example.com.au:app-pass%2Fword@127.0.0.1:${smtp.port}`;
+      process.env.MAIL_FROM = 'Bluven CRM <crm@example.com.au>';
+      process.env.APP_URL = 'https://crm.example.com.au';
+      resetConfigCache();
+      setTransport(undefined);
+
+      const created = new Date('2026-11-10T01:00:00Z');
+      const sam = await makeUser(['SALES'], 'Sam Sales');
+      await notifyUsers(db, systemCtx(db, 'System', () => created), [sam.id], {
+        type: 'handoff.returned',
+        title: 'BLV-2026-00007 was returned by operations',
+        body: 'Meter box photo is blurry <retake it>.\nSecond line.',
+        href: '/orders/ord_7',
+      });
+      expect(await sendNotificationEmails(db, new Date('2026-11-10T01:05:00Z'))).toEqual({ sent: 1, skipped: 0, failed: 0 });
+
+      expect(smtp.deliveries).toHaveLength(1);
+      const mail = smtp.deliveries[0]!;
+      expect(mail).toMatchObject({ user: 'crm@example.com.au', pass: 'app-pass/word', from: 'crm@example.com.au', to: [sam.email] });
+      expect(mail.data).toContain('From: Bluven CRM <crm@example.com.au>');
+      expect(mail.data).toContain(`To: Sam Sales <${sam.email}>`);
+      expect(mail.data).toContain('Subject: BLV-2026-00007 was returned by operations');
+      const note = await db.notification.findFirstOrThrow();
+      expect(note.emailStatus).toBe('SENT');
+      // Both the plain-text and the HTML part carry the link; the HTML part escapes the body.
+      const decoded = mail.data.replace(/=\r\n/g, '').replace(/=([0-9A-F]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+      expect(decoded).toContain(`Open in Bluven CRM: https://crm.example.com.au/notifications/${note.id}`);
+      expect(decoded).toContain('Meter box photo is blurry &lt;retake it&gt;.');
+      expect(decoded).toContain(`<a href="https://crm.example.com.au/notifications/${note.id}">Open in Bluven CRM</a>`);
+    } finally {
+      await smtp.close();
+    }
+  });
+
+  it('keeps the notification for a later try when the mail server is unreachable', async () => {
+    const smtp = await startSmtpServer();
+    const port = smtp.port;
+    await smtp.close(); // nothing listens on this port any more
+    process.env.SMTP_URL = `smtp://127.0.0.1:${port}`;
+    resetConfigCache();
+    setTransport(undefined);
+    const sam = await makeUser(['SALES']);
+    await notifyUsers(db, systemCtx(db, 'System', () => new Date('2026-11-10T01:00:00Z')), [sam.id], { type: 't', title: 'Hello' });
+    expect(await sendNotificationEmails(db, new Date('2026-11-10T01:05:00Z'))).toEqual({ sent: 0, skipped: 0, failed: 1 });
+    const note = await db.notification.findFirstOrThrow();
+    expect(note).toMatchObject({ emailStatus: 'PENDING', emailAttempts: 1 });
+    expect(note.emailError).toMatch(/ECONNREFUSED|connect/i);
   });
 });
 
