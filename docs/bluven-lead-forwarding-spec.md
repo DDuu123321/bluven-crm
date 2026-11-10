@@ -1,7 +1,7 @@
 # Bluven 网站 → CRM 线索转发接口规范
 
-版本：v1.0
-日期：2026-11-09
+版本：v1.1
+日期：2026-11-10
 读者：Bluven 网站的开发者
 配套文档：`docs/sales-crm-design.md` 第 5 节
 
@@ -158,8 +158,8 @@ HTTP 200 表示这一批已处理完毕，不代表每条都已接收，请逐�
   "duplicates": 0,
   "failed": 1,
   "results": [
-    { "index": 0, "ok": true,  "status": "created",          "id": "ord_01JCK8Q0V9X3M2N4P5R6S7T8U9" },
-    { "index": 1, "ok": true,  "status": "already_received", "id": "ord_01JCK7ZZ1A2B3C4D5E6F7G8H9J" },
+    { "index": 0, "ok": true,  "status": "created",          "id": "ord_01JCK8Q0V9X3M2N4P5R6S7T8U9", "orderNo": "BLV-2026-00124" },
+    { "index": 1, "ok": true,  "status": "already_received", "id": "ord_01JCK7ZZ1A2B3C4D5E6F7G8H9J", "orderNo": "BLV-2026-00098" },
     { "index": 2, "ok": false, "error": "state: must be one of NSW, VIC, QLD, SA, WA, TAS, ACT, NT" }
   ]
 }
@@ -172,7 +172,8 @@ HTTP 200 表示这一批已处理完毕，不代表每条都已接收，请逐�
 | `results[].index` | 该线索在 `leads` 数组中的位置，从 0 开始 |
 | `results[].ok` | `true` 已处理，`false` 被拒绝 |
 | `results[].status` | 见下表 |
-| `results[].id` | CRM 中的订单编号。建议 Bluven 保存，便于日后对账 |
+| `results[].id` | CRM 中该订单的唯一标识。建议 Bluven 保存，便于日后对账 |
+| `results[].orderNo` | CRM 订单号，形如 `BLV-2026-00124`，销售和经理在界面上看到的就是它，便于人工查找 |
 | `results[].error` | 被拒绝的原因，形如 `"<字段名>: <原因>"`，英文 |
 
 `status` 取值：
@@ -181,7 +182,7 @@ HTTP 200 表示这一批已处理完毕，不代表每条都已接收，请逐�
 |---|---|---|
 | `created` | 新建了客户 / 订单 | 保存 `id`，标记已转发 |
 | `already_received` | 这个 `externalId` 之前已经收到过，本次未做任何修改 | 当作成功，保存 `id` |
-| `duplicate` | 不同的 `externalId`，但匹配到同一客户同一地址上一张进行中的订单。CRM 没有新建订单，而是把本次内容作为备注追加到那张订单并通知负责销售 | 当作成功，保存 `id` |
+| `duplicate` | 不同的 `externalId`，但按电话或邮箱匹配到同一客户，且地址相同（或本次没带地址）时该客户已有一张进行中的订单。CRM 没有新建订单，而是把本次内容作为备注追加到那张订单并通知负责销售 | 当作成功，保存 `id` |
 
 HTTP 状态码：
 
@@ -230,7 +231,7 @@ HTTP 200 中 `ok: false` 的行不是网络问题，不要自动重试。在 Blu
 2. 用 `dryRun: true` 发一批样例，确认校验通过。
 3. 正式发送三类样例：字段齐全的、只有 `firstName` + `phone` + `externalId` 的、故意带错误枚举值的。
 4. 幂等验证：同一 `externalId` 连发两次，第二次应返回 `already_received`。
-5. 去重验证：同一手机号、不同 `externalId` 连发两次，第二次应返回 `duplicate`。
+5. 去重验证：同一手机号、同一地址、不同 `externalId` 连发两次，第二次应返回 `duplicate`。
 6. 失败路径验证：用错误 token 应得到 401；241 条一批应得到 400。
 7. 切换到正式地址和正式 token。
 
