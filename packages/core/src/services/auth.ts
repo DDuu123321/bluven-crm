@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
-import type { Db, Role } from '@bluven/db';
+import { Prisma, type Db, type Role } from '@bluven/db';
+import { FailureLimiter } from '../attempts';
 import { inTx, type Ctx, type UserActor } from '../context';
 import { normalizeEmail } from '../domain';
 import { FieldErrors, ForbiddenError, ValidationError } from '../errors';
@@ -55,10 +56,61 @@ export function passwordProblem(password: string, email?: string): string | null
 // Sessions
 // ---------------------------------------------------------------------------
 
+/** A session ends after this long without use… */
 const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const SESSION_RENEW_BELOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** …and in any case this long after sign-in, however much it is used. Bounds what a stolen token is worth. */
+export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const LAST_SEEN_THROTTLE_MS = 5 * 60 * 1000;
 const MAX_FAILED_BEFORE_LOCK = 5;
+const MAX_PASSWORD_LENGTH = 200;
+
+/**
+ * Recent failures per email as typed, whether or not an account exists for it. This is where the
+ * "too many failed attempts" message comes from, so that it says nothing about which addresses
+ * are accounts. The lock stored on the account is the lasting protection and answers like any
+ * other failure.
+ */
+const signInFailures = new FailureLimiter(MAX_FAILED_BEFORE_LOCK, 5 * 60_000);
+/** Wrong "current password" entries per signed-in user. */
+const passwordChangeFailures = new FailureLimiter(5, 10 * 60_000);
+
+/** For tests. */
+export function resetAttemptLimits(): void {
+  signInFailures.reset();
+  passwordChangeFailures.reset();
+}
+
+function tooManyAttempts(seconds: number): ValidationError {
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  return new ValidationError(`Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+}
+
+/** Spends the time a real check would take, so a refusal that skips the check does not answer faster. */
+async function burnCheck(password: string): Promise<void> {
+  dummyHash ??= hashPassword('not-a-real-password');
+  await verifyPassword(password.slice(0, MAX_PASSWORD_LENGTH), await dummyHash);
+}
+
+/**
+ * Counts one attempt against the account before the password is looked at, in one short
+ * transaction. Returns false when the account is locked. Counting first is what makes the limit
+ * hold when many guesses arrive at the same moment: each one sees the count the others left.
+ */
+async function reserveAttempt(db: Db, userId: string, now: Date): Promise<{ failed: number; lockMinutes: number } | null> {
+  return inTx(db, async (tx) => {
+    const rows = await tx.$queryRaw<{ failedLoginCount: number; lockedUntil: Date | null }[]>(
+      Prisma.sql`SELECT "failedLoginCount", "lockedUntil" FROM "User" WHERE "id" = ${userId} FOR UPDATE`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    if (row.lockedUntil && row.lockedUntil > now) return null;
+    const failed = row.failedLoginCount + 1;
+    const lockMinutes = failed >= MAX_FAILED_BEFORE_LOCK ? Math.min(15, 2 ** (failed - MAX_FAILED_BEFORE_LOCK)) : 0;
+    await tx.user.update({ where: { id: userId }, data: { failedLoginCount: failed, lockedUntil: lockMinutes ? new Date(now.getTime() + lockMinutes * 60_000) : null } });
+    return { failed, lockMinutes };
+  });
+}
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -85,32 +137,36 @@ export async function login(db: Db, input: LoginInput): Promise<{ token: string;
   const user = email ? await db.user.findUnique({ where: { email } }) : null;
   const ctx: Ctx = { db, actor: { kind: 'system', label: `login:${email ?? 'invalid'}` }, ip: input.ip, userAgent: input.userAgent, now: () => now };
 
-  if (!user || !user.isActive) {
-    dummyHash ??= hashPassword('not-a-real-password');
-    await verifyPassword(input.password, await dummyHash);
+  // The key is the address as typed, so an address without an account behaves the same.
+  const key = (email ?? input.email.trim().toLowerCase()).slice(0, 320);
+  const wait = signInFailures.blockedFor(key, now.getTime());
+  if (wait > 0) throw tooManyAttempts(wait);
+  const fail = (): never => {
+    signInFailures.record(key, now.getTime());
     throw new ValidationError(BAD_CREDENTIALS);
-  }
-  if (user.lockedUntil && user.lockedUntil > now) {
-    const minutes = Math.max(1, Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 60_000));
-    throw new ValidationError(`Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
-  }
+  };
 
+  if (!user || !user.isActive || input.password.length > MAX_PASSWORD_LENGTH) {
+    await burnCheck(input.password);
+    return fail();
+  }
+  const reserved = await reserveAttempt(db, user.id, now);
+  if (!reserved) {
+    // Locked. Answers exactly like a wrong password, and takes as long.
+    await burnCheck(input.password);
+    return fail();
+  }
   if (!(await verifyPassword(input.password, user.passwordHash))) {
-    const failed = user.failedLoginCount + 1;
-    const lockMinutes = failed >= MAX_FAILED_BEFORE_LOCK ? Math.min(15, 2 ** (failed - MAX_FAILED_BEFORE_LOCK)) : 0;
-    await db.user.update({
-      where: { id: user.id },
-      data: { failedLoginCount: failed, lockedUntil: lockMinutes ? new Date(now.getTime() + lockMinutes * 60_000) : null },
-    });
     await audit(db, ctx, {
       action: 'auth.login_failed',
       entityType: 'User',
       entityId: user.id,
       summary: `Failed sign-in for ${user.email}`,
-      meta: { failedLoginCount: failed, lockedForMinutes: lockMinutes },
+      meta: { failedLoginCount: reserved.failed, lockedForMinutes: reserved.lockMinutes },
     });
-    throw new ValidationError(BAD_CREDENTIALS);
+    return fail();
   }
+  signInFailures.clear(key);
 
   const token = randomBytes(32).toString('base64url');
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
@@ -142,21 +198,28 @@ export async function login(db: Db, input: LoginInput): Promise<{ token: string;
   };
 }
 
-/** Resolves a session token to its user. Extends the session when it is more than half used. */
-export async function getSessionUser(db: Db, token: string | undefined | null, now: Date = new Date()): Promise<SessionUser | null> {
+/**
+ * Resolves a session token to its user. A session in use is extended when it is more than half
+ * used, up to SESSION_MAX_AGE_MS after sign-in. `passive` is for requests the page makes on its
+ * own (the counters in the navigation): they prove a tab is open, not that anyone is there, so
+ * they neither extend the session nor count as being seen.
+ */
+export async function getSessionUser(db: Db, token: string | undefined | null, now: Date = new Date(), opts: { passive?: boolean } = {}): Promise<SessionUser | null> {
   if (!token) return null;
   const session = await db.session.findUnique({ where: { tokenHash: hashToken(token) }, include: { user: true } });
   if (!session || session.expiresAt <= now || !session.user.isActive) return null;
+  const hardEnd = session.createdAt.getTime() + SESSION_MAX_AGE_MS;
+  if (now.getTime() >= hardEnd) return null;
 
   const remaining = session.expiresAt.getTime() - now.getTime();
   const sinceSeen = now.getTime() - session.lastSeenAt.getTime();
-  if (remaining < SESSION_RENEW_BELOW_MS || sinceSeen > LAST_SEEN_THROTTLE_MS) {
+  if (!opts.passive && (remaining < SESSION_RENEW_BELOW_MS || sinceSeen > LAST_SEEN_THROTTLE_MS)) {
     await db.session
       .update({
         where: { id: session.id },
         data: {
           lastSeenAt: now,
-          expiresAt: remaining < SESSION_RENEW_BELOW_MS ? new Date(now.getTime() + SESSION_TTL_MS) : undefined,
+          expiresAt: remaining < SESSION_RENEW_BELOW_MS ? new Date(Math.min(now.getTime() + SESSION_TTL_MS, hardEnd)) : undefined,
         },
       })
       .catch(() => undefined); // a concurrent sign-out may have removed the row
@@ -181,8 +244,15 @@ export async function changeOwnPassword(ctx: Ctx, input: { current: string; next
   const actor = ctx.actor;
   const user = await ctx.db.user.findUnique({ where: { id: actor.id } });
   if (!user) throw new ForbiddenError();
+  // Someone at an unlocked screen should not get unlimited guesses at the password either.
+  const now = (ctx.now?.() ?? new Date()).getTime();
+  const wait = passwordChangeFailures.blockedFor(user.id, now);
+  if (wait > 0) throw tooManyAttempts(wait);
   const errors = new FieldErrors();
-  if (!(await verifyPassword(input.current, user.passwordHash))) errors.add('current', 'Your current password is not correct.');
+  if (input.current.length > MAX_PASSWORD_LENGTH || !(await verifyPassword(input.current, user.passwordHash))) {
+    passwordChangeFailures.record(user.id, now);
+    errors.add('current', 'Your current password is not correct.');
+  }
   const problem = passwordProblem(input.next, user.email);
   if (problem) errors.add('next', problem);
   else if (input.next === input.current) errors.add('next', 'Choose a password you have not just used.');

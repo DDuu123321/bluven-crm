@@ -10,6 +10,9 @@
 # (another machine or cloud storage): a backup on the same disk does not survive losing the disk.
 set -eu
 
+# The dumps hold customer data and password hashes: readable by the owner only.
+umask 077
+
 TARGET="${1:-./backups}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"

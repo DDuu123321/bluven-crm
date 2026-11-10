@@ -216,12 +216,15 @@ worker 负责的事：闲置 5 / 10 / 15 天的提醒和回池、暂缓到期自
 `CRM_DOMAIN` 和实际访问的域名不一致，或者不是通过 HTTPS 访问。系统只在 HTTPS 下发放登录凭证。
 
 **忘记密码。**
-管理员在 Administration → Users 里点 Reset password，设一个新的临时密码。如果唯一的管理员自己忘了密码，在服务器上执行下面的命令给他设一个临时密码，登录后系统会要求改掉：
+管理员在 Administration → Users 里点 Reset password，设一个新的临时密码。如果唯一的管理员自己忘了密码，在服务器上执行下面的命令。系统会生成一个临时密码并只显示这一次，同时解除该账号的锁定；登录后系统会要求改掉：
 
 ```bash
 cd /opt/bluven-crm
-docker compose run --rm migrate sh -c 'cd /repo/packages/core && node --import tsx src/cli/reset-password.ts 管理员邮箱 "临时密码至少10位"'
+docker compose run --rm migrate sh -c 'cd /repo/packages/core && node --import tsx src/cli/reset-password.ts 管理员邮箱'
 ```
+
+**连续输错密码后提示稍后再试。**
+同一个邮箱 5 分钟内输错 5 次，会暂停几分钟。之后每再错一次，账号锁定的时间加倍，最长 15 分钟。输对一次即恢复正常。着急的话请管理员在 Users 里重置密码，重置会同时解除锁定。已经登录的人不受影响。
 
 **Bluven 推送线索返回 401。**
 密钥不对或者该来源被停用。在 Administration → Lead sources 检查，必要时 Rotate token 重新发一把，旧密钥还能再用 7 天。

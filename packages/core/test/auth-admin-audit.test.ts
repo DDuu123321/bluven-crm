@@ -10,6 +10,7 @@ import {
   getSessionUser,
   login,
   logout,
+  resetAttemptLimits,
   resetUserPassword,
   revokePreviousIntakeToken,
   rotateIntakeToken,
@@ -27,6 +28,7 @@ let admin: TestUser;
 
 beforeEach(async () => {
   await resetDb();
+  resetAttemptLimits();
   admin = await makeUser(['ADMIN'], 'Ada Admin');
 });
 
@@ -73,11 +75,104 @@ describe('sign-in and sessions', () => {
     const clock = new Clock();
     for (let i = 0; i < 5; i++) await login(db, { email: 'sam@bluven.test', password: 'bad-password-x', now: clock.current }).catch(() => undefined);
     await expect(login(db, { email: 'sam@bluven.test', password, now: clock.current })).rejects.toMatchObject({ message: expect.stringContaining('Too many failed attempts') });
-    clock.advanceMinutes(2);
+    clock.advanceMinutes(6);
     const ok = await login(db, { email: 'sam@bluven.test', password, now: clock.current });
     expect(ok.user.name).toBe('Sam');
     expect((await db.user.findUniqueOrThrow({ where: { email: 'sam@bluven.test' } })).failedLoginCount).toBe(0);
     expect(await db.auditLog.count({ where: { action: 'auth.login_failed' } })).toBe(5);
+  });
+
+  it('does not let the answers tell an account from an address nobody has', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    const clock = new Clock();
+    const attempt = (email: string) => login(db, { email, password: 'bad-password-x', now: clock.current }).then(() => 'signed in', (e: Error) => e.message);
+    const real: string[] = [];
+    const ghost: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      real.push(await attempt('sam@bluven.test'));
+      ghost.push(await attempt('ghost@bluven.test'));
+    }
+    // Later on too: the account is now locked in the database for longer than the short-term limit lasts.
+    clock.advanceMinutes(6);
+    for (let i = 0; i < 3; i++) {
+      real.push(await attempt('sam@bluven.test'));
+      ghost.push(await attempt('ghost@bluven.test'));
+    }
+    expect(real).toEqual(ghost);
+    expect(real.slice(0, 5)).toEqual(Array(5).fill('Incorrect email or password.'));
+    expect(real[5]).toMatch(/^Too many failed attempts\. Try again in \d+ minutes?\.$/);
+  });
+
+  it('holds the limit when many guesses arrive at the same moment', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    const clock = new Clock();
+    const results = await Promise.allSettled(Array.from({ length: 20 }, (_, i) => login(db, { email: 'sam@bluven.test', password: `guess-number-${i}`, now: clock.current })));
+    expect(results.every((r) => r.status === 'rejected')).toBe(true);
+    // Only five of the twenty were ever compared with the real password.
+    expect(await db.auditLog.count({ where: { action: 'auth.login_failed' } })).toBe(5);
+    const user = await db.user.findUniqueOrThrow({ where: { email: 'sam@bluven.test' } });
+    expect(user.failedLoginCount).toBe(5);
+    expect(user.lockedUntil!.getTime()).toBe(clock.current.getTime() + 60_000);
+  });
+
+  it('keeps the lock on the account itself, with longer locks for further failures', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    const clock = new Clock();
+    for (let i = 0; i < 5; i++) await login(db, { email: 'sam@bluven.test', password: 'bad-password-x', now: clock.current }).catch(() => undefined);
+    // Even if the short-term counter is gone (say the server restarted), the account stays locked,
+    // and the right password is answered like a wrong one rather than being tried.
+    resetAttemptLimits();
+    await expect(login(db, { email: 'sam@bluven.test', password, now: clock.current })).rejects.toMatchObject({ message: 'Incorrect email or password.' });
+    expect(await db.session.count()).toBe(0);
+    expect(await db.auditLog.count({ where: { action: 'auth.login_failed' } })).toBe(5);
+
+    // One more failure after the lock has run out locks for twice as long.
+    clock.advanceMinutes(2);
+    resetAttemptLimits();
+    await login(db, { email: 'sam@bluven.test', password: 'bad-password-y', now: clock.current }).catch(() => undefined);
+    const user = await db.user.findUniqueOrThrow({ where: { email: 'sam@bluven.test' } });
+    expect(user.failedLoginCount).toBe(6);
+    expect(user.lockedUntil!.getTime()).toBe(clock.current.getTime() + 2 * 60_000);
+
+    // An administrator's reset lifts it.
+    await resetUserPassword(as(admin), { userId: user.id, password: 'Temporary-pass-22' });
+    resetAttemptLimits();
+    expect((await login(db, { email: 'sam@bluven.test', password: 'Temporary-pass-22', now: clock.current })).user.mustChangePassword).toBe(true);
+  });
+
+  it('refuses absurdly long passwords without hashing them', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    await expect(login(db, { email: 'sam@bluven.test', password: 'x'.repeat(5000) })).rejects.toMatchObject({ message: 'Incorrect email or password.' });
+    expect((await db.user.findUniqueOrThrow({ where: { email: 'sam@bluven.test' } })).failedLoginCount).toBe(0);
+  });
+
+  it('ends a session after 90 days however much it is used', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    const clock = new Clock();
+    const { token } = await login(db, { email: 'sam@bluven.test', password, now: clock.current });
+    for (let day = 5; day <= 85; day += 5) {
+      clock.advanceDays(5);
+      expect(await getSessionUser(db, token, clock.current), `day ${day}`).not.toBeNull();
+    }
+    const session = await db.session.findFirstOrThrow();
+    expect(session.expiresAt.getTime()).toBeLessThanOrEqual(session.createdAt.getTime() + 90 * 86_400_000);
+    clock.advanceDays(5); // day 90
+    expect(await getSessionUser(db, token, clock.current)).toBeNull();
+  });
+
+  it('does not treat background requests of an open tab as use of the session', async () => {
+    await createUser(as(admin), { email: 'sam@bluven.test', name: 'Sam', roles: ['SALES'], password });
+    const clock = new Clock();
+    const { token, expiresAt } = await login(db, { email: 'sam@bluven.test', password, now: clock.current });
+    for (let day = 1; day <= 13; day++) {
+      clock.advanceDays(1);
+      expect(await getSessionUser(db, token, clock.current, { passive: true }), `day ${day}`).not.toBeNull();
+    }
+    const untouched = await db.session.findFirstOrThrow();
+    expect(untouched.expiresAt.getTime()).toBe(expiresAt.getTime());
+    expect(untouched.lastSeenAt.getTime()).toBe(untouched.createdAt.getTime());
+    clock.advanceDays(1); // day 14: nobody was there, so it is over
+    expect(await getSessionUser(db, token, clock.current, { passive: true })).toBeNull();
   });
 
   it('expires sessions and ends them when the account is deactivated', async () => {
@@ -109,6 +204,10 @@ describe('sign-in and sessions', () => {
     expect(await getSessionUser(db, here.token)).not.toBeNull();
     expect(await getSessionUser(db, elsewhere.token)).toBeNull();
     await login(db, { email: 'sam@bluven.test', password: 'Another-good-one-1' });
+
+    // Guessing the current password from an unlocked screen is limited too.
+    for (let i = 0; i < 5; i++) await changeOwnPassword(ctx, { current: `wrong-guess-${i}`, next: 'Yet-another-one-2' }).catch(() => undefined);
+    await expect(changeOwnPassword(ctx, { current: 'Another-good-one-1', next: 'Yet-another-one-2' })).rejects.toMatchObject({ message: expect.stringContaining('Too many failed attempts') });
 
     await resetUserPassword(as(admin), { userId: id, password: 'Temporary-pass-9' });
     expect(await getSessionUser(db, here.token)).toBeNull();

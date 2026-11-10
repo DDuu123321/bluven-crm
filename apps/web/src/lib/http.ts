@@ -2,7 +2,7 @@ import 'server-only';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeWebStream } from 'node:stream/web';
 import { AppError, ValidationError, getConfig, stageUpload, cleanupStaged, type Ctx, type SessionUser, type StagedFile } from '@bluven/core';
-import { ctxFor, getCurrentUser } from './session';
+import { ctxFor, getCurrentUser, getCurrentUserPassive } from './session';
 import type { ActionResult } from './action-types';
 
 export function json(body: ActionResult | Record<string, unknown>, status = 200): Response {
@@ -34,10 +34,13 @@ function sameOrigin(request: Request): boolean {
   return originHost === host || origin === new URL(getConfig().appUrl).origin;
 }
 
-/** Resolves the signed-in user for a route handler, or the error response to send back. */
-export async function authenticate(request: Request): Promise<{ user: SessionUser; ctx: Ctx } | Response> {
+/**
+ * Resolves the signed-in user for a route handler, or the error response to send back.
+ * `passive` marks a background request of the page itself, which must not extend the session.
+ */
+export async function authenticate(request: Request, opts: { passive?: boolean } = {}): Promise<{ user: SessionUser; ctx: Ctx } | Response> {
   if (!['GET', 'HEAD'].includes(request.method) && !sameOrigin(request)) return json({ ok: false, error: 'Cross-site request refused.' }, 403);
-  const user = await getCurrentUser();
+  const user = opts.passive ? await getCurrentUserPassive() : await getCurrentUser();
   if (!user) return json({ ok: false, error: 'Your session has ended. Please sign in again.' }, 401);
   if (user.mustChangePassword) return json({ ok: false, error: 'Choose a new password before continuing.' }, 403);
   return { user, ctx: await ctxFor(user) };

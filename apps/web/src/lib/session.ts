@@ -25,6 +25,16 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
   return getSessionUser(getDb(), token);
 });
 
+/**
+ * The signed-in user for requests the page makes by itself in the background. Such a request
+ * shows that a tab is open, not that a person is there, so it does not keep the session alive.
+ */
+export async function getCurrentUserPassive(): Promise<SessionUser | null> {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+  return getSessionUser(getDb(), token, new Date(), { passive: true });
+}
+
 /** Client address and browser, for the audit log. Behind the bundled Caddy proxy the first forwarded address is the client's. */
 export async function requestMeta(): Promise<{ ip: string | null; userAgent: string | null }> {
   const h = await headers();
