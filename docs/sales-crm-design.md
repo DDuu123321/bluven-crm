@@ -1,7 +1,7 @@
 # Bluven CRM 销售侧设计文档
 
-版本：v0.3（设计定稿，尚未开工）
-日期：2026-11-09
+版本：v0.4（Phase 1 开发中）
+日期：2026-11-10
 范围：销售业务全流程，外加运营"接收 / 退回订单"的最小界面。运营侧其余功能另行设计。
 
 ---
@@ -29,7 +29,7 @@ Bluven 是一家澳洲住宅光伏 / 储能安装商。CRM 要解决的问题：
 |---|---|---|
 | Sales（销售） | 只看自己名下的客户 / 订单，看不到同事的 | 跟进、记录、上传资料、推送运营、补件重推 |
 | Manager（经理） | 全部客户 / 订单 | 分派、改派、批量转移、配置清单和丢单原因、看仪表盘和日志 |
-| Finance（财务，独立账号） | 处于"定金待确认"的订单 + 订单只读 | 确认 / 驳回到账 |
+| Finance（财务，独立账号） | 有定金记录的订单（待确认 + 已处理的历史），只读，且只看与定金相关的部分：客户、报价、合同、付款凭证 | 确认 / 驳回到账 |
 | Ops（运营） | 只看已推送给运营的订单 | 接收、退回；查看交接包、资料、邮件时间线、AI 总结 |
 | Admin（管理员） | 全部 | 用户、角色、系统配置 |
 
@@ -91,7 +91,7 @@ Customer（客户，人）
 
 | 阶段 | 英文键 | 进入条件 | 触发者 |
 |---|---|---|---|
-| 新线索 | NEW | 线索入库且已分派 | 系统 / 经理 |
+| 新线索 | NEW | 线索入库即为 NEW。未分派只是没有负责人（`ownerId` 为空），不是单独的阶段 | 系统 |
 | 已联系 | CONTACTED | 任一外发邮件或电话记录 | 自动 |
 | 已报价 | QUOTED | 报价已发给客户：从 CRM 发出的邮件附带了某个报价版本的文件；或 Pylon 网页报价已发送；或销售手动标记 | 自动 / 销售 |
 | 已签约 | SIGNED | 签字合同已归档：客户邮件回传的签字版被归档为 Contract 并选定对应报价版本；或 Pylon `web_proposals.signed` 自动归档 | 销售 / Pylon webhook |
@@ -101,7 +101,11 @@ Customer（客户，人）
 | 运营退回 | RETURNED | 运营退回并填原因 | 运营 |
 | 运营已接收 | HANDED_OVER | 运营点击接收。销售侧终态，订单对销售只读 | 运营 |
 
+- **阶段由事实推导，不靠手工拨动。** 订单上记录各里程碑的时间（首次联系、报价发出、合同归档、定金状态、推送、退回、接收），阶段由这些事实用同一个函数算出来。这样事件乱序到达也不会出错（例如 Pylon 网关的定金事件先于签约事件到达），财务驳回定金后订单自然回到 SIGNED，误删合同后也会如实回退。
+- 阶段只会因为事实变化而变化；每次变化都写时间线和操作日志。
 - Pylon 生成设计只会创建 Quote 版本，不会把订单推到 QUOTED；只有报价真正发给客户才算已报价。
+- 提交定金凭证要求合同已归档（阶段至少 SIGNED）。Pylon 网关的定金事件例外，可以先于合同到达，记录照建，待合同归档后阶段自动跟上。
+- 销售可编辑的阶段：NEW 到 DEPOSIT_CONFIRMED，以及 RETURNED。PUSHED 期间等待运营，销售只读；HANDED_OVER 之后销售只读。
 - RETURNED 之后销售补齐资料再推送，回到 PUSHED，`returnCount + 1`，每次退回原因留在订单上。
 - HANDED_OVER 之后客户再来的邮件仍进时间线，销售和运营都能看。
 
@@ -109,9 +113,9 @@ Customer（客户，人）
 
 | 状态 | 英文键 | 规则 |
 |---|---|---|
-| 丢单 | LOST | 原因必填（从可配置列表选），可填备注；可被经理恢复 |
-| 暂缓 | ON_HOLD | 必须填回访日期，到期自动生成待办并提醒 |
-| 已取消 | CANCELLED | 用于收定金之后客户反悔，带退款状态（待退 / 已退） |
+| 丢单 | LOST | 原因必填（从可配置列表选），可填备注；可被经理恢复。只适用于还没有定金记录（待确认或已确认）的订单 |
+| 暂缓 | ON_HOLD | 必须填回访日期。到期当天系统自动解除暂缓、生成一条跟进待办并提醒负责销售，闲置计时从这一刻重新开始。推送之后不能暂缓 |
+| 已取消 | CANCELLED | 用于已有定金记录（待确认或已确认）之后客户反悔，带退款状态（无需退 / 待退 / 已退）。HANDED_OVER 之后的取消属于运营侧，不在本期范围 |
 
 ### 4.3 推送前校验
 
@@ -157,11 +161,11 @@ Content-Type: application/json
 }
 ```
 
-返回：
+返回（完整定义以规范文档为准）：
 
 ```
-{ "created": 1, "duplicates": 0, "failed": 0,
-  "results": [ { "index": 0, "ok": true, "id": "ord_01H...", "duplicateOf": null } ] }
+{ "received": 1, "created": 1, "alreadyReceived": 0, "duplicates": 0, "failed": 0,
+  "results": [ { "index": 0, "ok": true, "status": "created", "id": "ord_01H...", "orderNo": "BLV-2026-00123" } ] }
 ```
 
 - 必填：`firstName`、`phone`。校验规则与 Bluven 文档一致（州代码、邮编、枚举值严格匹配）。
@@ -180,7 +184,9 @@ Content-Type: application/json
 
 ### 5.4 去重规则
 
-匹配键（任一命中即视为同一客户）：邮箱（小写）、电话（归一化为 E.164，如 `+61412345678`）、地址（归一化后的 `line1 + suburb + postcode`）。
+**第一步，认人。** 电话（归一化为 E.164，如 `+61412345678`）或邮箱（小写）命中已有客户，即视为同一客户。电话优先于邮箱；两者命中不同客户时取电话命中的那位，并把另一位标为疑似重复。
+
+**第二步，认地址。** 地址归一化为 `line1 + suburb + postcode`（统一大小写、去标点、街道类型缩写、单元号写法）后与该客户名下房产比对。
 
 | 情况 | 处理 |
 |---|---|
@@ -188,18 +194,29 @@ Content-Type: application/json
 | 老客户，新地址 | 在老客户下新建 Property 和 Order，默认分给原销售（在职），否则进池 |
 | 老客户，同地址，有进行中的订单 | 判为重复：不建新单，把本次线索内容追加为该订单的一条 Activity，通知负责销售 |
 | 老客户，同地址，之前订单已终结（HANDED_OVER / LOST / CANCELLED） | 新建 Order，默认分给原销售（在职），否则进池，经理可改 |
+| 老客户，本次没带地址 | 有进行中的订单则并入最近的那张（同上一行"重复"处理）；没有则新建订单，客户只有一处房产时挂在那处房产下 |
+| 老客户，本次带地址，而名下唯一的房产还没填地址 | 视为同一处房产，把地址补上，再按上面的规则处理 |
+| 人没对上，但地址与别的客户的房产相同 | **不自动合并**。照常新建客户和订单，同时标记"疑似重复"并指向那张订单，由经理在池中判断（可能是配偶另行咨询，也可能是房子换了主人） |
 
-手动新建和 CSV 导入时同样走这套规则，界面实时提示"疑似重复"。
+"原销售"指该客户最近一张订单的负责人。"进行中"指未丢单、未取消且未被运营接收。
+
+手动新建和 CSV 导入走同一套规则，界面实时提示"疑似重复"。销售看不到别人名下的客户，所以对销售的提示只说"该联系人已存在，归属其他销售，请联系经理"，不显示对方客户的任何内容。
+
+并发保护：线索入库串行执行（数据库咨询锁），同一来源同一 `externalId` 有唯一约束。
 
 ---
 
 ## 6. 分派与流转规则
 
 - 分派方式：经理指派。未分派线索在"Unassigned"池中，经理可单个或批量分派。
-- 闲置规则（以订单最后一次 Activity 计，LOST / ON_HOLD / PUSHED 之后不计）：
+- 闲置规则，天数可由管理员调整，默认 5 / 10 / 15：
   - 5 天无动作：提醒负责销售。
   - 10 天无动作：提醒经理。
   - 15 天无动作：自动回到未分派池，原销售和经理都收到通知，订单上留一条系统记录。
+- "动作"指**员工的操作**：发邮件、记电话、写备注、传资料、改阶段、完成待办。客户来信和系统提醒不算，否则客户发了邮件没人理也不会报警。分派和改派会重置计时。
+- 计闲置的阶段：NEW、CONTACTED、QUOTED、SIGNED、DEPOSIT_CONFIRMED、RETURNED。不计的情况：等财务的 DEPOSIT_PENDING、等运营的 PUSHED、HANDED_OVER，以及丢单、暂缓、取消。
+- **自动回池只发生在签约之前**（NEW、CONTACTED、QUOTED）。已签约的订单闲置只提醒销售和经理，不会从销售手里收走，由经理决定是否改派。
+- 回池或改派时，未完成的待办跟着订单走：回池后暂时无人负责，下次分派时转给新负责人。
 - 批量转移：经理可把某销售名下全部或部分订单转给另一人（离职、休假）。
 - 所有分派 / 改派写 AuditLog。
 
@@ -236,7 +253,7 @@ Content-Type: application/json
 - 图片：生成缩略图；记录 EXIF 拍摄时间（`takenAt`）。HEIC 转换放到手机端阶段一起做。
 - 上传时机：任何阶段都可上传，不限于成交后。
 - 保留策略：默认 2 年（自订单终结之日起算）。`DocumentType.neverAutoDelete = true` 的类型（签字合同、定金凭证、合规类文件）不自动删除。到期前 30 天提醒负责销售和经理，可选延期一年或删除；删除是软删除并写 AuditLog，30 天后物理清理。
-- 版本：同名文件再传视为新版本，旧版本保留可查。
+- 版本：在某个文件上点 Replace 上传的是它的新版本，旧版本保留可查；普通上传总是新增文件。同一订单同一类型下内容完全相同的文件（sha256 相同）拒绝重复上传。
 
 ---
 
@@ -282,7 +299,7 @@ https://app.getpylon.com/map/address?search=<URL编码的完整地址>&country=A
 | 事件 | CRM 动作 |
 |---|---|
 | `solar_projects.created` | 按 `project_reference_number` 找到订单，写入 Pylon 项目 id 和 `project_in_app_url`（订单页显示 "Open in Pylon"） |
-| `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote,...`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.pdf_proposal_url`、`summary.web_proposal_url`；下载报价 PDF 归档；订单进入 QUOTED |
+| `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote,...`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.pdf_proposal_url`、`summary.web_proposal_url`；下载报价 PDF 归档。只记报价版本，不改变订单阶段。若该设计对应的报价版本已经发给过客户而关键数字有变，则另建新版本，保留已发出的那版 |
 | `web_proposals.signed`（仅路径 B 触发） | 订单进入 SIGNED；调 `GET /v1/solar_projects/{id}` 取 `acceptance.latest_esignature_pdf_url`（有效期 1 小时，须立即下载）存为 Contract 文档；`latest_signed_design` 对应的 Quote 标为 accepted |
 | `gateway_payments.created`，`purpose = "deposit"` | 自动创建 Deposit（`amount` 分、`currency`、`receipt_url`，method = gateway），订单进入 DEPOSIT_PENDING，等财务确认。未使用 Pylon 网关时此步由销售手动上传凭证 |
 | `solar_projects.updated` | 同步 `is_committed`、`job_sheet_url` 等；若 `acceptance.manually_sold` 为真而 CRM 尚无 Contract，提醒销售归档签字合同 |
@@ -391,17 +408,19 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 语言 | TypeScript 全栈 | 前后端一种语言；Zoho、Pylon、Anthropic 都有成熟的 Node 生态 |
-| Web 应用 | Next.js（App Router）+ React + Tailwind + shadcn/ui | 邮件线程、看板、上传等交互多，服务端渲染与 API 路由在一个项目里 |
+| Web 应用 | Next.js（App Router）+ React + Tailwind，自写一套轻量组件 | 邮件线程、看板、上传等交互多，服务端渲染与 API 路由在一个项目里；内部工具不需要引入整套组件库 |
 | 数据库 | PostgreSQL 16 + Prisma | 关系模型清晰；全文检索用 Postgres 自带能力即可 |
-| 后台任务 | 独立 worker 进程 + pg-boss（基于 Postgres 的队列） | Zoho 轮询、Pylon 事件处理、闲置规则、保留提醒、AI 任务；不引入 Redis |
+| 后台任务 | 独立 worker 进程。Phase 1：定时扫描 + 事件表轮询（`FOR UPDATE SKIP LOCKED`，带重试与退避）；Phase 2 起按需引入 pg-boss | Phase 1 只有闲置规则、提醒、Pylon 事件三类任务，用数据库本身就够，少一个依赖；Zoho 按邮箱轮询和 AI 任务需要真正的队列时再加。始终不引入 Redis |
 | 文件 | 服务器本地磁盘，经存储抽象层访问 | 按用户要求存服务器；将来可切对象存储 |
-| 认证 | Auth.js，邮箱 + 密码，登录后按角色授权；Zoho OAuth 仅用于连接邮箱 | 内部系统，用户少 |
+| 认证 | 自管会话：邮箱 + 密码（scrypt 哈希），数据库会话表 + HttpOnly Cookie，登录限速；账号由管理员创建，首次登录强制改密；Zoho OAuth 仅用于连接邮箱 | 内部系统、用户少、没有第三方登录需求，自管会话依赖最少、行为完全可控 |
 | AI | Anthropic TypeScript SDK，`claude-opus-5-5` | 见第 12 节 |
 | 部署 | Docker Compose（web、worker、postgres、Caddy 反向代理自动 HTTPS）单机 VPS | 简单、可备份；Pylon webhook 需要公网 HTTPS |
 | 备份 | 每晚 pg_dump + 文件目录增量备份到异地 | 2 年保留期的前提 |
 | 测试 | Vitest（单元 / 集成）+ Playwright（端到端） | |
 
-仓库结构（单仓）：`apps/web`、`apps/worker`、`packages/db`（Prisma schema 与客户端）、`packages/core`（领域逻辑：状态机、去重、权限）、`packages/integrations`（zoho、pylon、anthropic）。
+仓库结构（单仓）：`apps/web`、`apps/worker`、`packages/db`（Prisma schema 与客户端）、`packages/core`（领域规则与业务服务：阶段推导、去重、权限、入库、交接等）、`packages/integrations`（pylon；之后是 zoho、anthropic）。
+
+约定：时间一律存 UTC，界面按业务时区显示（默认 `Australia/Sydney`，可配置）；金额一律以"分"为单位存整数，币种默认 AUD。
 
 ---
 
@@ -434,6 +453,7 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 
 ## 变更记录
 
+- v0.4（2026-11-10）：开工前复查。修正两处矛盾（NEW 的进入条件；Pylon 设计事件不再推进到 QUOTED）；阶段改为由事实推导；去重细化（电话 / 邮箱认人，仅地址相同不自动合并而是标记疑似重复；补充无地址线索的处理；对销售的重复提示不泄露他人客户）；闲置规则细化（只计员工动作、等财务和等运营不计、自动回池仅限签约前、暂缓到期自动解除）；丢单与取消的边界；文件版本改为显式 Replace；技术选型调整（自管会话、Phase 1 不引入 pg-boss、自写组件）。
 - v0.3（2026-11-09）：定金、Zoho 数据中心、Bluven 转发三项定论；新增 Bluven 转发接口规范文档。
 - v0.2（2026-11-09）：报价发送与签约改为双路径。方案仍全部出自 Pylon，但报价通常由销售裁剪后从 CRM 邮件发出，客户签字后邮件回传，签约以 CRM 归档的合同为准；Pylon 网页报价与签约事件作为并行路径保留。
 - v0.1（2026-11-09）：首版。
