@@ -16,7 +16,7 @@ import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal,
 import { Alert, Badge, Card, CardBody, CardHeader, Dl, EmptyState, Input, Label, Select, Table, Td, Textarea, buttonClass, cx } from '@/components/ui';
 import { fmtDate, fmtDateTime, inputDate, inputDateTime } from '@/lib/fmt';
 import { pylonDesignLink } from '@/lib/pylon-link';
-import { deleteQuoteAction, markQuoteSentAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
+import { deleteQuoteAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
 
 const fileInput =
   'block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50';
@@ -164,10 +164,18 @@ export async function DealTab({ ctx, header, editable, staff }: { ctx: Ctx; head
                   {editable && !q.sentAt && !q.isAccepted && (
                     <div className="flex flex-wrap justify-end gap-1.5">
                       <Modal trigger="Mark as sent" title={`Quote v${q.version} was sent to the customer`} size="sm" variant="primary" description="This moves the order to Quoted.">
-                        <ActionForm action={markQuoteSentAction.bind(null, q.id)} className="space-y-4">
+                        <ActionForm endpoint={`/api/quotes/${q.id}/sent`} className="space-y-4">
                           <div>
                             <Label htmlFor={`sent-${q.id}`}>When was it sent?</Label>
                             <Input id={`sent-${q.id}`} name="sentAt" type="datetime-local" defaultValue={inputDateTime(now)} max={inputDateTime(now)} className="max-w-60" />
+                            <input type="hidden" name="sentAtDefault" value={inputDateTime(now)} />
+                          </div>
+                          <div>
+                            <Label htmlFor={`sent-file-${q.id}`} optional>
+                              {q.document ? 'Replace the file with what you actually sent' : 'The file you sent'}
+                            </Label>
+                            <input id={`sent-file-${q.id}`} name="file" type="file" accept=".pdf,image/*" className={fileInput} />
+                            <p className="mt-1 text-xs text-slate-500">For example the quote pages cut from the Pylon proposal.</p>
                           </div>
                           <FormMessage />
                           <div className="flex justify-end gap-2">

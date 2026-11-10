@@ -14,7 +14,7 @@
     "start:worker": "pnpm --filter @bluven/worker start",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm --filter @bluven/web lint",
-    "test": "pnpm -r --workspace-concurrency=1 test",
+    "test": "pnpm -r --workspace-concurrency=1 --filter '!@bluven/e2e' test",
     "e2e": "pnpm --filter @bluven/e2e test",
     "db:generate": "pnpm --filter @bluven/db generate",
     "db:migrate": "pnpm --filter @bluven/db migrate:dev",

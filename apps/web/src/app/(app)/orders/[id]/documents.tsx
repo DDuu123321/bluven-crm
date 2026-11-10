@@ -81,10 +81,10 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
                         editable &&
                         !viaFlow && (
                           <>
-                            <Modal trigger="Replace" title={`Replace ${d.fileName}`} description="The new file becomes the current version. The old one is kept in the history." triggerClassName="font-medium text-brand-700 hover:underline">
+                            <Modal trigger="Replace" title={`Replace ${d.fileName}`} description="The new file becomes the current version. The old one is kept in the history." variant="link">
                               <Uploader endpoint={`/api${base}/documents?typeId=${type.id}&replaces=${d.id}`} multiple={false} label="Choose the new file" />
                             </Modal>
-                            <Modal trigger="Move" title={`Move ${d.fileName}`} triggerClassName="font-medium text-brand-700 hover:underline">
+                            <Modal trigger="Move" title={`Move ${d.fileName}`} variant="link">
                               <ActionForm action={changeDocumentTypeAction.bind(null, d.id)} className="space-y-4">
                                 <div>
                                   <Label htmlFor={`move-${d.id}`}>Move to</Label>
@@ -103,7 +103,7 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
                                 </div>
                               </ActionForm>
                             </Modal>
-                            <ActionButton action={deleteDocumentAction.bind(null, d.id)} confirm={`Delete ${d.fileName}?`} variant="ghost" size="sm" className="h-auto px-0 font-medium text-red-600 hover:bg-transparent hover:underline">
+                            <ActionButton action={deleteDocumentAction.bind(null, d.id)} confirm={`Delete ${d.fileName}?`} variant="link-danger">
                               Delete
                             </ActionButton>
                           </>

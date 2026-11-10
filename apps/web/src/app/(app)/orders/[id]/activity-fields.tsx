@@ -18,6 +18,8 @@ export function ActivityFields({ nowLocal }: { nowLocal: string }) {
   return (
     <>
       <input type="hidden" name="type" value={type} />
+      {/* Lets the server tell "left at the default" (meaning: now) from a time the user chose. */}
+      <input type="hidden" name="occurredAtDefault" value={nowLocal} />
       <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Kind of entry">
         {TYPES.map((t) => (
           <button

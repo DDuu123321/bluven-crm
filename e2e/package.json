@@ -1,0 +1,21 @@
+{
+  "name": "@bluven/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-db": "tsx scripts/prepare.ts",
+    "test": "pnpm prepare-db && playwright test",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@bluven/core": "workspace:*",
+    "@bluven/db": "workspace:*",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22",
+    "@types/pg": "^8",
+    "pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3"
+  }
+}
