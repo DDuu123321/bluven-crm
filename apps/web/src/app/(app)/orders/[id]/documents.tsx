@@ -78,8 +78,13 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
                       key={d.id}
                       doc={{ id: d.id, fileName: d.fileName, mimeType: d.mimeType, sizeBytes: d.sizeBytes, hasThumb: !!d.thumbKey, createdAt: d.createdAt, takenAt: d.takenAt, uploadedBy: d.uploadedBy?.name, source: d.source, note: d.note }}
                       actions={
-                        editable &&
-                        !viaFlow && (
+                        <>
+                          {d.replaces && (
+                            <a href={`/api/documents/${d.replaces.id}`} target="_blank" rel="noreferrer" className="font-medium text-slate-500 hover:underline" title={`${d.replaces.fileName}, added ${fmtDate(d.replaces.createdAt)}`}>
+                              Previous version
+                            </a>
+                          )}
+                          {editable && !viaFlow && (
                           <>
                             <Modal trigger="Replace" title={`Replace ${d.fileName}`} description="The new file becomes the current version. The old one is kept in the history." variant="link">
                               <Uploader endpoint={`/api${base}/documents?typeId=${type.id}&replaces=${d.id}`} multiple={false} label="Choose the new file" />
@@ -107,7 +112,8 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
                               Delete
                             </ActionButton>
                           </>
-                        )
+                          )}
+                        </>
                       }
                     />
                   ))}

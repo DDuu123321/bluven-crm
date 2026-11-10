@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.next
+**/dist
+**/*.tsbuildinfo
+packages/db/src/generated
+.env
+.env.*
+!.env.example
+data
+backups
+e2e/.tmp
+e2e/test-results
+e2e/screenshots
+docs

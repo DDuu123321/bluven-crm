@@ -1,6 +1,6 @@
 # Bluven 网站 → CRM 线索转发接口规范
 
-版本：v1.1
+版本：v1.2
 日期：2026-11-10
 读者：Bluven 网站的开发者
 配套文档：`docs/sales-crm-design.md` 第 5 节
@@ -36,6 +36,8 @@ POST https://<CRM 域名>/api/intake/leads
 ```
 
 测试环境和正式环境分别提供地址，各有独立的 token。域名由 CRM 侧确定后提供。
+
+token 由 CRM 管理员在 Administration → Lead sources 里为 "Bluven website" 这个来源生成，只显示一次。CRM 侧的这个接口已经实现，本文描述的行为均有自动化测试覆盖。
 
 健康检查（可选，用于发送前探活）：
 
@@ -100,7 +102,7 @@ GET https://<CRM 域名>/api/intake/health   →  200 {"ok": true}
 |---|---|---|---|
 | `leads` | array | 是 | 1–200 条线索 |
 | `backfill` | boolean | 否 | 默认 `false`。为 `true` 表示历史补录：线索按 `createdAt` 入库，标记为历史数据，不进入待分派池，不触发通知和闲置提醒 |
-| `dryRun` | boolean | 否 | 默认 `false`。为 `true` 时只校验不入库，返回格式与正式调用相同。联调用 |
+| `dryRun` | boolean | 否 | 默认 `false`。为 `true` 时只校验不入库，返回格式与正式调用相同，并预测正式调用的结果；会新建的线索 `id` 和 `orderNo` 为 `null`。同一批内互相重复的线索在试运行里不会被识别。联调用 |
 
 #### 线索字段：CRM 新增
 

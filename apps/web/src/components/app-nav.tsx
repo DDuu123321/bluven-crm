@@ -53,17 +53,19 @@ function refreshCounts(): Promise<void> {
 /** The sidebar. Highlights the current section and keeps the counters fresh. */
 export function AppNav({ sections, initialCounts }: { sections: NavSection[]; initialCounts: Counts }) {
   const pathname = usePathname();
-  const [counts, setCounts] = useState(initialCounts);
-  useEffect(() => setCounts(initialCounts), [initialCounts]);
+  // Counts polled since the last server render. A new server render brings fresh numbers and wins.
+  const [polled, setPolled] = useState<{ base: Counts; counts: Counts } | null>(null);
+  const counts = polled && polled.base === initialCounts ? polled.counts : initialCounts;
 
   useEffect(() => {
-    listeners.add(setCounts);
+    const listener = (next: Counts) => setPolled({ base: initialCounts, counts: next });
+    listeners.add(listener);
     const timer = setInterval(() => void refreshCounts(), 60_000);
     return () => {
-      listeners.delete(setCounts);
+      listeners.delete(listener);
       clearInterval(timer);
     };
-  }, []);
+  }, [initialCounts]);
 
   // Refresh on every navigation as well.
   useEffect(() => {

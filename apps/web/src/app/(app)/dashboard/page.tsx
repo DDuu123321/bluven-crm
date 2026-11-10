@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Form from 'next/form';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, getSettings, localDateString, parseDateOnly } from '@bluven/core';
+import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, getSettings, isManager, localDateString, parseDateOnly } from '@bluven/core';
 import { Card, CardBody, CardHeader, EmptyState, Input, PageHeader, Stat, Table, Td, buttonClass, cx } from '@/components/ui';
 import { one, withParams } from '@/lib/params';
 import { requireSession } from '@/lib/session';
@@ -22,11 +22,14 @@ const pct = (part: number, whole: number) => (whole > 0 ? `${Math.round((part / 
 
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { user, ctx } = await requireSession();
-  if (!can(user, 'dashboard.view')) notFound();
+  // Managers see the whole team. A salesperson sees the same figures for their own orders only.
+  if (!can(user, 'orders.work')) notFound();
+  const manager = isManager(user);
   const sp = await searchParams;
   const tz = getConfig().timeZone;
-  const today = localDateString(new Date(), tz);
-  const daysAgo = (n: number) => localDateString(new Date(Date.now() - n * 86_400_000), tz);
+  const now = new Date();
+  const today = localDateString(now, tz);
+  const daysAgo = (n: number) => localDateString(new Date(now.getTime() - n * 86_400_000), tz);
   const from = parseDateOnly(one(sp.from) ?? '') ? one(sp.from)! : daysAgo(29);
   const to = parseDateOnly(one(sp.to) ?? '') ? one(sp.to)! : today;
   const [d, settings] = await Promise.all([getDashboard(ctx, from <= to ? { from, to } : { from: to, to: from }), getSettings(ctx.db)]);
@@ -38,8 +41,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   return (
     <>
       <PageHeader
-        title="Dashboard"
-        description="How leads are coming in, how they are converting, and where things are waiting."
+        title={manager ? 'Dashboard' : 'My numbers'}
+        description={manager ? 'How leads are coming in, how they are converting, and where things are waiting.' : 'Your own leads and orders: how they are converting, and what is waiting on you.'}
         actions={
           <Form action="/dashboard" className="flex flex-wrap items-end gap-2">
             <div>
@@ -76,8 +79,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <Stat label="Lost" value={d.totals.lost} />
       </div>
       <div className="mb-2 text-xs font-semibold tracking-wide text-slate-400 uppercase">Right now</div>
-      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
-        <Stat label="Unassigned leads" value={d.totals.unassigned} href="/orders/unassigned" tone={d.totals.unassigned > 0 ? 'warn' : undefined} />
+      <div className={cx('mb-6 grid grid-cols-2 gap-3', manager ? 'lg:grid-cols-5' : 'lg:grid-cols-4')}>
+        {manager && <Stat label="Unassigned leads" value={d.totals.unassigned} href="/orders/unassigned" tone={d.totals.unassigned > 0 ? 'warn' : undefined} />}
         <Stat label="Deposits waiting for finance" value={d.totals.pendingDeposits} href="/orders?stage=DEPOSIT_PENDING" />
         <Stat label="Returned by operations" value={d.totals.returned} href="/orders?stage=RETURNED" tone={d.totals.returned > 0 ? 'bad' : undefined} />
         <Stat label={`Idle ${settings.idle.remindOwnerDays}+ days`} value={d.totals.idle5} href="/orders?idle=1" tone={d.totals.idle5 > 0 ? 'warn' : undefined} />
@@ -155,7 +158,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         </Card>
 
         <Card className="xl:col-span-2">
-          <CardHeader title="By salesperson" description="Orders in progress by stage, contracts signed in the period, and how quickly new assignments got a first call or message." />
+          <CardHeader title={manager ? 'By salesperson' : 'Your pipeline'} description="Orders in progress by stage, contracts signed in the period, and how quickly new assignments got a first call or message." />
           {d.bySalesperson.length === 0 ? (
             <EmptyState title="No salespeople yet" />
           ) : (
@@ -163,7 +166,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               {d.bySalesperson.map((p) => (
                 <tr key={p.userId}>
                   <Td>
-                    <Link href={`/orders?owner=${p.userId}`} className="font-medium text-slate-900 hover:text-brand-700">
+                    <Link href={manager ? `/orders?owner=${p.userId}` : '/orders'} className="font-medium text-slate-900 hover:text-brand-700">
                       {p.name}
                     </Link>
                   </Td>
