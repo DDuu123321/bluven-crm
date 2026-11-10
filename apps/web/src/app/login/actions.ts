@@ -1,7 +1,7 @@
 'use server';
 
 import { cookies } from 'next/headers';
-import { changeOwnPassword, login, logout } from '@bluven/core';
+import { changeOwnPassword, login, logout, networkKey } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { INVALID_REQUEST, toActionError, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
@@ -15,9 +15,15 @@ const COOKIE_LIFETIME_MS = 90 * 24 * 60 * 60_000;
 export async function loginAction(formData: FormData): Promise<ActionResult> {
   if (!validArgs(formData)) return INVALID_REQUEST;
   const meta = await requestMeta();
-  const key = `login:${meta.ip ?? 'unknown'}`;
-  if (!allow(key, 20, WINDOW_MS)) {
-    return { ok: false, error: `Too many sign-in attempts from this network. Try again in ${Math.ceil(retryAfter(key, WINDOW_MS) / 60)} minutes.` };
+  // Per network rather than per address: an IPv6 connection has a whole /64 to draw addresses
+  // from. Without a client address (no proxy in front) there is nothing to tell clients apart
+  // by, and the per-account limits in the sign-in service are what applies.
+  const network = networkKey(meta.ip);
+  if (network) {
+    const key = `login:${network}`;
+    if (!allow(key, 20, WINDOW_MS)) {
+      return { ok: false, error: `Too many sign-in attempts from this network. Try again in ${Math.ceil(retryAfter(key, WINDOW_MS) / 60)} minutes.` };
+    }
   }
   const email = String(formData.get('email') ?? '');
   const password = String(formData.get('password') ?? '');
