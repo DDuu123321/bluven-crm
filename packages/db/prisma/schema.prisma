@@ -1,0 +1,713 @@
+// Bluven CRM data model. See docs/sales-crm-design.md section 3.
+//
+// Conventions
+//  - Primary keys are application-generated prefixed ULIDs (see @bluven/core ids).
+//  - Timestamps are stored in UTC. Date-only business values use @db.Date.
+//  - Money is stored as integer cents. System size is stored as integer watts / watt-hours.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum Role {
+  SALES
+  MANAGER
+  FINANCE
+  OPS
+  ADMIN
+}
+
+enum OrderStage {
+  NEW
+  CONTACTED
+  QUOTED
+  SIGNED
+  DEPOSIT_PENDING
+  DEPOSIT_CONFIRMED
+  PUSHED
+  RETURNED
+  HANDED_OVER
+}
+
+enum SideState {
+  NONE
+  LOST
+  ON_HOLD
+  CANCELLED
+}
+
+enum RefundStatus {
+  NOT_REQUIRED
+  PENDING
+  REFUNDED
+}
+
+enum LeadSourceKind {
+  BLUVEN
+  EXTERNAL
+  CSV
+  MANUAL
+}
+
+enum LeadReceiptStatus {
+  CREATED
+  DUPLICATE
+}
+
+enum DocScope {
+  PROPERTY
+  ORDER
+}
+
+enum DocSource {
+  UPLOAD
+  EMAIL
+  PYLON
+  AI
+  REUSED
+}
+
+enum QuoteSentVia {
+  EMAIL
+  PYLON
+  MANUAL
+}
+
+enum ContractSource {
+  UPLOAD
+  EMAIL
+  PYLON
+}
+
+enum DepositMethod {
+  BANK_TRANSFER
+  GATEWAY
+  FINANCE
+}
+
+enum DepositStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  WITHDRAWN
+}
+
+enum ActivityType {
+  NOTE
+  CALL
+  MEETING
+  MESSAGE
+  EMAIL_IN
+  EMAIL_OUT
+  LEAD
+  ASSIGNMENT
+  STAGE_CHANGE
+  DOCUMENT
+  QUOTE
+  CONTRACT
+  DEPOSIT
+  HANDOFF
+  TASK
+  SYSTEM
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+enum HandoffDecision {
+  PENDING
+  ACCEPTED
+  RETURNED
+  WITHDRAWN
+}
+
+enum EmailStatus {
+  NONE
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum PylonEventStatus {
+  PENDING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+// ----------------------------------------------------------------------------
+// Users and sessions
+// ----------------------------------------------------------------------------
+
+model User {
+  id                 String    @id
+  email              String    @unique
+  name               String
+  passwordHash       String
+  roles              Role[]
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(true)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  sessions          Session[]
+  ownedOrders       Order[]          @relation("OrderOwner")
+  activities        Activity[]
+  uploadedDocuments Document[]       @relation("DocumentUploader")
+  assignedTasks     Task[]           @relation("TaskAssignee")
+  notifications     Notification[]
+  createdQuotes     Quote[]
+  createdContracts  Contract[]
+  submittedDeposits Deposit[]        @relation("DepositSubmitter")
+  decidedDeposits   Deposit[]        @relation("DepositDecider")
+  pushedHandoffs    HandoffPackage[] @relation("HandoffPusher")
+  decidedHandoffs   HandoffPackage[] @relation("HandoffDecider")
+}
+
+model Session {
+  id         String   @id
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ----------------------------------------------------------------------------
+// Customer -> Property -> Order
+// ----------------------------------------------------------------------------
+
+model Customer {
+  id        String   @id
+  firstName String
+  lastName  String   @default("")
+  notes     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emails     CustomerEmail[]
+  phones     CustomerPhone[]
+  properties Property[]
+  orders     Order[]
+  activities Activity[]
+}
+
+model CustomerEmail {
+  id         String   @id
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// Always stored lower-cased and trimmed.
+  email      String
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, email])
+  @@index([email])
+}
+
+model CustomerPhone {
+  id         String   @id
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// As entered.
+  raw        String
+  /// Canonical form used for matching, e.g. +61412345678.
+  normalized String
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, normalized])
+  @@index([normalized])
+}
+
+model Property {
+  id           String   @id
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  addressLine1 String   @default("")
+  addressLine2 String   @default("")
+  suburb       String   @default("")
+  state        String   @default("")
+  postcode     String   @default("")
+  country      String   @default("AU")
+  /// Normalised "line1|suburb|postcode" used for duplicate detection. Null when the address is incomplete.
+  addressKey   String?
+  propertyType String   @default("")
+  nmi          String   @default("")
+  retailer     String   @default("")
+  phase        String   @default("")
+  roofType     String   @default("")
+  storeys      String   @default("")
+  notes        String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders    Order[]
+  documents Document[]
+
+  @@index([customerId])
+  @@index([addressKey])
+}
+
+model LeadSource {
+  id                 String         @id
+  key                String         @unique
+  name               String
+  kind               LeadSourceKind
+  isActive           Boolean        @default(true)
+  /// SHA-256 of the intake token. The token itself is shown once and never stored.
+  tokenHash          String?        @unique
+  tokenLast4         String?
+  tokenCreatedAt     DateTime?
+  /// During rotation the previous token keeps working until prevTokenExpiresAt.
+  prevTokenHash      String?        @unique
+  prevTokenExpiresAt DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  orders   Order[]
+  receipts LeadReceipt[]
+}
+
+/// One row per lead received with an external id. Makes intake idempotent.
+model LeadReceipt {
+  id         String            @id
+  sourceId   String
+  source     LeadSource        @relation(fields: [sourceId], references: [id])
+  externalId String
+  orderId    String
+  order      Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status     LeadReceiptStatus
+  payload    Json
+  receivedAt DateTime          @default(now())
+
+  @@unique([sourceId, externalId])
+  @@index([orderId])
+}
+
+model LostReason {
+  id        String  @id
+  key       String  @unique
+  label     String
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  orders Order[]
+}
+
+model Order {
+  id         String     @id
+  /// Human-facing number, e.g. BLV-2026-00123. Also used as the Pylon reference_number.
+  orderNo    String     @unique
+  customerId String
+  customer   Customer   @relation(fields: [customerId], references: [id])
+  propertyId String
+  property   Property   @relation(fields: [propertyId], references: [id])
+  /// Derived from the facts below by deriveStage(); never set directly.
+  stage      OrderStage @default(NEW)
+  sideState  SideState  @default(NONE)
+  ownerId    String?
+  owner      User?      @relation("OrderOwner", fields: [ownerId], references: [id])
+
+  // ---- lead origin
+  sourceId              String
+  source                LeadSource @relation(fields: [sourceId], references: [id])
+  sourceDetail          String     @default("")
+  externalLeadId        String?
+  leadDetails           Json       @default("{}")
+  attribution           Json       @default("{}")
+  leadCreatedAt         DateTime
+  isBackfill            Boolean    @default(false)
+  possibleDuplicateOfId String?
+  possibleDuplicateOf   Order?     @relation("PossibleDuplicate", fields: [possibleDuplicateOfId], references: [id], onDelete: SetNull)
+  possibleDuplicates    Order[]    @relation("PossibleDuplicate")
+  duplicateDismissedAt  DateTime?
+
+  // ---- milestone facts
+  assignedAt       DateTime?
+  firstContactedAt DateTime?
+  quotedAt         DateTime?
+  signedAt         DateTime?
+  firstPushedAt    DateTime?
+  pushedAt         DateTime?
+  returnedAt       DateTime?
+  handedOverAt     DateTime?
+  returnCount      Int       @default(0)
+
+  // ---- side state details
+  lostReasonId String?
+  lostReason   LostReason?  @relation(fields: [lostReasonId], references: [id])
+  lostNote     String       @default("")
+  lostAt       DateTime?
+  onHoldUntil  DateTime?    @db.Date
+  onHoldNote   String       @default("")
+  cancelledAt  DateTime?
+  cancelNote   String       @default("")
+  refundStatus RefundStatus @default(NOT_REQUIRED)
+
+  // ---- idle tracking (staff actions only)
+  lastStaffActivityAt DateTime
+  /// 0 = no reminder sent, 1 = owner reminded, 2 = managers reminded.
+  idleLevel           Int      @default(0)
+
+  // ---- handoff
+  handoffNotes String @default("")
+
+  // ---- Pylon
+  pylonProjectId  String?
+  pylonProjectUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quotes        Quote[]
+  contracts     Contract[]
+  deposits      Deposit[]
+  documents     Document[]
+  activities    Activity[]
+  tasks         Task[]
+  handoffs      HandoffPackage[]
+  receipts      LeadReceipt[]
+  notifications Notification[]
+
+  @@index([ownerId, sideState, stage])
+  @@index([stage, sideState])
+  @@index([customerId])
+  @@index([propertyId])
+  @@index([sourceId, createdAt])
+  @@index([createdAt])
+  @@index([pylonProjectId])
+  @@index([lastStaffActivityAt])
+}
+
+// ----------------------------------------------------------------------------
+// Quotes, contracts, deposits
+// ----------------------------------------------------------------------------
+
+model Quote {
+  id             String        @id
+  orderId        String
+  order          Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  version        Int
+  title          String        @default("")
+  pylonDesignId  String?
+  /// Rated DC output in watts.
+  dcWatts        Int?
+  /// Battery storage in watt-hours.
+  storageWh      Int?
+  totalCents     Int?
+  depositCents   Int?
+  currency       String        @default("AUD")
+  /// The file that was (or will be) sent to the customer.
+  documentId     String?       @unique
+  document       Document?     @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  webProposalUrl String?
+  sentAt         DateTime?
+  sentVia        QuoteSentVia?
+  isAccepted     Boolean       @default(false)
+  notes          String        @default("")
+  createdById    String?
+  createdBy      User?         @relation(fields: [createdById], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  contracts Contract[]
+
+  @@unique([orderId, version])
+  @@index([pylonDesignId])
+}
+
+model Contract {
+  id          String         @id
+  orderId     String
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  quoteId     String?
+  quote       Quote?         @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  documentId  String         @unique
+  document    Document       @relation(fields: [documentId], references: [id])
+  signedOn    DateTime       @db.Date
+  source      ContractSource
+  /// A voided contract no longer counts. At most one contract per order is not voided.
+  voidedAt    DateTime?
+  voidedById  String?
+  voidReason  String         @default("")
+  createdById String?
+  createdBy   User?          @relation(fields: [createdById], references: [id])
+  createdAt   DateTime       @default(now())
+
+  @@index([orderId, voidedAt])
+}
+
+model Deposit {
+  id                  String        @id
+  orderId             String
+  order               Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amountCents         Int
+  currency            String        @default("AUD")
+  method              DepositMethod
+  proofDocumentId     String?       @unique
+  proofDocument       Document?     @relation(fields: [proofDocumentId], references: [id], onDelete: SetNull)
+  receiptUrl          String?
+  note                String        @default("")
+  status              DepositStatus @default(PENDING)
+  submittedById       String?
+  submittedBy         User?         @relation("DepositSubmitter", fields: [submittedById], references: [id])
+  submittedAt         DateTime      @default(now())
+  receivedAmountCents Int?
+  receivedOn          DateTime?     @db.Date
+  bankReference       String        @default("")
+  decisionNote        String        @default("")
+  decidedById         String?
+  decidedBy           User?         @relation("DepositDecider", fields: [decidedById], references: [id])
+  decidedAt           DateTime?
+  /// Set for deposits created from a Pylon gateway payment event (idempotency).
+  pylonEventId        String?       @unique
+
+  @@index([orderId])
+  @@index([status, submittedAt])
+}
+
+// ----------------------------------------------------------------------------
+// Documents
+// ----------------------------------------------------------------------------
+
+model DocumentType {
+  id                   String   @id
+  key                  String   @unique
+  label                String
+  description          String   @default("")
+  scope                DocScope
+  isRequiredForHandoff Boolean  @default(false)
+  retentionYears       Int?     @default(2)
+  neverAutoDelete      Boolean  @default(false)
+  /// System types back built-in features (quote, contract, deposit proof) and cannot be removed.
+  isSystem             Boolean  @default(false)
+  isActive             Boolean  @default(true)
+  sortOrder            Int      @default(0)
+
+  documents Document[]
+}
+
+model Document {
+  id           String       @id
+  orderId      String
+  order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Set for property-scope documents so a later order on the same property can reuse them.
+  propertyId   String?
+  property     Property?    @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  typeId       String
+  type         DocumentType @relation(fields: [typeId], references: [id])
+  fileName     String
+  mimeType     String
+  sizeBytes    Int
+  storageKey   String
+  sha256       String
+  thumbKey     String?
+  source       DocSource    @default(UPLOAD)
+  note         String       @default("")
+  takenAt      DateTime?
+  /// The older version this file replaces.
+  replacesId   String?      @unique
+  replaces     Document?    @relation("DocumentVersion", fields: [replacesId], references: [id], onDelete: SetNull)
+  replacedBy   Document?    @relation("DocumentVersion")
+  /// When reused from an earlier order on the same property.
+  copiedFromId String?
+  uploadedById String?
+  uploadedBy   User?        @relation("DocumentUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime     @default(now())
+  deletedAt    DateTime?
+  deletedById  String?
+
+  quote    Quote?
+  contract Contract?
+  deposit  Deposit?
+
+  @@index([orderId, typeId])
+  @@index([propertyId])
+  @@index([sha256])
+}
+
+// ----------------------------------------------------------------------------
+// Timeline, tasks, notifications
+// ----------------------------------------------------------------------------
+
+model Activity {
+  id         String       @id
+  customerId String
+  customer   Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderId    String?
+  order      Order?       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  type       ActivityType
+  occurredAt DateTime
+  actorId    String?
+  actor      User?        @relation(fields: [actorId], references: [id])
+  /// Shown when there is no user actor, e.g. "System", "Bluven website", "Pylon".
+  actorLabel String       @default("")
+  summary    String
+  body       String       @default("")
+  payload    Json         @default("{}")
+  createdAt  DateTime     @default(now())
+
+  @@index([orderId, occurredAt])
+  @@index([customerId, occurredAt])
+}
+
+model Task {
+  id            String     @id
+  orderId       String
+  order         Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Null while the order sits in the unassigned pool.
+  assigneeId    String?
+  assignee      User?      @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  title         String
+  notes         String     @default("")
+  dueAt         DateTime
+  status        TaskStatus @default(OPEN)
+  /// MANUAL, HOLD_ENDED, RETURNED, DEPOSIT_REJECTED ...
+  kind          String     @default("MANUAL")
+  remindedAt    DateTime?
+  completedAt   DateTime?
+  completedById String?
+  createdById   String?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([assigneeId, status, dueAt])
+  @@index([orderId, status])
+  @@index([status, dueAt])
+}
+
+model Notification {
+  id            String      @id
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type          String
+  title         String
+  body          String      @default("")
+  href          String      @default("")
+  orderId       String?
+  order         Order?      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  readAt        DateTime?
+  emailStatus   EmailStatus @default(NONE)
+  emailAttempts Int         @default(0)
+  emailError    String?
+  createdAt     DateTime    @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@index([emailStatus, createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Handoff to operations
+// ----------------------------------------------------------------------------
+
+model HandoffPackage {
+  id            String          @id
+  orderId       String
+  order         Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  version       Int
+  /// Snapshot of what operations received at push time.
+  snapshot      Json
+  notes         String          @default("")
+  pushedById    String?
+  pushedBy      User?           @relation("HandoffPusher", fields: [pushedById], references: [id])
+  pushedAt      DateTime        @default(now())
+  decision      HandoffDecision @default(PENDING)
+  decidedById   String?
+  decidedBy     User?           @relation("HandoffDecider", fields: [decidedById], references: [id])
+  decidedAt     DateTime?
+  returnReason  String          @default("")
+  /// Checklist item keys operations flagged as missing or unusable.
+  returnMissing String[]
+
+  @@unique([orderId, version])
+  @@index([decision, pushedAt])
+}
+
+// ----------------------------------------------------------------------------
+// Audit log (append-only; UPDATE and DELETE are blocked by a trigger)
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id
+  at         DateTime @default(now())
+  actorId    String?
+  actorLabel String
+  action     String
+  entityType String
+  entityId   String
+  orderId    String?
+  customerId String?
+  summary    String   @default("")
+  before     Json?
+  after      Json?
+  meta       Json?
+  ip         String?
+  userAgent  String?
+
+  @@index([at])
+  @@index([orderId, at])
+  @@index([actorId, at])
+  @@index([entityType, entityId, at])
+  @@index([action, at])
+}
+
+// ----------------------------------------------------------------------------
+// Pylon webhook events
+// ----------------------------------------------------------------------------
+
+model PylonEvent {
+  id            String           @id
+  pylonEventId  String           @unique
+  name          String
+  payload       Json
+  receivedAt    DateTime         @default(now())
+  status        PylonEventStatus @default(PENDING)
+  attempts      Int              @default(0)
+  nextAttemptAt DateTime         @default(now())
+  lastError     String?
+  processedAt   DateTime?
+  orderId       String?
+  resultNote    String           @default("")
+
+  @@index([status, nextAttemptAt])
+  @@index([receivedAt])
+}
+
+// ----------------------------------------------------------------------------
+// Settings and counters
+// ----------------------------------------------------------------------------
+
+model Setting {
+  key         String   @id
+  value       Json
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
+
+model Counter {
+  key   String @id
+  value Int
+}

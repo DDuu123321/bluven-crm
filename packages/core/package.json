@@ -1,0 +1,26 @@
+{
+  "name": "@bluven/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./domain": "./src/domain/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run",
+    "seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@bluven/db": "workspace:*",
+    "csv-parse": "^7.0.3",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3",
+    "vitest": "^5.1.0"
+  }
+}

@@ -1,0 +1,34 @@
+node_modules/
+.pnpm-store/
+
+# builds
+.next/
+out/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# generated Prisma client
+packages/db/src/generated/
+
+# env
+.env
+.env.*
+!.env.example
+
+# local data
+/data/
+/storage/
+/backups/
+
+# tests
+coverage/
+e2e/test-results/
+e2e/playwright-report/
+e2e/.auth/
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+.pnpm-debug.log*
