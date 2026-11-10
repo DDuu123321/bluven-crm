@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Form from 'next/form';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, getSettings, isManager, localDateString, parseDateOnly } from '@bluven/core';
+import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, getSettings, isManager, localDateString, parseDateOnly, type OrderStage } from '@bluven/core';
 import { Card, CardBody, CardHeader, EmptyState, Input, PageHeader, Stat, Table, Td, buttonClass, cx } from '@/components/ui';
 import { one, withParams } from '@/lib/params';
 import { requireSession } from '@/lib/session';
@@ -19,6 +19,9 @@ function Bar({ value, max, tone = 'bg-brand-500' }: { value: number; max: number
 }
 
 const pct = (part: number, whole: number) => (whole > 0 ? `${Math.round((part / whole) * 100)}%` : '—');
+
+/** Shorter headings for the per-person table, which has one column per stage. */
+const STAGE_COLUMN: Partial<Record<OrderStage, string>> = { DEPOSIT_PENDING: 'Dep. pending', DEPOSIT_CONFIRMED: 'Dep. confirmed', PUSHED: 'With Ops', RETURNED: 'Returned' };
 
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { user, ctx } = await requireSession();
@@ -162,7 +165,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           {d.bySalesperson.length === 0 ? (
             <EmptyState title="No salespeople yet" />
           ) : (
-            <Table head={['Salesperson', 'In progress', ...activeStages.map((s) => STAGE_LABEL[s]), 'Signed in period', 'Avg first response', 'Idle']}>
+            <Table className="[&_td]:px-3 [&_th]:px-3" head={['Salesperson', 'Open', ...activeStages.map((s) => STAGE_COLUMN[s] ?? STAGE_LABEL[s]), 'Signed in period', 'First response', 'Idle']}>
               {d.bySalesperson.map((p) => (
                 <tr key={p.userId}>
                   <Td>

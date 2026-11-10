@@ -28,7 +28,13 @@ async function main(): Promise<void> {
 
   const db = createDb(E2E.databaseUrl);
   const tables = await db.$queryRaw<{ tablename: string }[]>`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`;
-  await db.$executeRawUnsafe(`TRUNCATE TABLE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`);
+  // The audit log refuses to be emptied; a test database is the one place where that is switched off.
+  await db.$executeRawUnsafe('ALTER TABLE "AuditLog" DISABLE TRIGGER audit_log_no_truncate');
+  try {
+    await db.$executeRawUnsafe(`TRUNCATE TABLE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`);
+  } finally {
+    await db.$executeRawUnsafe('ALTER TABLE "AuditLog" ENABLE TRIGGER audit_log_no_truncate');
+  }
   await ensureReferenceData(db);
 
   const passwordHash = await hashPassword(E2E.password);

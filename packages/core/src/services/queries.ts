@@ -16,6 +16,7 @@ import {
 import { ForbiddenError, NotFoundError } from '../errors';
 import { requireOrderView } from './orders';
 import { getHandoffChecklist, type Checklist } from './handoff';
+import { CURRENT_DOCUMENT } from './reference';
 import { getSettings } from './settings';
 
 function user(ctx: Ctx): UserActor {
@@ -289,6 +290,11 @@ export type DocumentRow = Prisma.DocumentGetPayload<{ include: typeof documentIn
 export interface OrderDocuments {
   types: { id: string; key: string; label: string; description: string; scope: string; isRequiredForHandoff: boolean; isSystem: boolean }[];
   documents: DocumentRow[];
+  /**
+   * Files of a removed contract or of a rejected or withdrawn deposit submission: kept on record,
+   * no longer current. Operations only gets what is current.
+   */
+  superseded: DocumentRow[];
 }
 
 /** Current documents of an order (latest versions, not deleted), limited to what the view allows. */
@@ -300,12 +306,21 @@ export async function getOrderDocuments(ctx: Ctx, orderId: string): Promise<Orde
     orderBy: { sortOrder: 'asc' },
     select: { id: true, key: true, label: true, description: true, scope: true, isRequiredForHandoff: true, isSystem: true },
   });
-  const documents = await ctx.db.document.findMany({
-    where: { orderId, deletedAt: null, replacedBy: { is: null }, type: typeFilter },
-    include: documentInclude,
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
-  return { types, documents };
+  const [documents, superseded] = await Promise.all([
+    ctx.db.document.findMany({
+      where: { orderId, ...CURRENT_DOCUMENT, type: typeFilter },
+      include: documentInclude,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    }),
+    view === 'OPS'
+      ? Promise.resolve([])
+      : ctx.db.document.findMany({
+          where: { orderId, deletedAt: null, supersededAt: { not: null }, type: typeFilter },
+          include: documentInclude,
+          orderBy: [{ supersededAt: 'desc' }, { id: 'desc' }],
+        }),
+  ]);
+  return { types, documents, superseded };
 }
 
 export async function getOrderDeal(ctx: Ctx, orderId: string) {
@@ -628,24 +643,55 @@ function auditWhere(filters: AuditFilters, orderIds: string[] | null): Prisma.Au
   return { AND: and };
 }
 
-/** Searches the audit log. Managers and admins only. */
-export async function searchAudit(ctx: Ctx, filters: AuditFilters) {
+async function auditScope(ctx: Ctx, filters: AuditFilters): Promise<Prisma.AuditLogWhereInput> {
   if (!can(user(ctx), 'audit.view')) throw new ForbiddenError();
   let orderIds: string[] | null = null;
   if (filters.orderNo?.trim()) {
     const orders = await ctx.db.order.findMany({ where: { orderNo: { contains: filters.orderNo.trim(), mode: 'insensitive' } }, select: { id: true }, take: 50 });
     orderIds = orders.map((o) => o.id);
   }
-  const where = auditWhere(filters, orderIds);
-  const pageSize = Math.min(Math.max(filters.pageSize ?? 50, 1), 5000);
+  return auditWhere(filters, orderIds);
+}
+
+async function withOrderNos<T extends { orderId: string | null }>(db: Ctx['db'], rows: T[]): Promise<(T & { orderNo: string | null })[]> {
+  const ids = [...new Set(rows.map((r) => r.orderId).filter((x): x is string => !!x))];
+  const orderNos = new Map((await db.order.findMany({ where: { id: { in: ids } }, select: { id: true, orderNo: true } })).map((o) => [o.id, o.orderNo]));
+  return rows.map((r) => ({ ...r, orderNo: r.orderId ? (orderNos.get(r.orderId) ?? null) : null }));
+}
+
+/** Searches the audit log. Managers and admins only. */
+export async function searchAudit(ctx: Ctx, filters: AuditFilters) {
+  const where = await auditScope(ctx, filters);
+  const pageSize = Math.min(Math.max(filters.pageSize ?? 50, 1), 500);
   const total = await ctx.db.auditLog.count({ where });
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const current = Math.min(Math.max(filters.page ?? 1, 1), pageCount);
   const rows = await ctx.db.auditLog.findMany({ where, orderBy: [{ at: 'desc' }, { id: 'desc' }], skip: (current - 1) * pageSize, take: pageSize });
-  const orderNos = new Map(
-    (await ctx.db.order.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.orderId).filter((x): x is string => !!x))] } }, select: { id: true, orderNo: true } })).map((o) => [o.id, o.orderNo]),
-  );
-  return { rows: rows.map((r) => ({ ...r, orderNo: r.orderId ? (orderNos.get(r.orderId) ?? null) : null })), total, page: current, pageSize, pageCount };
+  return { rows: await withOrderNos(ctx.db, rows), total, page: current, pageSize, pageCount };
+}
+
+/** How many entries match, for telling the reader what an export will contain. */
+export async function countAudit(ctx: Ctx, filters: AuditFilters): Promise<number> {
+  return ctx.db.auditLog.count({ where: await auditScope(ctx, filters) });
+}
+
+/**
+ * Walks the matching entries newest first, one page at a time, for exports. Only one page is
+ * ever held in memory, and entries written while the walk is under way are not picked up, so no
+ * row appears twice.
+ */
+export async function* iterateAudit(ctx: Ctx, filters: AuditFilters, pageSize = 1000) {
+  const base = await auditScope(ctx, filters);
+  let cursor: { at: Date; id: string } | null = null;
+  for (;;) {
+    const where: Prisma.AuditLogWhereInput = cursor ? { AND: [base, { OR: [{ at: { lt: cursor.at } }, { at: cursor.at, id: { lt: cursor.id } }] }] } : base;
+    const rows = await ctx.db.auditLog.findMany({ where, orderBy: [{ at: 'desc' }, { id: 'desc' }], take: pageSize });
+    if (rows.length === 0) return;
+    yield await withOrderNos(ctx.db, rows);
+    if (rows.length < pageSize) return;
+    const last = rows[rows.length - 1]!;
+    cursor = { at: last.at, id: last.id };
+  }
 }
 
 /** Audit entries of one order, for the order's History tab. Managers and admins only. */

@@ -1,12 +1,13 @@
 'use server';
 
 import { ValidationError, importLeadCsv } from '@bluven/core';
-import { runAction } from '@/lib/action';
+import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { bool, files, str } from '@/lib/form';
 
 /** Previews or runs a CSV import. The file travels with both submits, so nothing is kept on the server in between. */
 export async function importCsvAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     const file = files(formData, 'file')[0];
     if (!file) throw new ValidationError('Choose a CSV file.', { file: 'Choose a CSV file.' });

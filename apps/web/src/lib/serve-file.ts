@@ -33,6 +33,7 @@ export async function serveFile(request: Request, opts: ServeOptions): Promise<R
   // Images never need scripts or network access; lock them down completely.
   if (opts.contentType.startsWith('image/')) headers.set('Content-Security-Policy', "default-src 'none'; sandbox");
 
+  const head = request.method === 'HEAD';
   const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('range') ?? '');
   if (range && (range[1] || range[2]) && size > 0) {
     let start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
@@ -45,9 +46,11 @@ export async function serveFile(request: Request, opts: ServeOptions): Promise<R
     start = Math.max(0, start);
     headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
     headers.set('Content-Length', String(end - start + 1));
+    // A HEAD response has no body. Opening the file for it would leave the handle open for good.
+    if (head) return new Response(null, { status: 206, headers });
     return new Response(Readable.toWeb(storage.createReadStream(opts.storageKey, { start, end })) as ReadableStream, { status: 206, headers });
   }
   headers.set('Content-Length', String(size));
-  if (request.method === 'HEAD') return new Response(null, { headers });
+  if (head) return new Response(null, { headers });
   return new Response(Readable.toWeb(storage.createReadStream(opts.storageKey)) as ReadableStream, { headers });
 }

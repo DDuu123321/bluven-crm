@@ -3,7 +3,7 @@
 import { cookies } from 'next/headers';
 import { changeOwnPassword, login, logout } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { toActionError } from '@/lib/action';
+import { INVALID_REQUEST, toActionError, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { allow, retryAfter } from '@/lib/rate-limit';
 import { SESSION_COOKIE, ctxFor, getCurrentUser, requestMeta, sessionCookieOptions } from '@/lib/session';
@@ -13,6 +13,7 @@ const WINDOW_MS = 10 * 60_000;
 const COOKIE_LIFETIME_MS = 90 * 24 * 60 * 60_000;
 
 export async function loginAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   const meta = await requestMeta();
   const key = `login:${meta.ip ?? 'unknown'}`;
   if (!allow(key, 20, WINDOW_MS)) {
@@ -38,6 +39,7 @@ export async function logoutAction(): Promise<ActionResult> {
 }
 
 export async function changePasswordAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
   const user = await getCurrentUser();
   if (!user) return { ok: false, error: 'Your session has ended. Please sign in again.', data: { signedOut: true } };
   const next = String(formData.get('next') ?? '');

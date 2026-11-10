@@ -8,6 +8,9 @@ export const DOC_TYPE = {
   quote: 'quote',
 } as const;
 
+/** A document that counts today: not deleted, not replaced by a newer version, not superseded. */
+export const CURRENT_DOCUMENT = { deletedAt: null, supersededAt: null, replacedBy: { is: null } } as const;
+
 /** Keys of the built-in lead sources. */
 export const SOURCE_KEY = {
   manual: 'manual',

@@ -2,16 +2,16 @@
 import type { Readable } from 'node:stream';
 import sharp from 'sharp';
 import type { DocSource, Document, DocumentType, Tx } from '@bluven/db';
-import { inTx, nowOf, type Ctx } from '../context';
+import { actorId, inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
 import { FINANCE_VISIBLE_DOC_TYPES, zonedTimeToUtc } from '../domain';
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
+import { ConflictError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { INLINE_SAFE_TYPES, THUMBNAIL_TYPES, cleanFileName, detectContentType, getStorage, safeExtension, type TempFile } from '../storage';
 import { addActivity } from './activity';
 import { audit } from './audit';
-import { editBlockReason, lockOrderForEdit, requireOrderView, touchStaffActivity, type OrderState } from './orders';
-import { DOC_TYPE } from './reference';
+import { lockOrderForEdit, requireEditableOrder, requireOrderView, touchStaffActivity, type OrderState } from './orders';
+import { CURRENT_DOCUMENT, DOC_TYPE } from './reference';
 
 /** A file received from the client and parked in temporary storage, not yet attached to anything. */
 export interface StagedFile extends TempFile {
@@ -49,12 +49,28 @@ export interface AttachOptions {
 }
 
 /**
+ * Marks the current files of one system type on an order as superseded. Called when the contract
+ * they were archived with is removed, or the deposit submission they proved is rejected or
+ * withdrawn. An order has at most one live contract and one open deposit, so every current file
+ * of that type belongs to the record being closed. The files stay on record and can be opened.
+ */
+export async function supersedeDocuments(tx: Tx, ctx: Ctx, orderId: string, typeKey: string): Promise<void> {
+  await tx.document.updateMany({
+    where: { orderId, type: { key: typeKey }, deletedAt: null, supersededAt: null },
+    data: { supersededAt: nowOf(ctx) },
+  });
+}
+
+/**
  * Creates the Document row for a staged file and moves the file to its final location.
  * Must run inside a transaction that already holds the order lock.
  */
 export async function attachStaged(tx: Tx, ctx: Ctx, order: OrderState, file: StagedFile, opts: AttachOptions): Promise<Document> {
+  // Guards against uploading the same file twice by accident. A file that only survives as the
+  // record of a removed contract or of a rejected or withdrawn deposit does not count: the same
+  // signed PDF or the same transfer screenshot is often exactly what gets submitted again.
   const duplicate = await tx.document.findFirst({
-    where: { orderId: order.id, typeId: opts.type.id, sha256: file.sha256, deletedAt: null, replacedBy: { is: null } },
+    where: { orderId: order.id, typeId: opts.type.id, sha256: file.sha256, ...CURRENT_DOCUMENT },
     select: { fileName: true },
   });
   if (duplicate) throw new ConflictError(`This file has already been uploaded here as “${duplicate.fileName}”.`);
@@ -150,15 +166,11 @@ export interface UploadDocumentInput {
  */
 export async function uploadDocument(ctx: Ctx, input: UploadDocumentInput): Promise<{ id: string }> {
   // Check access and state before reading the body, so a refused upload costs no bandwidth.
-  const { order: preview, view } = await requireOrderView(ctx.db, ctx, input.orderId);
-  if (view !== 'FULL') throw new ForbiddenError('Only the salesperson for this order or a manager can upload files.');
-  const blocked = editBlockReason(preview);
-  if (blocked) throw new ConflictError(blocked);
+  await requireEditableOrder(ctx, input.orderId);
   const type = await ctx.db.documentType.findUnique({ where: { id: input.typeId } });
   if (!type || !type.isActive) throw new ValidationError('Choose a document type.');
-  if (type.key === DOC_TYPE.signedContract || type.key === DOC_TYPE.depositProof) {
-    throw new ValidationError(`${type.label} files are added from the ${type.key === DOC_TYPE.signedContract ? 'Contract' : 'Deposit'} section.`);
-  }
+  // Quote, contract and deposit files come in through their own flows, which create the matching record.
+  if (type.isSystem) throw new ValidationError(`${type.label} files are added from the “Quote, contract & deposit” section.`);
 
   const staged = await stageUpload(input.body, input.fileName);
   let doc: Document;
@@ -167,9 +179,7 @@ export async function uploadDocument(ctx: Ctx, input: UploadDocumentInput): Prom
       const order = await lockOrderForEdit(tx, ctx, input.orderId);
       let replaces: Document | null = null;
       if (input.replacesId) {
-        replaces = await tx.document.findFirst({
-          where: { id: input.replacesId, orderId: order.id, typeId: type.id, deletedAt: null, replacedBy: { is: null } },
-        });
+        replaces = await tx.document.findFirst({ where: { id: input.replacesId, orderId: order.id, typeId: type.id, ...CURRENT_DOCUMENT } });
         if (!replaces) throw new ValidationError('The file to replace no longer exists.');
       }
       const created = await attachStaged(tx, ctx, order, staged, { type, note: input.note, replaces });
@@ -184,21 +194,23 @@ export async function uploadDocument(ctx: Ctx, input: UploadDocumentInput): Prom
   return { id: doc.id };
 }
 
-/** Soft-deletes a document. Files that back a contract, a deposit or a sent quote must be removed there. */
+/**
+ * Soft-deletes a document. Contract and deposit files are never deleted here, whichever page of
+ * the submission they are: they are the record of what was signed and what was paid, and leave
+ * the current list only when the contract is removed or the deposit is withdrawn or rejected.
+ */
 export async function deleteDocument(ctx: Ctx, input: { documentId: string }): Promise<void> {
   const found = await ctx.db.document.findUnique({ where: { id: input.documentId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Document not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Document');
     const doc = await tx.document.findUnique({
       where: { id: input.documentId },
-      include: { type: true, contract: true, deposit: true, quote: true },
+      include: { type: true, quote: true },
     });
     if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
-    if (doc.contract && !doc.contract.voidedAt) throw new ConflictError('This file is the archived contract. Remove the contract instead.');
-    if (doc.deposit && (doc.deposit.status === 'PENDING' || doc.deposit.status === 'CONFIRMED')) {
-      throw new ConflictError('This file is the proof for a deposit. Withdraw the deposit first.');
-    }
+    if (doc.type.key === DOC_TYPE.signedContract) throw new ConflictError('Contract files are kept as a record. To take a contract off the order, remove the contract.');
+    if (doc.type.key === DOC_TYPE.depositProof) throw new ConflictError('Deposit files are kept as a record. To take a submission back, withdraw the deposit.');
     if (doc.quote?.sentAt) throw new ConflictError('This file belongs to a quote that was sent to the customer.');
     await tx.document.update({
       where: { id: doc.id },
@@ -229,13 +241,15 @@ export async function changeDocumentType(ctx: Ctx, input: { documentId: string; 
   const found = await ctx.db.document.findUnique({ where: { id: input.documentId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Document not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Document');
     const doc = await tx.document.findUnique({ where: { id: input.documentId }, include: { type: true } });
     if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
     const type = await tx.documentType.findUnique({ where: { id: input.typeId } });
     if (!type || !type.isActive) throw new ValidationError('Choose a document type.');
     if (doc.type.isSystem || type.isSystem) throw new ConflictError('Contract, deposit and quote files cannot be moved between types.');
     if (type.id === doc.typeId) return;
+    const twin = await tx.document.findFirst({ where: { orderId: order.id, typeId: type.id, sha256: doc.sha256, id: { not: doc.id }, ...CURRENT_DOCUMENT }, select: { fileName: true } });
+    if (twin) throw new ConflictError(`${type.label} already holds this file as “${twin.fileName}”.`);
     await tx.document.update({
       where: { id: doc.id },
       data: { typeId: type.id, propertyId: type.scope === 'PROPERTY' ? order.propertyId : null },
@@ -271,14 +285,13 @@ export interface ReusableDocument {
 export async function listReusableDocuments(ctx: Ctx, orderId: string): Promise<ReusableDocument[]> {
   const { order, view } = await requireOrderView(ctx.db, ctx, orderId);
   if (view !== 'FULL') return [];
-  const own = await ctx.db.document.findMany({ where: { orderId: order.id, deletedAt: null }, select: { sha256: true, typeId: true } });
+  const own = await ctx.db.document.findMany({ where: { orderId: order.id, ...CURRENT_DOCUMENT }, select: { sha256: true, typeId: true } });
   const have = new Set(own.map((d) => `${d.typeId}:${d.sha256}`));
   const docs = await ctx.db.document.findMany({
     where: {
       propertyId: order.propertyId,
       orderId: { not: order.id },
-      deletedAt: null,
-      replacedBy: { is: null },
+      ...CURRENT_DOCUMENT,
       type: { scope: 'PROPERTY', isActive: true },
     },
     include: { type: true, order: { select: { orderNo: true } } },
@@ -316,14 +329,14 @@ export async function reuseDocuments(ctx: Ctx, input: { orderId: string; documen
         id: { in: input.documentIds },
         propertyId: order.propertyId,
         orderId: { not: order.id },
-        deletedAt: null,
-        type: { scope: 'PROPERTY' },
+        ...CURRENT_DOCUMENT,
+        type: { scope: 'PROPERTY', isActive: true },
       },
       include: { type: true, order: { select: { orderNo: true } } },
     });
     let reused = 0;
     for (const s of sources) {
-      const exists = await tx.document.findFirst({ where: { orderId: order.id, typeId: s.typeId, sha256: s.sha256, deletedAt: null }, select: { id: true } });
+      const exists = await tx.document.findFirst({ where: { orderId: order.id, typeId: s.typeId, sha256: s.sha256, ...CURRENT_DOCUMENT }, select: { id: true } });
       if (exists) continue;
       const id = newId('doc');
       await tx.document.create({
@@ -381,26 +394,40 @@ export interface OpenedDocument {
   inlineSafe: boolean;
 }
 
+const ACCESS_AUDIT_WINDOW_MS = 5 * 60_000;
+
 /**
  * Authorises access to a document's bytes and records the access. Finance sees only
  * deposit-related files; operations sees an order's files once it has been pushed.
+ * Purposes "thumbnail" (a small preview) and "head" (no bytes are sent) are not recorded.
  */
-export async function openDocument(ctx: Ctx, input: { documentId: string; purpose: 'download' | 'view' | 'thumbnail' }): Promise<OpenedDocument> {
+export async function openDocument(ctx: Ctx, input: { documentId: string; purpose: 'download' | 'view' | 'thumbnail' | 'head' }): Promise<OpenedDocument> {
   const doc = await ctx.db.document.findUnique({ where: { id: input.documentId }, include: { type: { select: { key: true, label: true } } } });
   if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
   const { order, view } = await requireOrderView(ctx.db, ctx, doc.orderId).catch(() => {
     throw new NotFoundError('Document not found.');
   });
   if (view === 'FINANCE' && !FINANCE_VISIBLE_DOC_TYPES.includes(doc.type.key)) throw new NotFoundError('Document not found.');
-  if (input.purpose !== 'thumbnail') {
-    await audit(ctx.db, ctx, {
-      action: input.purpose === 'download' ? 'document.download' : 'document.view',
-      entityType: 'Document',
-      entityId: doc.id,
-      orderId: order.id,
-      customerId: order.customerId,
-      summary: `${order.orderNo}: ${input.purpose === 'download' ? 'downloaded' : 'viewed'} ${doc.type.label} “${doc.fileName}”`,
+  if (input.purpose === 'download' || input.purpose === 'view') {
+    // A browser fetches one file several times while showing it (byte ranges, re-renders), so the
+    // same person, file and kind of access is recorded once every few minutes. The decision is
+    // made here from the log itself, never from anything the request says about itself.
+    const action = input.purpose === 'download' ? 'document.download' : 'document.view';
+    const since = new Date(nowOf(ctx).getTime() - ACCESS_AUDIT_WINDOW_MS);
+    const recent = await ctx.db.auditLog.findFirst({
+      where: { entityType: 'Document', entityId: doc.id, action, actorId: actorId(ctx), at: { gte: since } },
+      select: { id: true },
     });
+    if (!recent) {
+      await audit(ctx.db, ctx, {
+        action,
+        entityType: 'Document',
+        entityId: doc.id,
+        orderId: order.id,
+        customerId: order.customerId,
+        summary: `${order.orderNo}: ${input.purpose === 'download' ? 'downloaded' : 'viewed'} ${doc.type.label} “${doc.fileName}”`,
+      });
+    }
   }
   return {
     id: doc.id,

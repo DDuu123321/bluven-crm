@@ -23,7 +23,7 @@ import {
   voidContract,
   withdrawDeposit,
 } from '@bluven/core';
-import { runAction } from '@/lib/action';
+import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { dateOnly, dateTime, kilo, list, money, str } from '@/lib/form';
 
@@ -40,6 +40,7 @@ function chosenTime(formData: FormData, name: string): Date | null {
 // ---- timeline
 
 export async function logActivityAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await logActivity(ctx, {
       orderId,
@@ -55,6 +56,7 @@ export async function logActivityAction(orderId: string, formData: FormData): Pr
 // ---- customer and property
 
 export async function updateCustomerAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateCustomer(ctx, {
       orderId,
@@ -85,12 +87,14 @@ function propertyFields(formData: FormData) {
 }
 
 export async function updatePropertyAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateProperty(ctx, { orderId, ...propertyFields(formData) });
   });
 }
 
 export async function movePropertyAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await moveOrderToNewProperty(ctx, { orderId, ...propertyFields(formData) });
   });
@@ -99,6 +103,7 @@ export async function movePropertyAction(orderId: string, formData: FormData): P
 // ---- ownership and side states
 
 export async function assignOneAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     const ownerId = str(formData, 'ownerId');
     if (ownerId === '__pool__') await returnOrdersToPool(ctx, { orderIds: [orderId], note: str(formData, 'note') });
@@ -107,36 +112,42 @@ export async function assignOneAction(orderId: string, formData: FormData): Prom
 }
 
 export async function markLostAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await markLost(ctx, { orderId, reasonId: str(formData, 'reasonId'), note: str(formData, 'note') });
   });
 }
 
 export async function restoreLostAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await restoreLost(ctx, { orderId });
   });
 }
 
 export async function holdAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await holdOrder(ctx, { orderId, until: dateOnly(formData, 'until'), note: str(formData, 'note') });
   });
 }
 
 export async function resumeAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await resumeOrder(ctx, { orderId });
   });
 }
 
 export async function cancelOrderAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await cancelOrder(ctx, { orderId, note: str(formData, 'note'), refundStatus: str(formData, 'refundStatus') });
   });
 }
 
 export async function dismissDuplicateAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await dismissDuplicateFlag(ctx, { orderId });
   });
@@ -145,18 +156,21 @@ export async function dismissDuplicateAction(orderId: string): Promise<ActionRes
 // ---- documents
 
 export async function deleteDocumentAction(documentId: string): Promise<ActionResult> {
+  if (!validArgs(documentId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await deleteDocument(ctx, { documentId });
   });
 }
 
 export async function changeDocumentTypeAction(documentId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(documentId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await changeDocumentType(ctx, { documentId, typeId: str(formData, 'typeId') });
   });
 }
 
 export async function reuseDocumentsAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     const { reused } = await reuseDocuments(ctx, { orderId, documentIds: list(formData, 'documentId') });
     return { message: `${reused} file${reused === 1 ? '' : 's'} added to this order.` };
@@ -166,6 +180,7 @@ export async function reuseDocumentsAction(orderId: string, formData: FormData):
 // ---- quotes, contract, deposit
 
 export async function updateQuoteAction(quoteId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(quoteId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await updateQuote(ctx, {
       quoteId,
@@ -180,18 +195,21 @@ export async function updateQuoteAction(quoteId: string, formData: FormData): Pr
 }
 
 export async function deleteQuoteAction(quoteId: string): Promise<ActionResult> {
+  if (!validArgs(quoteId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await deleteQuote(ctx, { quoteId });
   });
 }
 
 export async function voidContractAction(contractId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(contractId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await voidContract(ctx, { contractId, reason: str(formData, 'reason') });
   });
 }
 
 export async function withdrawDepositAction(depositId: string): Promise<ActionResult> {
+  if (!validArgs(depositId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await withdrawDeposit(ctx, { depositId });
   });
@@ -201,6 +219,7 @@ export async function withdrawDepositAction(depositId: string): Promise<ActionRe
 
 /** One form, two buttons: save the notes for operations, or push the order with them. */
 export async function handoffAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     const notes = str(formData, 'notes');
     if (str(formData, 'intent') === 'save') {

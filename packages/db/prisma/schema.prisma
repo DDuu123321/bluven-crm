@@ -284,6 +284,10 @@ model LeadSource {
   /// During rotation the previous token keeps working until prevTokenExpiresAt.
   prevTokenHash      String?        @unique
   prevTokenExpiresAt DateTime?
+  /// Our own systems (the Bluven website). Only these may preview with dryRun, load history
+  /// with backfill, learn which order a repeat enquiry joined, and add contact details to an
+  /// existing customer automatically.
+  firstParty         Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
@@ -539,6 +543,9 @@ model Document {
   createdAt    DateTime     @default(now())
   deletedAt    DateTime?
   deletedById  String?
+  /// Set when the contract this file was archived with is removed, or the deposit submission it
+  /// proved is rejected or withdrawn. The file stays on record but is no longer a current document.
+  supersededAt DateTime?
 
   quote    Quote?
   contract Contract?
@@ -600,20 +607,22 @@ model Task {
 }
 
 model Notification {
-  id            String      @id
-  userId        String
-  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type          String
-  title         String
-  body          String      @default("")
-  href          String      @default("")
-  orderId       String?
-  order         Order?      @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  readAt        DateTime?
-  emailStatus   EmailStatus @default(NONE)
-  emailAttempts Int         @default(0)
-  emailError    String?
-  createdAt     DateTime    @default(now())
+  id                 String      @id
+  userId             String
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type               String
+  title              String
+  body               String      @default("")
+  href               String      @default("")
+  orderId            String?
+  order              Order?      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  readAt             DateTime?
+  emailStatus        EmailStatus @default(NONE)
+  emailAttempts      Int         @default(0)
+  emailError         String?
+  /// When the last attempt to send the email was made; the next one waits longer each time.
+  emailLastAttemptAt DateTime?
+  createdAt          DateTime    @default(now())
 
   @@index([userId, readAt, createdAt])
   @@index([emailStatus, createdAt])

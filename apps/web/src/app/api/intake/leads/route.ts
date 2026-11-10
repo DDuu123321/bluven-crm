@@ -1,6 +1,6 @@
 // Lead intake for the Bluven website and other sources.
 // Contract: docs/bluven-lead-forwarding-spec.md
-import { authenticateIntakeToken, ingestLeads, systemCtx } from '@bluven/core';
+import { authenticateIntakeToken, ingestLeads, readTextBody, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { allow, retryAfter } from '@/lib/rate-limit';
 
@@ -11,27 +11,6 @@ const RATE_WINDOW_MS = 60_000;
 
 function reply(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
-}
-
-/** Reads the body while enforcing the size limit, whether or not Content-Length was sent. */
-async function readBody(request: Request): Promise<string | null> {
-  const declared = Number(request.headers.get('content-length') ?? '0');
-  if (declared > MAX_BODY_BYTES) return null;
-  if (!request.body) return '';
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -46,7 +25,7 @@ export async function POST(request: Request): Promise<Response> {
     return reply({ error: `Rate limit exceeded: at most ${RATE_LIMIT} requests per minute.` }, 429, { 'Retry-After': String(retryAfter(key, RATE_WINDOW_MS)) });
   }
 
-  const text = await readBody(request);
+  const text = await readTextBody(request, MAX_BODY_BYTES);
   if (text === null) return reply({ error: 'Request body is larger than 100 KB. Send fewer leads per request.' }, 413);
 
   let body: unknown;

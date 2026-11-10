@@ -1,6 +1,6 @@
 // Receives events from Pylon. The handler only authenticates and stores the event; the worker
 // processes it, so Pylon always gets its answer well inside the 10 seconds it allows.
-import { getConfig } from '@bluven/core';
+import { getConfig, readTextBody } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { recordPylonEvent, verifyPylonSignature } from '@bluven/integrations';
 
@@ -14,10 +14,11 @@ export async function POST(request: Request): Promise<Response> {
   const secret = getConfig().pylon.webhookSecret;
   if (!secret) return reply({ error: 'The Pylon webhook is not configured on this server.' }, 503);
 
-  if (Number(request.headers.get('content-length') ?? '0') > MAX_BODY_BYTES) return reply({ error: 'Body too large.' }, 413);
   // The signature covers the body byte for byte, so it is read as text before any parsing.
-  const rawBody = await request.text();
-  if (Buffer.byteLength(rawBody) > MAX_BODY_BYTES) return reply({ error: 'Body too large.' }, 413);
+  // Nobody is authenticated yet at this point, so the read is capped: an oversized or endless
+  // body is dropped instead of being collected in memory.
+  const rawBody = await readTextBody(request, MAX_BODY_BYTES);
+  if (rawBody === null) return reply({ error: 'Body too large.' }, 413);
 
   const verdict = verifyPylonSignature({
     secret,

@@ -8,9 +8,11 @@ import { ConflictError, FieldErrors, NotFoundError, ValidationError } from '../e
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
-import { attachStaged, cleanupStaged, finishImage, type StagedFile } from './documents';
+import { attachStaged, cleanupStaged, finishImage, supersedeDocuments, type StagedFile } from './documents';
 import { lockOrderForEdit, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { markQuoteSentInTx } from './quotes';
 import { DOC_TYPE } from './reference';
+import { completeSystemTasks } from './timeline';
 
 export interface ArchiveContractInput {
   orderId: string;
@@ -40,6 +42,15 @@ export async function archiveContractInTx(tx: Tx, ctx: Ctx, order: OrderState, i
       where: { id: live.id },
       data: { voidedAt: now, voidedById: ctx.actor.kind === 'user' ? ctx.actor.id : null, voidReason: 'Replaced by a new contract' },
     });
+    // The old files stay on record but stop being the current contract, so the same PDF can come back.
+    await supersedeDocuments(tx, ctx, order.id, DOC_TYPE.signedContract);
+  }
+
+  // The customer cannot have signed a version nobody sent. If the sending was never recorded,
+  // record it now: this freezes the version (a later change in Pylon becomes a new version
+  // instead of rewriting what was signed) and keeps "quoted" ahead of "signed" in the figures.
+  if (!quote.sentAt) {
+    await markQuoteSentInTx(tx, ctx, order, quote.id, { sentAt: input.signedOn, via: input.source === 'PYLON' ? 'PYLON' : 'MANUAL', inferredFromContract: true });
   }
 
   const type = await tx.documentType.findUniqueOrThrow({ where: { key: DOC_TYPE.signedContract } });
@@ -63,6 +74,8 @@ export async function archiveContractInTx(tx: Tx, ctx: Ctx, order: OrderState, i
   await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true, id: { not: quote.id } }, data: { isAccepted: false } });
   await tx.quote.update({ where: { id: quote.id }, data: { isAccepted: true } });
   await tx.order.update({ where: { id: order.id }, data: { signedAt: input.signedOn! } });
+  // "Pylon shows this project as accepted: archive the contract" is now done.
+  await completeSystemTasks(tx, ctx, order.id, ['PYLON_ACCEPTED']);
 
   const summary = `Signed contract ${live ? 'replaced' : 'archived'} (signed ${formatDateOnly(input.signedOn)}, quote v${quote.version})`;
   await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'CONTRACT', summary, payload: { contractId: id, quoteId: quote.id } });
@@ -109,7 +122,7 @@ export async function voidContract(ctx: Ctx, input: { contractId: string; reason
   const found = await ctx.db.contract.findUnique({ where: { id: input.contractId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Contract not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
+    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Contract');
     const contract = await tx.contract.findUniqueOrThrow({ where: { id: input.contractId } });
     if (contract.voidedAt) return;
     const now = nowOf(ctx);
@@ -117,6 +130,7 @@ export async function voidContract(ctx: Ctx, input: { contractId: string; reason
       where: { id: contract.id },
       data: { voidedAt: now, voidedById: ctx.actor.kind === 'user' ? ctx.actor.id : null, voidReason: reason },
     });
+    await supersedeDocuments(tx, ctx, order.id, DOC_TYPE.signedContract);
     await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true }, data: { isAccepted: false } });
     await tx.order.update({ where: { id: order.id }, data: { signedAt: null } });
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'CONTRACT', summary: 'Signed contract removed', body: reason });

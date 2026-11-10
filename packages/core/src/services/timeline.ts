@@ -1,4 +1,5 @@
 // Manual timeline entries (notes, calls, meetings, messages) and follow-up tasks.
+import type { Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { isManager, isOrderStaff } from '../domain';
 import { FieldErrors, ForbiddenError, NotFoundError, ValidationError } from '../errors';
@@ -120,7 +121,8 @@ export async function createTask(ctx: Ctx, input: CreateTaskInput): Promise<{ id
         createdAt: nowOf(ctx),
       },
     });
-    await touchStaffActivity(tx, ctx, order);
+    // Adding or moving a task does not restart the idle clock: only work on the order does
+    // (a call, a note, a file, a quote, a completed task). A lead that should wait is put on hold.
     await audit(tx, ctx, {
       action: 'task.create',
       entityType: 'Task',
@@ -131,6 +133,18 @@ export async function createTask(ctx: Ctx, input: CreateTaskInput): Promise<{ id
       after: { title, dueAt: input.dueAt, assigneeId: order.ownerId },
     });
     return { id };
+  });
+}
+
+/**
+ * Closes the open tasks the system raised for a problem that has just been dealt with, for
+ * example "deposit rejected: resubmit" once a new submission is in. Without this they would sit
+ * in the task list, overdue, long after the order has moved on.
+ */
+export async function completeSystemTasks(tx: Tx, ctx: Ctx, orderId: string, kinds: string[]): Promise<void> {
+  await tx.task.updateMany({
+    where: { orderId, status: 'OPEN', kind: { in: kinds } },
+    data: { status: 'DONE', completedAt: nowOf(ctx), completedById: ctx.actor.kind === 'user' ? ctx.actor.id : null },
   });
 }
 
@@ -159,12 +173,14 @@ export async function setTaskStatus(ctx: Ctx, input: { taskId: string; status: '
         completedAt: input.status === 'DONE' ? now : null,
         completedById: input.status === 'DONE' && ctx.actor.kind === 'user' ? ctx.actor.id : null,
         remindedAt: input.status === 'OPEN' ? null : task.remindedAt,
+        // A reopened task belongs to whoever looks after the order today, not to whoever had it then.
+        ...(input.status === 'OPEN' ? { assigneeId: order.ownerId } : {}),
       },
     });
     if (input.status === 'DONE') {
       await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'TASK', summary: `Completed task: ${task.title}` });
+      await touchStaffActivity(tx, ctx, order);
     }
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'task.status',
       entityType: 'Task',
@@ -190,7 +206,6 @@ export async function updateTask(ctx: Ctx, input: { taskId: string; title: strin
       where: { id: task.id },
       data: { title: title.slice(0, 200), dueAt: input.dueAt!, notes: input.notes.trim().slice(0, 2000), remindedAt: dueChanged ? null : task.remindedAt },
     });
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'task.update',
       entityType: 'Task',

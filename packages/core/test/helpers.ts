@@ -23,7 +23,13 @@ export function testDb(): Db {
 export async function resetDb(): Promise<Db> {
   const d = testDb();
   const tables = await d.$queryRaw<{ tablename: string }[]>`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`;
-  await d.$executeRawUnsafe(`TRUNCATE TABLE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`);
+  // The audit log refuses to be emptied; a test database is the one place where that is switched off.
+  await d.$executeRawUnsafe('ALTER TABLE "AuditLog" DISABLE TRIGGER audit_log_no_truncate');
+  try {
+    await d.$executeRawUnsafe(`TRUNCATE TABLE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`);
+  } finally {
+    await d.$executeRawUnsafe('ALTER TABLE "AuditLog" ENABLE TRIGGER audit_log_no_truncate');
+  }
   await ensureReferenceData(d);
   setStorage(new LocalStorage(mkdtempSync(path.join(tmpdir(), 'bluven-test-'))));
   return d;
