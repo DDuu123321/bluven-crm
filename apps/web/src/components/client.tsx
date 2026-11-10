@@ -156,12 +156,12 @@ export function SubmitButton({
   );
 }
 
-/** A button that closes the enclosing dialog. */
+/** Closes the enclosing dialog and puts the form back to the saved values, so a later reopen starts clean. */
 export function CancelButton({ children = 'Cancel' }: { children?: ReactNode }) {
   const dialog = useContext(DialogContext);
   if (!dialog) return null;
   return (
-    <button type="button" className={buttonClass('ghost')} onClick={dialog.close}>
+    <button type="reset" className={buttonClass('ghost')} onClick={dialog.close}>
       {children}
     </button>
   );

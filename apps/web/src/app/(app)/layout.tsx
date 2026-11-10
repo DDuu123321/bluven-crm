@@ -18,6 +18,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       items: [
         ...(can(user, 'dashboard.view') ? [{ href: '/dashboard', label: 'Dashboard' }] : []),
         { href: '/orders', label: isManager(user) ? 'All orders' : 'My orders' },
+        ...(can(user, 'dashboard.view') ? [] : [{ href: '/dashboard', label: 'My numbers' }]),
         ...(can(user, 'orders.assign') ? [{ href: '/orders/unassigned', label: 'Unassigned leads', countKey: 'unassigned', urgent: true }] : []),
         { href: '/tasks', label: 'Tasks', countKey: 'tasks', urgent: true },
         ...(can(user, 'leads.import') ? [{ href: '/leads/import', label: 'Import leads' }] : []),

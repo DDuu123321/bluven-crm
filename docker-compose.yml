@@ -1,0 +1,98 @@
+# Production stack on a single server: database, web, worker and an HTTPS reverse proxy.
+# Settings come from a .env file next to this one. Start from deploy/env.production.example.
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://bluven:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/bluven
+  APP_URL: https://${CRM_DOMAIN:?set CRM_DOMAIN}
+  APP_TIMEZONE: ${APP_TIMEZONE:-Australia/Sydney}
+  STORAGE_DIR: /data/storage
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+  SMTP_URL: ${SMTP_URL:-}
+  MAIL_FROM: ${MAIL_FROM:-Bluven CRM <crm@localhost>}
+  PYLON_API_TOKEN: ${PYLON_API_TOKEN:-}
+  PYLON_WEBHOOK_SECRET: ${PYLON_WEBHOOK_SECRET:-}
+  PYLON_API_BASE: ${PYLON_API_BASE:-https://api.getpylon.com}
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bluven
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: bluven
+      TZ: UTC
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bluven -d bluven"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Brings the schema up to date and makes sure the reference data and first admin exist, then exits.
+  migrate:
+    build:
+      context: .
+      target: tools
+    command:
+      - sh
+      - -c
+      - cd /repo/packages/db && node_modules/.bin/prisma migrate deploy && cd /repo/packages/core && node --import tsx src/seed.ts
+    restart: "no"
+    environment:
+      <<: *app-env
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      target: tools
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN:?set CRM_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+
+volumes:
+  db-data:
+  storage:
+  caddy-data:
+  caddy-config:

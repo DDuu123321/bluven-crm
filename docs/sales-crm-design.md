@@ -1,6 +1,6 @@
 # Bluven CRM 销售侧设计文档
 
-版本：v0.4（Phase 1 开发中）
+版本：v0.5（Phase 1 已实现）
 日期：2026-11-10
 范围：销售业务全流程，外加运营"接收 / 退回订单"的最小界面。运营侧其余功能另行设计。
 
@@ -299,7 +299,7 @@ https://app.getpylon.com/map/address?search=<URL编码的完整地址>&country=A
 | 事件 | CRM 动作 |
 |---|---|
 | `solar_projects.created` | 按 `project_reference_number` 找到订单，写入 Pylon 项目 id 和 `project_in_app_url`（订单页显示 "Open in Pylon"） |
-| `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote,...`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.pdf_proposal_url`、`summary.web_proposal_url`；下载报价 PDF 归档。只记报价版本，不改变订单阶段。若该设计对应的报价版本已经发给过客户而关键数字有变，则另建新版本，保留已发出的那版 |
+| `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.web_proposal_url`。只记报价版本的数字和网页报价链接，不改变订单阶段，也**不自动下载方案 PDF**：设计过程中 Pylon 会频繁触发更新事件，每次都存一份 PDF 没有意义；真正发给客户的那份文件由销售在"标记为已发送"时附上。若该设计对应的报价版本已经发给过客户而关键数字有变，则另建新版本，保留已发出的那版 |
 | `web_proposals.signed`（仅路径 B 触发） | 订单进入 SIGNED；调 `GET /v1/solar_projects/{id}` 取 `acceptance.latest_esignature_pdf_url`（有效期 1 小时，须立即下载）存为 Contract 文档；`latest_signed_design` 对应的 Quote 标为 accepted |
 | `gateway_payments.created`，`purpose = "deposit"` | 自动创建 Deposit（`amount` 分、`currency`、`receipt_url`，method = gateway），订单进入 DEPOSIT_PENDING，等财务确认。未使用 Pylon 网关时此步由销售手动上传凭证 |
 | `solar_projects.updated` | 同步 `is_committed`、`job_sheet_url` 等；若 `acceptance.manually_sold` 为真而 CRM 尚无 Contract，提醒销售归档签字合同 |
@@ -308,10 +308,13 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 
 ### 9.4 可靠性
 
-- 校验签名：`hs256=HMAC_SHA256(secret, "<Pylon-Webhook-Timestamp>.<原始请求体>")` 与 `Pylon-Webhook-Signature` 比对；时间戳偏差超过 5 分钟拒绝。
+- 校验签名：`hs256=HMAC_SHA256(secret, "<Pylon-Webhook-Timestamp>.<原始请求体>")`（十六进制）与 `Pylon-Webhook-Signature` 比对。时间戳允许 36 小时偏差：Pylon 的重试会持续约 31 小时，重试时可能沿用原时间戳；窗口内的重放无害，因为事件按 id 只入库一次。
 - 10 秒内必须返回 2xx，否则 Pylon 视为失败并重试（共 5 次，最后一次约 31 小时后）。所以接口只做校验和入队，处理放到后台任务。
 - 幂等：以事件 id 去重，重复投递不重复处理。
-- 对账：每晚拉 `GET /v1/events`（Pylon 只保留 30 天）补漏；同时对所有进行中的订单核对 `acceptance.is_accepted`。
+- 对账：worker 每天拉一次 `GET /v1/events`（Pylon 只保留 30 天），把没收到过的事件补进来。
+- 处理失败的事件按 1 分钟、5 分钟、30 分钟、2 小时、6 小时退避重试，仍失败则标记 Failed，管理员在 Administration → Pylon 页面查看原因并手动重试。
+- 订单已关闭（丢单、取消）或已在运营手里时，Pylon 事件只记录不生效。
+- **尚未连接真实 Pylon 账号验证。** 客户端和事件处理按 Pylon 开发者文档编写，用模拟数据测试；字段读取全部做了容错。首次接通后需用一张测试订单完整走一遍。
 - 路径 A 不产生 Pylon 签约事件，签约状态以 CRM 内归档的 Contract 为准；销售也可在订单页直接上传签字合同（source = upload）。
 
 ---
@@ -428,10 +431,10 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 
 | 阶段 | 内容 | 交付标准 |
 |---|---|---|
-| Phase 1 核心骨架 | 用户与角色、数据模型、Bluven 接收接口 + CSV 导入 + 去重、分派与闲置规则、订单状态机、时间线（备注 / 电话）、待办与通知、资料与文件夹与清单校验、手动标记已报价与上传签字合同、定金与财务确认、推送 / 退回 / 运营接收界面、操作日志、基础仪表盘、Pylon 深链接 + webhook（报价版本、网页报价签约归档、网关定金） | 不接邮件也能把一张订单从线索走到运营接收 |
+| Phase 1 核心骨架（**已完成**） | 用户与角色、数据模型、Bluven 接收接口 + CSV 导入 + 去重、分派与闲置规则、订单状态机、时间线（备注 / 电话）、待办与通知、资料与文件夹与清单校验、手动标记已报价与上传签字合同、定金与财务确认、推送 / 退回 / 运营接收界面、操作日志、基础仪表盘、Pylon 深链接 + webhook（报价版本、网页报价签约归档、网关定金） | 不接邮件也能把一张订单从线索走到运营接收。已由端到端自动化测试验证 |
 | Phase 2 邮件 | Zoho 每人授权、增量同步、过滤与线程归并、从 CRM 发信并可选订单资料作附件（发报价自动进 QUOTED）、附件入库并可归档为签字合同 | 销售日常跟进可以完全在 CRM 里完成 |
 | Phase 3 AI | 往来总结、信息抽取、附件归类、账单抽取、回信草稿、交接简报 | 运营拿到的每张订单都有 AI 简报 |
-| Phase 4 完善 | 资料到期提醒与清理、报表细化、邮件模板、Pylon API 创建项目、手机端 | |
+| Phase 4 完善 | 资料到期提醒与清理、报表细化（月度趋势等）、通知按类型筛选与每日摘要邮件、邮件模板、Pylon API 创建项目、HEIC 转换、手机端 | |
 
 ---
 
@@ -443,16 +446,17 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 - **Zoho**：账号在澳洲数据中心，域名 `zoho.com.au`。
 - **Bluven 线索**：Bluven 网站按 `docs/bluven-lead-forwarding-spec.md` 把新线索实时转发到 CRM，历史线索用补录模式导入。
 
-未决（不挡开工）：
+未决：
 
-1. **CRM 域名**：Pylon webhook 和 Bluven 转发都需要一个公网 HTTPS 地址，需尽早确定正式域名和测试域名。
-2. **Pylon API 权限**：开发者文档提到 API 访问需在设置页申请并联系 Pylon 支持；截图显示已可直接创建 token，若创建后报权限不足再联系支持。
-3. **默认配置项**：丢单原因列表、必填清单默认项、定金默认比例，开工前给一版初始值即可，之后管理员可改。
+1. **CRM 域名与服务器**：Pylon webhook 和 Bluven 转发都需要一个公网 HTTPS 地址。部署步骤见 `docs/deployment-guide.md`。
+2. **Pylon 实连验证**：接通真实 Pylon 账号后用测试订单走一遍。开发者文档提到 API 访问可能需要联系 Pylon 支持开通；若创建 token 后调用报权限不足再联系他们。
+3. **默认配置项**：丢单原因（十项）、必填清单（电费账单、安装位置照片、电表箱照片）、定金建议比例（10%）已给出初始值，管理员可在后台修改。
 
 ---
 
 ## 变更记录
 
+- v0.5（2026-11-10）：Phase 1 实现完成。与 v0.4 的差异：Pylon 设计事件只记数字和网页报价链接，不自动下载方案 PDF，发给客户的文件在"标记为已发送"时附上；webhook 时间戳窗口放宽到 36 小时以覆盖 Pylon 的重试周期；补充事件重试、关闭订单的处理和"尚未实连验证"的说明；每日摘要邮件、通知按类型筛选、HEIC 转换归入 Phase 4。
 - v0.4（2026-11-10）：开工前复查。修正两处矛盾（NEW 的进入条件；Pylon 设计事件不再推进到 QUOTED）；阶段改为由事实推导；去重细化（电话 / 邮箱认人，仅地址相同不自动合并而是标记疑似重复；补充无地址线索的处理；对销售的重复提示不泄露他人客户）；闲置规则细化（只计员工动作、等财务和等运营不计、自动回池仅限签约前、暂缓到期自动解除）；丢单与取消的边界；文件版本改为显式 Replace；技术选型调整（自管会话、Phase 1 不引入 pg-boss、自写组件）。
 - v0.3（2026-11-09）：定金、Zoho 数据中心、Bluven 转发三项定论；新增 Bluven 转发接口规范文档。
 - v0.2（2026-11-09）：报价发送与签约改为双路径。方案仍全部出自 Pylon，但报价通常由销售裁剪后从 CRM 邮件发出，客户签字后邮件回传，签约以 CRM 归档的合同为准；Pylon 网页报价与签约事件作为并行路径保留。

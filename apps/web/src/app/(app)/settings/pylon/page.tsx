@@ -32,7 +32,7 @@ export default async function PylonPage() {
   );
   const count = (status: string) => counts.find((c) => c.status === status)?._count._all ?? 0;
   const ready = !!config.pylon.apiToken && !!config.pylon.webhookSecret;
-  const quiet = lastReceived && Date.now() - lastReceived.receivedAt.getTime() > 5 * 86_400_000;
+  const quiet = lastReceived && new Date().getTime() - lastReceived.receivedAt.getTime() > 5 * 86_400_000;
 
   return (
     <>
