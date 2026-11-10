@@ -10,7 +10,6 @@ import {
   holdOrder,
   logActivity,
   markLost,
-  markQuoteSent,
   moveOrderToNewProperty,
   pushOrder,
   restoreLost,
@@ -28,6 +27,16 @@ import { runAction } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { dateOnly, dateTime, kilo, list, money, str } from '@/lib/form';
 
+/**
+ * A date-time field pre-filled with "now" only carries minutes. When the user leaves it alone the
+ * entry should be stamped with the actual current time, otherwise it would sort before things
+ * that happened earlier in the same minute.
+ */
+function chosenTime(formData: FormData, name: string): Date | null {
+  const value = str(formData, name);
+  return value && value !== str(formData, `${name}Default`) ? dateTime(formData, name) : null;
+}
+
 // ---- timeline
 
 export async function logActivityAction(orderId: string, formData: FormData): Promise<ActionResult> {
@@ -36,7 +45,7 @@ export async function logActivityAction(orderId: string, formData: FormData): Pr
       orderId,
       type: str(formData, 'type'),
       body: str(formData, 'body'),
-      occurredAt: dateTime(formData, 'occurredAt'),
+      occurredAt: chosenTime(formData, 'occurredAt'),
       outcome: str(formData, 'outcome'),
       direction: str(formData, 'direction'),
     });
@@ -167,12 +176,6 @@ export async function updateQuoteAction(quoteId: string, formData: FormData): Pr
       depositCents: money(formData, 'deposit'),
       notes: str(formData, 'notes'),
     });
-  });
-}
-
-export async function markQuoteSentAction(quoteId: string, formData: FormData): Promise<ActionResult> {
-  return runAction(async (ctx) => {
-    await markQuoteSent(ctx, { quoteId, sentAt: dateTime(formData, 'sentAt') });
   });
 }
 

@@ -1,6 +1,6 @@
 // Quote versions. Designs always come from Pylon, but a quote only counts as "sent" once it has
 // actually gone to the customer.
-import type { Quote, Tx } from '@bluven/db';
+import type { Document, Quote, QuoteSentVia, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { formatCents, formatKw, formatKwh } from '../domain';
 import { ConflictError, FieldErrors, NotFoundError } from '../errors';
@@ -131,37 +131,66 @@ export async function updateQuote(ctx: Ctx, input: { quoteId: string } & QuoteFi
   });
 }
 
-/** Records that a version went to the customer. This is what moves an order to "Quoted". */
-export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?: Date | null }): Promise<void> {
-  const found = await loadQuote(ctx, input.quoteId);
-  await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId);
-    const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id } });
-    if (quote.sentAt) return;
-    const now = nowOf(ctx);
-    const sentAt = input.sentAt && input.sentAt <= now ? input.sentAt : now;
-    await tx.quote.update({ where: { id: quote.id }, data: { sentAt, sentVia: 'MANUAL' } });
-    if (!order.quotedAt || sentAt < order.quotedAt) await tx.order.update({ where: { id: order.id }, data: { quotedAt: sentAt } });
-    await addActivity(tx, ctx, {
-      customerId: order.customerId,
-      orderId: order.id,
-      type: 'QUOTE',
-      summary: `${describe(quote)} sent to the customer`,
-      occurredAt: sentAt,
-      payload: { quoteId: quote.id },
-    });
-    await touchStaffActivity(tx, ctx, order);
-    await syncOrderStage(tx, ctx, order.id);
-    await audit(tx, ctx, {
-      action: 'quote.sent',
-      entityType: 'Quote',
-      entityId: quote.id,
-      orderId: order.id,
-      customerId: order.customerId,
-      summary: `${order.orderNo}: quote v${quote.version} marked as sent`,
-      after: { sentAt, sentVia: 'MANUAL' },
-    });
+export interface MarkSentOptions {
+  sentAt?: Date | null;
+  via: QuoteSentVia;
+  /** The file that actually went to the customer, typically the quote pages cut from the Pylon proposal. */
+  file?: StagedFile | null;
+}
+
+/**
+ * Records that a version went to the customer, inside the caller's transaction (order lock held).
+ * This is what moves an order to "Quoted". Returns the attached document, if a file was given.
+ */
+export async function markQuoteSentInTx(tx: Tx, ctx: Ctx, order: OrderState, quoteId: string, opts: MarkSentOptions): Promise<Document | null> {
+  const quote = await tx.quote.findFirst({ where: { id: quoteId, orderId: order.id } });
+  if (!quote) throw new NotFoundError('Quote not found.');
+  if (quote.sentAt) return null;
+  const now = nowOf(ctx);
+  const sentAt = opts.sentAt && opts.sentAt <= now ? opts.sentAt : now;
+
+  let doc: Document | null = null;
+  if (opts.file) {
+    const quoteType = await tx.documentType.findUniqueOrThrow({ where: { key: DOC_TYPE.quote } });
+    const current = quote.documentId ? await tx.document.findUnique({ where: { id: quote.documentId } }) : null;
+    doc = await attachStaged(tx, ctx, order, opts.file, { type: quoteType, note: `Quote v${quote.version} as sent`, replaces: current });
+  }
+  await tx.quote.update({ where: { id: quote.id }, data: { sentAt, sentVia: opts.via, ...(doc ? { documentId: doc.id } : {}) } });
+  if (!order.quotedAt || sentAt < order.quotedAt) await tx.order.update({ where: { id: order.id }, data: { quotedAt: sentAt } });
+  await addActivity(tx, ctx, {
+    customerId: order.customerId,
+    orderId: order.id,
+    type: 'QUOTE',
+    summary: `${describe(quote)} sent to the customer${opts.via === 'PYLON' ? ' as a Pylon web proposal' : ''}`,
+    occurredAt: sentAt,
+    payload: { quoteId: quote.id },
   });
+  await touchStaffActivity(tx, ctx, order);
+  await syncOrderStage(tx, ctx, order.id);
+  await audit(tx, ctx, {
+    action: 'quote.sent',
+    entityType: 'Quote',
+    entityId: quote.id,
+    orderId: order.id,
+    customerId: order.customerId,
+    summary: `${order.orderNo}: quote v${quote.version} marked as sent`,
+    after: { sentAt, sentVia: opts.via, documentId: doc?.id },
+  });
+  return doc;
+}
+
+export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?: Date | null; file?: StagedFile | null }): Promise<void> {
+  try {
+    const found = await loadQuote(ctx, input.quoteId);
+    const doc = await inTx(ctx.db, async (tx) => {
+      const order = await lockOrderForEdit(tx, ctx, found.orderId);
+      return markQuoteSentInTx(tx, ctx, order, found.id, { sentAt: input.sentAt, via: 'MANUAL', file: input.file });
+    });
+    if (doc) await finishImage(ctx, doc);
+  } catch (e) {
+    if (input.file) await cleanupStaged(input.file);
+    throw e;
+  }
 }
 
 /** Removes a version that never went to the customer. */

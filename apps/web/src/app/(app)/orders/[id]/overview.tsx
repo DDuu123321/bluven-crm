@@ -224,6 +224,7 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
                   trigger="This order is for a different address"
                   title="Move this order to another address"
                   description="Use this when the enquiry was attached to an address the customer already had on file but is really for another property. The existing address stays with the customer's other orders."
+                  variant="link"
                   triggerClassName="text-xs font-medium text-brand-700 hover:underline"
                 >
                   <ActionForm action={movePropertyAction.bind(null, order.id)} keepValues className="space-y-4">

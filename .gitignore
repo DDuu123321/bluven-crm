@@ -32,3 +32,7 @@ e2e/.auth/
 *.pem
 npm-debug.log*
 .pnpm-debug.log*
+
+# end-to-end test working files
+e2e/.tmp/
+e2e/screenshots/

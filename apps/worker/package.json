@@ -1,0 +1,25 @@
+{
+  "name": "@bluven/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@bluven/core": "workspace:*",
+    "@bluven/db": "workspace:*",
+    "@bluven/integrations": "workspace:*",
+    "nodemailer": "^10.5.0",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/nodemailer": "^7",
+    "typescript": "~6.0.3",
+    "vitest": "^5.1.0"
+  }
+}

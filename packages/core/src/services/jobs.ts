@@ -14,7 +14,7 @@ import { resumeOrderInTx } from './sidestate';
  * Runs `fn` unless another worker instance already holds the job's lock. Advisory locks are
  * released when the transaction that took them ends, so a crashed worker never blocks the job.
  */
-async function withJobLock<T>(db: Db, lockKey: number, fn: () => Promise<T>): Promise<T | null> {
+export async function withJobLock<T>(db: Db, lockKey: number, fn: () => Promise<T>): Promise<T | null> {
   return db.$transaction(
     async (tx) => {
       const rows = await tx.$queryRaw<{ locked: boolean }[]>(Prisma.sql`SELECT pg_try_advisory_xact_lock(${lockKey}::bigint) AS locked`);

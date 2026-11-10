@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/start-standalone.mjs",
     "lint": "eslint",
-    "typecheck": "next typegen && tsc --noEmit -p ."
+    "typecheck": "next typegen && tsc --noEmit -p .",
+    "start:next": "next start"
   },
   "dependencies": {
     "@bluven/core": "workspace:*",

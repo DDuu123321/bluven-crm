@@ -11,10 +11,14 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 // Buttons
 // ---------------------------------------------------------------------------
 
-export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'link' | 'link-danger';
 export type ButtonSize = 'sm' | 'md';
 
 export function buttonClass(variant: ButtonVariant = 'secondary', size: ButtonSize = 'md'): string {
+  // Link-style actions sit inline with text: no box, no fixed height.
+  if (variant === 'link' || variant === 'link-danger') {
+    return cx('inline font-medium hover:underline disabled:cursor-not-allowed disabled:opacity-50', variant === 'link' ? 'text-brand-700' : 'text-red-600');
+  }
   return cx(
     'inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap transition-colors',
     'disabled:cursor-not-allowed disabled:opacity-50',
