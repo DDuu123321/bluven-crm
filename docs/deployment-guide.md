@@ -159,22 +159,23 @@ cd /opt/bluven-crm
 
 ### 恢复
 
-恢复会覆盖现有数据。先停掉 web，让没有人在写数据，恢复完再启动：
+恢复会覆盖现有数据。先停掉 web 和 worker，让没有人在写数据，恢复完再启动：
 
 ```bash
-docker compose stop web
+docker compose stop web worker
 
 # 数据库
 docker compose exec -T db pg_restore -U bluven -d bluven --clean --if-exists < backups/db-时间戳.dump
 
 # 资料
-docker compose exec -T worker tar -C /data -xzf - < backups/storage-时间戳.tar.gz
+docker compose run --rm -T --no-deps worker tar -C /data -xzf - < backups/storage-时间戳.tar.gz
 
-docker compose restart worker
-docker compose start web
+docker compose start worker web
 ```
 
 数据库和资料要用同一次备份的两个文件，时间戳相同。恢复演练至少做一次，确认备份真的能用。
+
+在一台全新的服务器上恢复：先按第 2 节把系统启动起来，再执行上面的步骤。
 
 ---
 
