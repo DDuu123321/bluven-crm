@@ -180,8 +180,13 @@ test('operations cannot see the order before it is pushed', async ({ browser }) 
   const { context, page } = await signIn(browser, 'ops');
   await expect(page).toHaveURL(/\/ops$/);
   await expect(page.getByText('Nothing is waiting')).toBeVisible();
+  // A real 404, not a streamed page that only looks like one.
   const response = await page.goto(orderUrl);
   expect(response?.status()).toBe(404);
+  await expect(page.getByRole('heading', { name: /does not exist, or it is not yours to see/ })).toBeVisible();
+  await expect(page.getByText(orderNo)).toHaveCount(0);
+  const opsPage = await page.goto(orderUrl.replace('/orders/', '/ops/orders/'));
+  expect(opsPage?.status()).toBe(404);
   await context.close();
 });
 
