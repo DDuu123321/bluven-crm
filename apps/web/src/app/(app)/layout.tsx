@@ -41,16 +41,19 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col overflow-y-auto border-r border-slate-200 bg-white px-2 py-4 md:flex">
-        <Link href="/" className="mb-5 px-3 text-lg font-semibold tracking-tight text-brand-700">
-          Bluven CRM
-        </Link>
-        {can(user, 'orders.create') && (
-          <Link href="/orders/new" className="mx-1 mb-5 flex h-9 items-center justify-center rounded-md bg-brand-600 text-sm font-medium text-white hover:bg-brand-700">
-            New lead
+      {/* The column runs the full height of the page; its content stays in view while the page scrolls. */}
+      <aside className="hidden w-56 shrink-0 border-r border-slate-200 bg-white md:block">
+        <div className="sticky top-0 flex h-screen flex-col overflow-y-auto px-2 py-4">
+          <Link href="/" className="mb-5 px-3 text-lg font-semibold tracking-tight text-brand-700">
+            Bluven CRM
           </Link>
-        )}
-        <AppNav sections={sections} initialCounts={counts} />
+          {can(user, 'orders.create') && (
+            <Link href="/orders/new" className="mx-1 mb-5 flex h-9 items-center justify-center rounded-md bg-brand-600 text-sm font-medium text-white hover:bg-brand-700">
+              New lead
+            </Link>
+          )}
+          <AppNav sections={sections} initialCounts={counts} />
+        </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-4 backdrop-blur md:px-6">

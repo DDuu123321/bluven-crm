@@ -13,6 +13,8 @@ export default defineConfig({
   use: {
     baseURL: E2E.baseURL,
     viewport: { width: 1440, height: 900 },
+    // The screenshots are kept for people to look at, so render them sharp.
+    deviceScaleFactor: 2,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
