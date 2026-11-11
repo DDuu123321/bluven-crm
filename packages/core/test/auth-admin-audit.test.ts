@@ -296,6 +296,9 @@ describe('audit log', () => {
     await expect(db.auditLog.update({ where: { id: row.id }, data: { summary: 'tampered' } })).rejects.toThrow(/append-only/);
     await expect(db.auditLog.delete({ where: { id: row.id } })).rejects.toThrow(/append-only/);
     await expect(db.auditLog.deleteMany({})).rejects.toThrow(/append-only/);
+    // Emptying the table in one go is refused as well.
+    await expect(db.$executeRawUnsafe('TRUNCATE TABLE "AuditLog"')).rejects.toThrow(/append-only/);
+    expect(await db.auditLog.count()).toBeGreaterThan(0);
     expect((await db.auditLog.findUniqueOrThrow({ where: { id: row.id } })).summary).toBe(row.summary);
   });
 

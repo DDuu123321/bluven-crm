@@ -189,7 +189,6 @@ export async function updateHandoffNotes(ctx: Ctx, input: { orderId: string; not
     const current = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { handoffNotes: true } });
     if (current.handoffNotes === notes) return;
     await tx.order.update({ where: { id: order.id }, data: { handoffNotes: notes } });
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'order.handoff_notes',
       entityType: 'Order',

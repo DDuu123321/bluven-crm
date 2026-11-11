@@ -65,7 +65,7 @@ function HintBox({ hint }: { hint: DuplicateHint | null }) {
         <Link href={`/orders/${hint.orderId}`} className="font-medium underline">
           {hint.orderNo}
         </Link>
-        .
+        . If this enquiry is for a different address, enter that address and save: it becomes a separate order under the same customer.
       </div>
     );
   }

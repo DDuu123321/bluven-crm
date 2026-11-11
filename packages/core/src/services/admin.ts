@@ -110,6 +110,15 @@ export async function revokePreviousIntakeToken(ctx: Ctx, input: { sourceId: str
   });
 }
 
+/**
+ * Whether a lead source is one of our own systems. Only the Bluven website source is; a source an
+ * administrator adds for another company's system is not. Our own systems may preview with dryRun,
+ * load history with backfill, and are told which order a repeat enquiry joined.
+ */
+export function isOwnSystem(source: Pick<LeadSource, 'kind'>): boolean {
+  return source.kind !== 'EXTERNAL';
+}
+
 /** Resolves an intake API token to its active source, or null. */
 export async function authenticateIntakeToken(db: Db, token: string, now: Date = new Date()): Promise<LeadSource | null> {
   if (!token || token.length > 200) return null;

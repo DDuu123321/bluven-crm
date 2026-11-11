@@ -254,7 +254,6 @@ export async function changeDocumentType(ctx: Ctx, input: { documentId: string; 
       where: { id: doc.id },
       data: { typeId: type.id, propertyId: type.scope === 'PROPERTY' ? order.propertyId : null },
     });
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'document.retype',
       entityType: 'Document',

@@ -35,7 +35,9 @@ export async function setOrderOwner(tx: Tx, ctx: Ctx, orderId: string, newOwnerI
 
   await tx.order.update({
     where: { id: orderId },
-    data: { ownerId: newOwnerId, assignedAt: newOwnerId ? now : undefined, lastStaffActivityAt: now, idleLevel: 0 },
+    // Once somebody has been given an order it is a live lead: if it ever comes back unassigned
+    // it belongs in the pool, not under "imported history".
+    data: { ownerId: newOwnerId, assignedAt: newOwnerId ? now : undefined, lastStaffActivityAt: now, idleLevel: 0, ...(newOwnerId ? { isBackfill: false } : {}) },
   });
   // Open tasks travel with the order. In the pool they belong to nobody.
   await tx.task.updateMany({

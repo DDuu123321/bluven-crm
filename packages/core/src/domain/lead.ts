@@ -105,6 +105,23 @@ const fail = (field: string, reason: string): never => {
   throw new LeadError(`${field}: ${reason}`);
 };
 
+/**
+ * Makes text safe to store. Control characters other than tab and line breaks are dropped, and
+ * half of a surrogate pair (an emoji cut in two) is replaced. PostgreSQL refuses such text, and a
+ * stray NUL should cost us one character, never the lead.
+ */
+export function cleanText(s: string): string {
+  return (
+    s
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD')
+  );
+}
+
+/** Leads are not older than this. Guards against garbage dates the database cannot hold. */
+const EARLIEST_CREATED_AT = Date.UTC(2000, 0, 1);
+
 /** Omitted, null and empty-string values all mean "not provided". */
 function isBlank(v: unknown): boolean {
   return v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
@@ -114,9 +131,9 @@ function optString(obj: Record<string, unknown>, field: string, max: number): st
   const v = obj[field];
   if (isBlank(v)) return undefined;
   if (typeof v !== 'string') return fail(field, 'must be a string');
-  const s = v.trim();
+  const s = cleanText(v).trim();
   if (s.length > max) return fail(field, `must be at most ${max} characters`);
-  return s;
+  return s || undefined;
 }
 
 function optEnum(obj: Record<string, unknown>, field: string, allowed: readonly string[]): string | undefined {
@@ -144,10 +161,10 @@ function optTextOrList(obj: Record<string, unknown>, fields: string[], max: numb
     const v = obj[field];
     if (isBlank(v)) continue;
     let s: string;
-    if (typeof v === 'string') s = v.trim();
+    if (typeof v === 'string') s = cleanText(v).trim();
     else if (typeof v === 'number') s = String(v);
     else if (Array.isArray(v) && v.every((x) => typeof x === 'string' || typeof x === 'number')) {
-      s = v.map((x) => String(x).trim()).filter(Boolean).join(', ');
+      s = v.map((x) => cleanText(String(x)).trim()).filter(Boolean).join(', ');
     } else return fail(fields[0]!, 'must be a string or a list of strings');
     if (s.length > max) return fail(fields[0]!, `must be at most ${max} characters`);
     if (s) return s;
@@ -235,8 +252,9 @@ export function parseLead(raw: unknown, opts: ParseLeadOptions): ParseLeadResult
       if (typeof o.externalId !== 'string' && typeof o.externalId !== 'number') {
         return fail('externalId', 'must be a string or a number');
       }
-      const externalId = String(o.externalId).trim();
+      const externalId = cleanText(String(o.externalId)).trim();
       if (externalId.length > 64) return fail('externalId', 'must be at most 64 characters');
+      if (!externalId) return fail('externalId', 'is required');
       lead.externalId = externalId;
     } else if (opts.requireExternalId) {
       return fail('externalId', 'is required');
@@ -251,13 +269,15 @@ export function parseLead(raw: unknown, opts: ParseLeadOptions): ParseLeadResult
       }
       const now = opts.now ?? new Date();
       if (date.getTime() > now.getTime() + 24 * 60 * 60 * 1000) return fail('createdAt', 'must not be in the future');
+      if (date.getTime() < EARLIEST_CREATED_AT) return fail('createdAt', 'must not be before the year 2000');
       lead.createdAt = date;
     }
 
     // Marketing metadata is trimmed rather than rejected: a long referrer must never cost us a lead.
     if (!isBlank(o.sourceDetail)) {
       if (typeof o.sourceDetail !== 'string') return fail('sourceDetail', 'must be a string');
-      lead.sourceDetail = o.sourceDetail.trim().slice(0, 100);
+      const detail = cleanText(cleanText(o.sourceDetail).trim().slice(0, 100));
+      if (detail) lead.sourceDetail = detail;
     }
     if (!isBlank(o.attribution)) {
       const a = o.attribution;
@@ -265,7 +285,9 @@ export function parseLead(raw: unknown, opts: ParseLeadOptions): ParseLeadResult
       const out: NonNullable<LeadInput['attribution']> = {};
       for (const key of ATTRIBUTION_KEYS) {
         const v = (a as Record<string, unknown>)[key];
-        if (typeof v === 'string' && v.trim()) out[key] = v.trim().slice(0, 500);
+        // Cleaned again after cutting: the cut itself can split an emoji in two.
+        const text = typeof v === 'string' ? cleanText(cleanText(v).trim().slice(0, 500)) : '';
+        if (text) out[key] = text;
       }
       if (Object.keys(out).length) lead.attribution = out;
     }

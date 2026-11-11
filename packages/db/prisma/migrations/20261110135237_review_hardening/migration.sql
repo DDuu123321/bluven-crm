@@ -10,12 +10,6 @@ UPDATE "Document" d SET "supersededAt" = COALESCE(p."decidedAt", CURRENT_TIMESTA
   FROM "Deposit" p
  WHERE p."proofDocumentId" = d."id" AND p."status" IN ('REJECTED', 'WITHDRAWN');
 
--- Our own systems may preview with dryRun, load history with backfill and learn which order a
--- repeat enquiry joined. Sources added later start without these rights.
-ALTER TABLE "LeadSource" ADD COLUMN     "firstParty" BOOLEAN NOT NULL DEFAULT false;
-
-UPDATE "LeadSource" SET "firstParty" = true WHERE "key" = 'bluven-website';
-
 -- Spacing between attempts to send a notification email.
 ALTER TABLE "Notification" ADD COLUMN     "emailLastAttemptAt" TIMESTAMP(3);
 

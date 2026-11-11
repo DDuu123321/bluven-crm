@@ -26,9 +26,14 @@ export interface NormalizedPhone {
  *   61412345678       -> +61412345678
  *   (03) 9123 4567    -> +61391234567
  *   0011 64 21 123456 -> +6421123456
- *   9123 4567         -> 91234567        (local number without area code: kept as digits)
+ *   0061 412 345 678  -> +61412345678
+ *   2 9123 4567       -> +61291234567    (leading zero lost, as spreadsheets do)
+ *   9123 4567         -> +61291234567 when the state is known to be NSW or ACT,
+ *                        91234567 otherwise (local number without area code: kept as digits)
  */
-export function normalizePhone(raw: string): NormalizedPhone {
+const AREA_CODE: Record<string, string> = { NSW: '2', ACT: '2', VIC: '3', TAS: '3', QLD: '7', SA: '8', WA: '8', NT: '8' };
+
+export function normalizePhone(raw: string, hint: { state?: string | null } = {}): NormalizedPhone {
   const trimmed = raw.trim();
   const allowed = /^\+?[\d\s\-().]+$/.test(trimmed);
   const hasPlus = trimmed.startsWith('+');
@@ -43,13 +48,20 @@ export function normalizePhone(raw: string): NormalizedPhone {
     normalized = '+' + digits;
   } else if (digits.startsWith('0011') && digits.length > 8) {
     normalized = '+' + digits.slice(4);
+  } else if (digits.startsWith('0061') && digits.length === 13) {
+    // Written with "00" for the plus.
+    normalized = '+' + digits.slice(2);
   } else if (digits.startsWith('61') && digits.length === 11) {
     normalized = '+' + digits;
   } else if (digits.startsWith('0') && digits.length === 10) {
     normalized = '+61' + digits.slice(1);
-  } else if (digits.startsWith('4') && digits.length === 9) {
-    // Mobile number written without the leading zero.
+  } else if (/^[23478]/.test(digits) && digits.length === 9) {
+    // Mobile or area-coded landline written without the leading zero.
     normalized = '+61' + digits;
+  } else if (digits.length === 8 && hint.state && AREA_CODE[hint.state.toUpperCase()]) {
+    // A local landline: the state the enquiry came from tells us the area code. Without this
+    // "9123 4567" in Sydney and in Melbourne would count as the same number.
+    normalized = '+61' + AREA_CODE[hint.state.toUpperCase()] + digits;
   } else {
     normalized = digits;
   }
@@ -75,11 +87,13 @@ const STREET_WORDS: Record<string, string> = {
   lane: 'ln',
   la: 'ln',
   terrace: 'tce',
+  ter: 'tce',
   boulevard: 'blvd',
   bvd: 'blvd',
   close: 'cl',
   circuit: 'cct',
   cir: 'cct',
+  crct: 'cct',
   grove: 'gr',
   gve: 'gr',
   square: 'sq',
@@ -93,18 +107,30 @@ const STREET_WORDS: Record<string, string> = {
   west: 'w',
 };
 
-const UNIT_PREFIX =
-  /^(?:unit|u|apt|apartment|flat|villa|townhouse|th|shop|suite|ste|lot)\s*\.?\s*([0-9]+[a-z]?)\s*[,/\-\s]\s*(\d.*)$/;
+const UNIT_WORDS = '(?:unit|u|apt|apartment|flat|villa|townhouse|th|shop|suite|ste|lot)';
+const UNIT_PREFIX = new RegExp(`^${UNIT_WORDS}\\s*\\.?\\s*([0-9]+[a-z]?)\\s*[,/\\-\\s]\\s*(\\d.*)$`);
+/** "12 Sample St, Unit 3": the unit after the street. */
+const UNIT_SUFFIX = new RegExp(`^(\\d.*?)[\\s,]+${UNIT_WORDS}\\s*\\.?\\s*([0-9]+[a-z]?)$`);
 
 /**
  * Normalises a street address line so that common spellings of the same address compare equal:
  * "Unit 3, 12 Sample Street", "U3/12 Sample St." and "3 / 12 sample st" all become "3/12 sample st".
  */
 export function normalizeAddressLine(line: string): string {
-  let s = line.toLowerCase().replace(/[.'’"#]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Apostrophes vanish ("O'Connell" is "OConnell"); other punctuation becomes a space; any kind of
+  // dash is a plain hyphen ("12–14" is "12-14").
+  let s = line
+    .toLowerCase()
+    .replace(/['’‘`]/g, '')
+    .replace(/[‐-―−]/g, '-')
+    .replace(/[."#]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!s) return '';
   const unit = UNIT_PREFIX.exec(s);
+  const unitAfter = unit ? null : UNIT_SUFFIX.exec(s);
   if (unit) s = `${unit[1]}/${unit[2]}`;
+  else if (unitAfter) s = `${unitAfter[2]}/${unitAfter[1]}`;
   s = s.replace(/\s*\/\s*/g, '/').replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
   return s
     .split(' ')
@@ -115,7 +141,8 @@ export function normalizeAddressLine(line: string): string {
 function normalizeSuburb(suburb: string): string {
   return suburb
     .toLowerCase()
-    .replace(/[.'’,]/g, ' ')
+    .replace(/['’‘`]/g, '')
+    .replace(/[.,]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .split(' ')
@@ -135,11 +162,26 @@ export interface AddressParts {
  * to match across different customers.
  */
 export function addressKey(a: AddressParts): string | null {
-  const line1 = normalizeAddressLine(a.line1);
   const suburb = normalizeSuburb(a.suburb);
   const postcode = a.postcode.replace(/\D/g, '');
+  const line1 = streetOnly(normalizeAddressLine(a.line1), suburb, postcode);
   if (!line1 || !suburb || !postcode) return null;
   return `${line1}|${suburb}|${postcode}`;
+}
+
+const STATE_WORDS = '(?:nsw|vic|qld|sa|wa|tas|act|nt)';
+
+/**
+ * People often type the whole address into the street field ("12 Sample St, Parramatta NSW 2150")
+ * and fill suburb and postcode as well. The repeated tail is dropped so both spellings compare equal.
+ */
+function streetOnly(line: string, suburb: string, postcode: string): string {
+  if (!line || !suburb) return line;
+  const escaped = suburb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tail = new RegExp(`\\s+${escaped}(?:\\s+${STATE_WORDS})?(?:\\s+${postcode || '\\d{4}'})?$`);
+  const stripped = line.replace(tail, '').trim();
+  // Keep the line when stripping would leave no street at all (a street named like its suburb).
+  return /\d/.test(stripped) && stripped.includes(' ') ? stripped : line;
 }
 
 /**
@@ -147,8 +189,9 @@ export function addressKey(a: AddressParts): string | null {
  * both sides have one, and falls back to the street line when either side is incomplete.
  */
 export function sameCustomerProperty(a: AddressParts, b: AddressParts): boolean {
-  const lineA = normalizeAddressLine(a.line1);
-  const lineB = normalizeAddressLine(b.line1);
+  const street = (x: AddressParts) => streetOnly(normalizeAddressLine(x.line1), normalizeSuburb(x.suburb), x.postcode.replace(/\D/g, ''));
+  const lineA = street(a);
+  const lineB = street(b);
   if (!lineA || !lineB) return false;
   const keyA = addressKey(a);
   const keyB = addressKey(b);

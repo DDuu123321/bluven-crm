@@ -1,12 +1,12 @@
 // Editing the customer and the property behind an order.
 import type { Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
-import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, normalizeEmail, normalizePhone } from '../domain';
+import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, normalizeEmail, normalizePhone } from '../domain';
 import { FieldErrors } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
-import { lockOrderForEdit, touchStaffActivity } from './orders';
+import { lockOrderForEdit } from './orders';
 
 export interface UpdateCustomerInput {
   orderId: string;
@@ -17,6 +17,9 @@ export interface UpdateCustomerInput {
   phones: string[];
   emails: string[];
 }
+
+/** More than this is a data-entry accident, or an attempt to collect other people's numbers. */
+const MAX_CONTACT_POINTS = 6;
 
 export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Promise<void> {
   const errors = new FieldErrors();
@@ -32,6 +35,7 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
     else if (!phones.some((p) => p.normalized === n.normalized)) phones.push({ raw: value, normalized: n.normalized });
   }
   if (phones.length === 0 && !errors.any) errors.add('phones.0', 'At least one phone number is needed.');
+  if (phones.length > MAX_CONTACT_POINTS) errors.add(`phones.${MAX_CONTACT_POINTS}`, `A customer can have at most ${MAX_CONTACT_POINTS} phone numbers.`);
 
   const emails: string[] = [];
   for (const [i, value] of input.emails.map((e) => e.trim()).filter(Boolean).entries()) {
@@ -39,6 +43,7 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
     if (!n) errors.add(`emails.${i}`, `“${value}” is not a valid email address.`);
     else if (!emails.includes(n)) emails.push(n);
   }
+  if (emails.length > MAX_CONTACT_POINTS) errors.add(`emails.${MAX_CONTACT_POINTS}`, `A customer can have at most ${MAX_CONTACT_POINTS} email addresses.`);
   errors.throwIfAny();
 
   await inTx(ctx.db, async (tx) => {
@@ -47,6 +52,28 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
       where: { id: order.customerId },
       include: { phones: { orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] }, emails: { orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] } },
     });
+
+    // Enquiries are matched to customers by phone and email. A salesperson therefore cannot put
+    // a number or address on their customer that is already on file for someone else: it would
+    // be a way to draw that person's future enquiries to themselves. A manager, who sees both
+    // customers, can decide that two records really share a contact.
+    if (ctx.actor.kind === 'user' && !isManager(ctx.actor)) {
+      const taken = new FieldErrors();
+      const had = { phones: new Set(customer.phones.map((p) => p.normalized)), emails: new Set(customer.emails.map((e) => e.email)) };
+      for (const [i, p] of phones.entries()) {
+        if (had.phones.has(p.normalized)) continue;
+        if (await tx.customerPhone.findFirst({ where: { normalized: p.normalized, customerId: { not: customer.id } }, select: { id: true } })) {
+          taken.add(`phones.${i}`, 'This number is already on file for another customer. Ask a manager to add it if it really is shared.');
+        }
+      }
+      for (const [i, e] of emails.entries()) {
+        if (had.emails.has(e)) continue;
+        if (await tx.customerEmail.findFirst({ where: { email: e, customerId: { not: customer.id } }, select: { id: true } })) {
+          taken.add(`emails.${i}`, 'This address is already on file for another customer. Ask a manager to add it if it really is shared.');
+        }
+      }
+      taken.throwIfAny();
+    }
     const before = { firstName: customer.firstName, lastName: customer.lastName, notes: customer.notes, phones: customer.phones.map((p) => p.raw), emails: customer.emails.map((e) => e.email) };
     const after = { firstName, lastName, notes: input.notes.trim().slice(0, 5000), phones: phones.map((p) => p.raw), emails };
     const change = diff(before, after);
@@ -55,7 +82,6 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
     await tx.customer.update({ where: { id: customer.id }, data: { firstName, lastName, notes: after.notes } });
     await syncPhones(tx, customer.id, phones);
     await syncEmails(tx, customer.id, emails);
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'customer.update',
       entityType: 'Customer',
@@ -143,7 +169,6 @@ export async function updateProperty(ctx: Ctx, input: { orderId: string } & Prop
       where: { id: property.id },
       data: { ...f, addressKey: addressKey({ line1: f.addressLine1, suburb: f.suburb, postcode: f.postcode }) },
     });
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'property.update',
       entityType: 'Property',
@@ -188,7 +213,6 @@ export async function moveOrderToNewProperty(ctx: Ctx, input: { orderId: string 
     await tx.document.updateMany({ where: { orderId: order.id, propertyId: old.id }, data: { propertyId } });
     const summary = `Order moved to a different property: ${formatAddress(f)}`;
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'SYSTEM', summary, payload: { from: old.id, to: propertyId } });
-    await touchStaffActivity(tx, ctx, order);
     await audit(tx, ctx, {
       action: 'order.move_property',
       entityType: 'Order',
