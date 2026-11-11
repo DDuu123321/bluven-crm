@@ -1,9 +1,9 @@
+import http from 'node:http';
 import net from 'node:net';
-import nodemailer from 'nodemailer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { notifyUsers, resetConfigCache, systemCtx } from '@bluven/core';
 import { makeUser, resetDb, testDb } from '../../../packages/core/test/helpers';
-import { sendNotificationEmails, setTransport } from '../src/mailer';
+import { sendNotificationEmails, setMailSender } from '../src/mailer';
 import { startScheduler } from '../src/scheduler';
 
 const db = testDb();
@@ -19,21 +19,16 @@ describe('notification emails', () => {
     process.env.APP_URL = 'https://crm.example.com';
     process.env.MAIL_FROM = 'Bluven CRM <crm@example.com>';
     resetConfigCache();
-    const base = nodemailer.createTransport({ jsonTransport: true });
-    setTransport({
-      ...base,
-      sendMail: async (mail: { to: unknown; subject?: string; text?: string }) => {
-        if (failNext > 0) {
-          failNext--;
-          throw new Error('SMTP connection refused');
-        }
-        sent.push(mail);
-        return {};
-      },
-    } as unknown as ReturnType<typeof nodemailer.createTransport>);
+    setMailSender(async (mail) => {
+      if (failNext > 0) {
+        failNext--;
+        throw new Error('SMTP connection refused');
+      }
+      sent.push(mail);
+    });
   });
   afterEach(() => {
-    setTransport(undefined);
+    setMailSender(undefined);
     resetConfigCache();
   });
 
@@ -65,23 +60,41 @@ describe('notification emails', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('retries a failed send and gives up after five attempts', async () => {
+  it('retries a failed send after growing pauses and gives up after about a day', async () => {
     const sam = await makeUser(['SALES']);
+    const after = (minutes: number) => new Date(later.getTime() + minutes * 60_000);
+    const pending = (title: string) => db.notification.findFirstOrThrow({ where: { title } });
     await notifyUsers(db, ctx(), [sam.id], { type: 't', title: 'Hello' });
     failNext = 1;
     expect(await sendNotificationEmails(db, later)).toEqual({ sent: 0, skipped: 0, failed: 1 });
-    expect(await db.notification.findFirstOrThrow()).toMatchObject({ emailStatus: 'PENDING', emailAttempts: 1, emailError: 'SMTP connection refused' });
-    expect(await sendNotificationEmails(db, later)).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(await pending('Hello')).toMatchObject({ emailStatus: 'PENDING', emailAttempts: 1, emailError: 'SMTP connection refused' });
+    // Not hammered: a minute later nothing is tried, two minutes after the failure it goes out.
+    expect(await sendNotificationEmails(db, after(1))).toEqual({ sent: 0, skipped: 0, failed: 0 });
+    expect(await sendNotificationEmails(db, after(2))).toEqual({ sent: 1, skipped: 0, failed: 0 });
 
-    await notifyUsers(db, ctx(), [sam.id], { type: 't', title: 'Never arrives' });
-    failNext = 99;
-    for (let i = 0; i < 5; i++) await sendNotificationEmails(db, later);
-    expect(await db.notification.findFirstOrThrow({ where: { title: 'Never arrives' } })).toMatchObject({ emailStatus: 'FAILED', emailAttempts: 5 });
-    expect(await sendNotificationEmails(db, later)).toEqual({ sent: 0, skipped: 0, failed: 0 });
+    // A mail server that is down for hours. Attempts fall at 0, 2, 12, 42 and 162 minutes…
+    await notifyUsers(db, systemCtx(db, 'System', () => new Date(later.getTime() - 5 * 60_000)), [sam.id], { type: 't', title: 'Outage' });
+    failNext = 999;
+    const tried: number[] = [];
+    for (const minute of [0, 1, 2, 11, 12, 41, 42, 161, 162, 300, 521]) {
+      if ((await sendNotificationEmails(db, after(minute))).failed) tried.push(minute);
+    }
+    expect(tried).toEqual([0, 2, 12, 42, 162]);
+    expect(await pending('Outage')).toMatchObject({ emailStatus: 'PENDING', emailAttempts: 5 });
+    // …and when it is back the message still goes out, hours later.
+    failNext = 0;
+    expect(await sendNotificationEmails(db, after(522))).toEqual({ sent: 1, skipped: 0, failed: 0 });
+
+    // Only after seven attempts spread over about a day is a message given up on.
+    await notifyUsers(db, systemCtx(db, 'System', () => new Date(later.getTime() - 5 * 60_000)), [sam.id], { type: 't', title: 'Never arrives' });
+    failNext = 999;
+    for (const minute of [0, 2, 12, 42, 162, 522, 1242]) await sendNotificationEmails(db, after(minute));
+    expect(await pending('Never arrives')).toMatchObject({ emailStatus: 'FAILED', emailAttempts: 7 });
+    expect(await sendNotificationEmails(db, after(5000))).toEqual({ sent: 0, skipped: 0, failed: 0 });
   });
 
   it('closes notifications out when no mail server is configured', async () => {
-    setTransport(null);
+    setMailSender(null);
     const sam = await makeUser(['SALES']);
     await notifyUsers(db, ctx(), [sam.id], { type: 't', title: 'Hello' });
     expect(await sendNotificationEmails(db, later)).toEqual({ sent: 0, skipped: 1, failed: 0 });
@@ -157,6 +170,65 @@ function startSmtpServer(): Promise<{ port: number; deliveries: SmtpDelivery[]; 
   });
 }
 
+describe('notification emails through the website relay', () => {
+  const saved = { MAIL_RELAY_URL: process.env.MAIL_RELAY_URL, MAIL_RELAY_KEY: process.env.MAIL_RELAY_KEY, SMTP_URL: process.env.SMTP_URL, APP_URL: process.env.APP_URL };
+  let relay: http.Server;
+  let received: { key: string | undefined; body: Record<string, unknown> }[];
+  let answer = 200;
+
+  beforeEach(async () => {
+    await resetDb();
+    received = [];
+    answer = 200;
+    // Answers like the website's /api/send-mail: shared key in a header, one recipient, HTML body.
+    relay = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (chunk) => (raw += chunk));
+      req.on('end', () => {
+        received.push({ key: req.headers['x-relay-key'] as string | undefined, body: JSON.parse(raw) as Record<string, unknown> });
+        res.writeHead(answer, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(answer === 200 ? { ok: true } : { error: 'unauthorized' }));
+      });
+    });
+    await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', () => resolve()));
+    process.env.MAIL_RELAY_URL = `http://127.0.0.1:${(relay.address() as net.AddressInfo).port}/api/send-mail`;
+    process.env.MAIL_RELAY_KEY = 'relay-key-for-tests';
+    // The relay wins over SMTP when both are set: on a host that blocks SMTP the direct route cannot work.
+    process.env.SMTP_URL = 'smtp://127.0.0.1:1';
+    process.env.APP_URL = 'https://crm.bluven.com.au';
+    resetConfigCache();
+    setMailSender(undefined);
+  });
+  afterEach(async () => {
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    setMailSender(undefined);
+    resetConfigCache();
+  });
+
+  it('hands the message to the relay with the shared key, and records a refusal as a failed attempt', async () => {
+    const created = new Date('2026-11-10T01:00:00Z');
+    const sam = await makeUser(['SALES'], 'Sam Sales');
+    await notifyUsers(db, systemCtx(db, 'System', () => created), [sam.id], { type: 'order.assigned', title: 'BLV-2026-00009 has been assigned to you', body: 'Jane <Smith>', href: '/orders/ord_9' });
+    expect(await sendNotificationEmails(db, new Date('2026-11-10T01:05:00Z'))).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    const note = await db.notification.findFirstOrThrow();
+    expect(received).toHaveLength(1);
+    expect(received[0]!.key).toBe('relay-key-for-tests');
+    expect(received[0]!.body).toMatchObject({ to: sam.email, subject: 'BLV-2026-00009 has been assigned to you' });
+    expect(received[0]!.body).not.toHaveProperty('from'); // the relay decides the sender
+    expect(received[0]!.body.html).toContain('Jane &lt;Smith&gt;');
+    expect(received[0]!.body.html).toContain(`https://crm.bluven.com.au/notifications/${note.id}`);
+
+    answer = 401;
+    await notifyUsers(db, systemCtx(db, 'System', () => created), [sam.id], { type: 't', title: 'Second' });
+    expect(await sendNotificationEmails(db, new Date('2026-11-10T01:06:00Z'))).toEqual({ sent: 0, skipped: 0, failed: 1 });
+    expect((await db.notification.findFirstOrThrow({ where: { title: 'Second' } })).emailError).toContain('mail relay answered 401');
+  });
+});
+
 describe('notification emails over SMTP', () => {
   const saved = { SMTP_URL: process.env.SMTP_URL, MAIL_FROM: process.env.MAIL_FROM, APP_URL: process.env.APP_URL };
 
@@ -168,7 +240,7 @@ describe('notification emails over SMTP', () => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    setTransport(undefined);
+    setMailSender(undefined);
     resetConfigCache();
   });
 
@@ -180,7 +252,7 @@ describe('notification emails over SMTP', () => {
       process.env.MAIL_FROM = 'Bluven CRM <crm@example.com.au>';
       process.env.APP_URL = 'https://crm.example.com.au';
       resetConfigCache();
-      setTransport(undefined);
+      setMailSender(undefined);
 
       const created = new Date('2026-11-10T01:00:00Z');
       const sam = await makeUser(['SALES'], 'Sam Sales');
@@ -216,7 +288,7 @@ describe('notification emails over SMTP', () => {
     await smtp.close(); // nothing listens on this port any more
     process.env.SMTP_URL = `smtp://127.0.0.1:${port}`;
     resetConfigCache();
-    setTransport(undefined);
+    setMailSender(undefined);
     const sam = await makeUser(['SALES']);
     await notifyUsers(db, systemCtx(db, 'System', () => new Date('2026-11-10T01:00:00Z')), [sam.id], { type: 't', title: 'Hello' });
     expect(await sendNotificationEmails(db, new Date('2026-11-10T01:05:00Z'))).toEqual({ sent: 0, skipped: 0, failed: 1 });

@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Two images come out of this file:
-#   --target web    the Next.js standalone server (small, no dev tooling)
+# Three images come out of this file:
+#   (no target)     everything in one container: migrations, web server and worker. For
+#                   platforms that run one container per service (Railway and similar).
+#   --target web    the Next.js standalone server alone (small, no dev tooling)
 #   --target tools  the full workspace: runs the worker, the migrations and the seed
+# Docker Compose (docker-compose.yml) uses the "web" and "tools" targets.
 
 FROM node:22-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm \
@@ -60,3 +63,23 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/api/intake/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "apps/web/server.js"]
+
+# ---- everything in one container (the default when no target is given)
+# Brings the database up to date, then runs the web server and the worker side by side; see
+# deploy/start.mjs. It starts as root only to hand the attached disk to the "node" user, and
+# runs everything as that user.
+FROM build AS allinone
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    STORAGE_DIR=/data/storage
+# The standalone server expects its static files next to it.
+RUN cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static \
+ && cp -r apps/web/public apps/web/.next/standalone/apps/web/public \
+ && chown -R node:node apps/web/.next \
+ && mkdir -p /data/storage && chown -R node:node /data
+WORKDIR /repo
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/intake/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "deploy/start.mjs"]
