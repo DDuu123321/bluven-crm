@@ -36,3 +36,8 @@ npm-debug.log*
 # end-to-end test working files
 e2e/.tmp/
 e2e/screenshots/
+
+# Hidden folders at the top level belong to a tool or an editor on one machine, not to the
+# project. The ones the project itself uses are listed here.
+/.*/
+!/.githooks/
