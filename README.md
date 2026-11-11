@@ -23,12 +23,15 @@ return loop when something is missing.
 
 ```
 apps/web                Next.js 16 application: all pages, Server Actions and the HTTP API
-apps/worker             Background process: idle rules, reminders, notification emails, Pylon events
+apps/worker             Background process: idle rules, reminders, notification emails, Pylon events,
+                        collecting the website's leads
 packages/db             Prisma schema, migrations and the database client
 packages/core           Business rules (src/domain) and application services (src/services)
-packages/integrations   Pylon: API client, webhook verification, event processing
+packages/integrations   Pylon (API client, webhook verification, event processing) and the pull of
+                        new leads from the Bluven website
 e2e                     Playwright tests that drive the built application through the whole journey
-deploy                  Caddyfile, environment template and backup script for Docker Compose
+deploy                  Start script of the single-container image; Caddyfile, environment template
+                        and backup script for Docker Compose
 docs                    The documents listed above
 ```
 
@@ -39,8 +42,8 @@ Things worth knowing before changing the code:
   handoff decision). Services change a fact and call `syncOrderStage`.
 - **Permissions live in the services.** Every function in `packages/core/src/services` checks who is
   acting. Pages and Server Actions only establish the signed-in user and call a service.
-- **Everything is audited.** Each change writes a row to `AuditLog` in the same transaction. A
-  database trigger blocks updates and deletes on that table.
+- **Everything is audited.** Each change writes a row to `AuditLog` in the same transaction.
+  Database triggers refuse UPDATE, DELETE and TRUNCATE on that table.
 - **Uploaded files** go to `STORAGE_DIR` on disk and are only served through `/api/documents/…`
   after an access check. Each view and download is logged.
 

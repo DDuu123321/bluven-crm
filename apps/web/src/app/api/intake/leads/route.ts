@@ -1,6 +1,6 @@
 // Lead intake for the Bluven website and other sources.
 // Contract: docs/bluven-lead-forwarding-spec.md
-import { audit, authenticateIntakeToken, ingestLeads, isOwnSystem, readTextBody, systemCtx } from '@bluven/core';
+import { audit, authenticateIntakeToken, clientAddress, ingestLeads, isOwnSystem, readTextBody, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { allow, retryAfter } from '@/lib/rate-limit';
 
@@ -46,8 +46,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!trusted && (backfill === true || dryRun === true)) return reply({ error: '"dryRun" and "backfill" are not available for this source.' }, 403);
 
   try {
-    const forwarded = request.headers.get('x-forwarded-for');
-    const ctx = { ...systemCtx(db, source.name), ip: forwarded ? forwarded.split(',')[0]!.trim() : null, userAgent: request.headers.get('user-agent') };
+    const ctx = { ...systemCtx(db, source.name), ip: clientAddress(request.headers), userAgent: request.headers.get('user-agent') };
     const summary = await ingestLeads(ctx, leads, { sourceId: source.id, requireExternalId: true, backfill: backfill === true, dryRun: dryRun === true, trusted });
     if (dryRun === true) {
       // Nothing was stored, but who asked what is still worth knowing.

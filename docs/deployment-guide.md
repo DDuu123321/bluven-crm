@@ -168,6 +168,8 @@ PYLON_WEBHOOK_SECRET=
 
 HTTPS 证书由自带的 Caddy 自动申请和续期，前提是 `crm.bluven.com.au` 已经解析到这台服务器，并且 80、443 端口可以从公网访问。如果 DNS 在 Cloudflare，这条记录用"仅 DNS"（灰色云）。
 
+如果不用自带的 Caddy 而换成别的反向代理，请让它把访客的真实地址写进 `X-Real-IP` 请求头，并覆盖访客自己带来的值。CRM 用这个地址做登录限流和操作日志。自带的 Caddy 和 Railway 都已经这样做了。
+
 ### 3.2 第一次部署
 
 ```bash

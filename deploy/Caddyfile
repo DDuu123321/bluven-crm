@@ -23,5 +23,9 @@
 	reverse_proxy web:3000 {
 		# Large uploads are streamed to disk by the application; do not buffer them here.
 		flush_interval -1
+
+		# The application reads the visitor's address from this header (sign-in limits, audit
+		# log). It is set here, so a value sent by the visitor never gets through.
+		header_up X-Real-IP {remote_host}
 	}
 }

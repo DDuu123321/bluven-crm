@@ -2,7 +2,7 @@ import 'server-only';
 import { cache } from 'react';
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { getConfig, getSessionUser, userCtx, type Ctx, type SessionUser } from '@bluven/core';
+import { clientAddress, getConfig, getSessionUser, userCtx, type Ctx, type SessionUser } from '@bluven/core';
 import { getDb } from '@bluven/db';
 
 export const SESSION_COOKIE = 'bluven_session';
@@ -35,11 +35,10 @@ export async function getCurrentUserPassive(): Promise<SessionUser | null> {
   return getSessionUser(getDb(), token, new Date(), { passive: true });
 }
 
-/** Client address and browser, for the audit log. Behind the bundled Caddy proxy the first forwarded address is the client's. */
+/** Client address and browser, for the audit log and the sign-in limits. */
 export async function requestMeta(): Promise<{ ip: string | null; userAgent: string | null }> {
   const h = await headers();
-  const forwarded = h.get('x-forwarded-for');
-  return { ip: forwarded ? forwarded.split(',')[0]!.trim() : h.get('x-real-ip'), userAgent: h.get('user-agent') };
+  return { ip: clientAddress(h), userAgent: h.get('user-agent') };
 }
 
 export async function ctxFor(user: SessionUser): Promise<Ctx> {
