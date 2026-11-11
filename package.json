@@ -7,6 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "prepare": "node -e \"try{require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
     "dev": "pnpm --filter @bluven/web dev",
     "dev:worker": "pnpm --filter @bluven/worker dev",
     "build": "pnpm --filter @bluven/web build",

@@ -69,6 +69,9 @@ pnpm dev:worker                 # background jobs, in a second terminal
 Sign in with the seed admin from `.env`. You are asked to choose a new password, then add the other
 users under Administration → Users.
 
+`pnpm install` also points git at the hooks in `.githooks`. They enforce the rule on who a commit
+is attributed to, which is written down in [AGENTS.md](AGENTS.md).
+
 After changing `packages/db/prisma/schema.prisma`, run `pnpm db:migrate` to create and apply a migration.
 
 ## Tests

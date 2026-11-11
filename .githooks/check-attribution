@@ -1,0 +1,105 @@
+#!/bin/sh
+# Keeps assistant attribution out of this repository's history (the rule is in AGENTS.md).
+#
+# Every commit is recorded under the name of the person responsible for it. No commit names an
+# AI assistant or its vendor as author, committer or co-author, and no message carries a
+# session link or a "generated with" line. The three hooks next to this file call it:
+#
+#   commit-msg   takes attribution lines out of the message; the commit goes ahead
+#   pre-commit   refuses a commit that would be recorded under an assistant's identity
+#   pre-push     refuses a push that contains a commit with either problem, however it was made
+#
+# People are never affected: only the identities and lines below are matched.
+
+# A message line that attributes the work to an assistant.
+attribution_line='^[[:space:]]*(co-authored-by:.*@(anthropic\.com|claude\.ai)|co-authored-by:[[:space:]]*claude[^<]*<[^>]*noreply|claude-session:|.*generated (with|by) \[?claude code)'
+
+# Succeeds when the given name and address belong to an assistant, not to a person.
+is_assistant() {
+  lower_name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  lower_address=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  case "$lower_address" in
+    *@anthropic.com | *@*.anthropic.com | *@claude.ai) return 0 ;;
+  esac
+  case "$lower_name" in
+    claude | 'claude code'* | 'claude[bot]') return 0 ;;
+  esac
+  return 1
+}
+
+how_to_fix() {
+  cat >&2 <<'TEXT'
+
+Commits here are made under the repository owner's identity. Run once in this clone:
+
+  git config user.name "DDuu123321"
+  git config user.email "101039613+DDuu123321@users.noreply.github.com"
+  git config commit.gpgsign false
+
+Details are in AGENTS.md.
+TEXT
+}
+
+case "$1" in
+  commit-msg)
+    file=$2
+    if grep -q -i -E "$attribution_line" "$file"; then
+      grep -v -i -E "$attribution_line" "$file" > "$file.clean"
+      cat "$file.clean" > "$file"
+      rm -f "$file.clean"
+    fi
+    ;;
+
+  pre-commit)
+    for kind in AUTHOR COMMITTER; do
+      # Without a usable identity git stops the commit itself, with its own message.
+      ident=$(git var "GIT_${kind}_IDENT" 2>/dev/null) || exit 0
+      name=${ident%% <*}
+      address=${ident#*<}
+      address=${address%%>*}
+      if is_assistant "$name" "$address"; then
+        echo "Commit refused: it would be recorded with \"$name <$address>\" as its $(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')." >&2
+        how_to_fix
+        exit 1
+      fi
+    done
+    ;;
+
+  pre-push)
+    remote=$2
+    zero=$(git hash-object --stdin < /dev/null | tr '0-9a-f' '0')
+    tab=$(printf '\t')
+    refused=0
+    while read -r _local_ref local_sha _remote_ref remote_sha; do
+      [ "$local_sha" = "$zero" ] && continue # a branch is being deleted
+      if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        set -- "$local_sha" --not "--remotes=$remote"
+      else
+        set -- "$remote_sha..$local_sha"
+      fi
+      list=$(git log --format="%h${tab}%an${tab}%ae${tab}%cn${tab}%ce" "$@") || exit 1
+      old_ifs=$IFS
+      IFS=$tab
+      while read -r short author_name author_address committer_name committer_address; do
+        [ -n "$short" ] || continue
+        if is_assistant "$author_name" "$author_address" || is_assistant "$committer_name" "$committer_address"; then
+          echo "Push refused: commit $short is recorded under an assistant's identity ($author_name / $committer_name)." >&2
+          refused=1
+        fi
+      done <<LIST
+$list
+LIST
+      IFS=$old_ifs
+      for short in $(git log --format=%h -i -E --grep="$attribution_line" "$@"); do
+        echo "Push refused: the message of commit $short carries assistant attribution." >&2
+        refused=1
+      done
+    done
+    if [ "$refused" = 1 ]; then
+      echo "Rewrite those commits under the owner's identity and with a clean message, then push again." >&2
+      how_to_fix
+      exit 1
+    fi
+    ;;
+esac
+exit 0
