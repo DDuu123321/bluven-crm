@@ -9,6 +9,7 @@ import { audit } from './audit';
 import { managerIds, notifyRoles, notifyUsers } from './notify';
 import { lockOrder, lockOrderForEdit, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity } from './orders';
 import { CURRENT_DOCUMENT } from './reference';
+import { completeSystemTasks } from './timeline';
 
 export interface ChecklistItem {
   /** Stable key: "address", "contract", "deposit" or "doc:<type key>". */
@@ -244,6 +245,8 @@ export async function pushOrder(ctx: Ctx, input: { orderId: string; notes?: stri
     const summary = version === 1 ? 'Pushed to operations' : `Pushed to operations again (submission ${version})`;
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'HANDOFF', summary, body: notes, payload: { handoffId: id, version } });
     await touchStaffActivity(tx, ctx, order);
+    // Pushing again is what the "returned by operations" task asked for.
+    await completeSystemTasks(tx, ctx, order.id, ['RETURNED']);
     await syncOrderStage(tx, ctx, order.id);
     await audit(tx, ctx, {
       action: 'handoff.push',

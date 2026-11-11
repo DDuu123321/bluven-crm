@@ -174,6 +174,8 @@ describe('the sales journey from lead to handover', () => {
     const again = await pushOrder(as(sam, clock), { orderId });
     expect(again.version).toBe(2);
     expect(await stageOf()).toBe('PUSHED');
+    // The task that asked for this closes itself instead of sitting in the list, overdue.
+    expect(await db.task.findUniqueOrThrow({ where: { id: fixTask.id } })).toMatchObject({ status: 'DONE', completedById: sam.id });
 
     await acceptHandoff(as(ops, clock), { orderId });
     expect(await stageOf()).toBe('HANDED_OVER');
