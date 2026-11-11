@@ -309,9 +309,10 @@ docker compose ps
 Pylon 那边，进入 Settings → Integrations & API → API settings：
 
 1. 点 Create API token，权限选 read。把得到的 token 填进 `PYLON_API_TOKEN`。
+   **token 只在创建成功的那一刻显示一次**，是一长串字符，当场复制下来。关掉之后页面上只剩名称，再也看不到，Pylon 发来的通知邮件里也没有。没来得及复制的话，再建一个新的，然后在旧的那一行点右侧的 ⋮ 把它删掉。
 2. 点 Add a destination，URL 填 `https://crm.bluven.com.au/api/webhooks/pylon`，勾选这六类事件：
    `solar_projects.created`、`solar_projects.updated`、`solar_designs.created`、`solar_designs.updated`、`web_proposals.signed`、`gateway_payments.created`。
-3. Pylon 会显示一次 secret，把它填进 `PYLON_WEBHOOK_SECRET`。
+3. Pylon 会显示一次 secret，把它填进 `PYLON_WEBHOOK_SECRET`。同样只显示一次，当场复制。这一步要等 CRM 已经部署在上面那个地址之后再做。
 
 变量填在哪：方式 A 是 Railway 的 Variables，保存后自动生效；方式 B 是服务器的 `.env`，然后执行 `docker compose up -d`。
 
