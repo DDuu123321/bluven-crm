@@ -528,17 +528,25 @@ export async function retryPylonEvent(ctx: Ctx, eventId: string): Promise<void> 
 
 /**
  * Catches events whose webhook delivery never arrived by reading Pylon's own event list (kept
- * for 30 days) and storing anything we have not seen. Stops at the first page that is all known.
+ * for 30 days, newest first) and storing anything we have not seen. It always looks back a few
+ * days, because a delivery can be missed while later ones arrive fine; beyond that it stops at
+ * the first page that holds nothing new.
  */
+const RECONCILE_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
+
 export async function reconcilePylonEvents(ctx: Ctx, api: PylonApi, maxPages = 20): Promise<{ added: number; pages: number }> {
   let added = 0;
   let pages = 0;
   let next: string | null | undefined;
+  const horizon = nowOf(ctx).getTime() - RECONCILE_LOOKBACK_MS;
   do {
     const page = await api.listEvents(next);
     pages++;
     let addedOnPage = 0;
+    let oldest = Infinity;
     for (const event of page.events) {
+      const created = Date.parse(str(obj(obj(event).attributes).created_at) ?? '');
+      if (!Number.isNaN(created)) oldest = Math.min(oldest, created);
       try {
         if (!(await recordPylonEvent(ctx.db, event, nowOf(ctx))).duplicate) addedOnPage++;
       } catch (e) {
@@ -546,7 +554,8 @@ export async function reconcilePylonEvents(ctx: Ctx, api: PylonApi, maxPages = 2
       }
     }
     added += addedOnPage;
-    next = addedOnPage === 0 ? null : page.next;
+    const withinLookback = oldest !== Infinity && oldest >= horizon;
+    next = addedOnPage === 0 && !withinLookback ? null : page.next;
   } while (next && pages < maxPages);
   return { added, pages };
 }

@@ -10,6 +10,7 @@ import {
   formatKwh,
   localDateString,
   localDateTimeInput,
+  endOfLocalDay,
   parseDateOnly,
   parseKiloToUnits,
   parseMoneyToCents,
@@ -33,6 +34,17 @@ describe('money', () => {
     expect(parseMoneyToCents('abc')).toBeNull();
     expect(parseMoneyToCents('-5')).toBeNull();
     expect(parseMoneyToCents('')).toBeNull();
+  });
+  it('accepts a comma only as a thousands separator', () => {
+    expect(parseMoneyToCents('1,850')).toBe(185000);
+    expect(parseMoneyToCents('$ 1,234,567.89')).toBe(123456789);
+    // Written the continental way these mean 900 and 1.5; read the other way they would be
+    // a hundred times too much. Refused, so the form can ask.
+    expect(parseMoneyToCents('900,00')).toBeNull();
+    expect(parseMoneyToCents('1,50')).toBeNull();
+    expect(parseMoneyToCents('12,34.50')).toBeNull();
+    expect(parseMoneyToCents('1,2345')).toBeNull();
+    expect(parseMoneyToCents(',500')).toBeNull();
   });
   it('round-trips through the form representation', () => {
     expect(centsToInput(1234550)).toBe('12345.50');
@@ -102,5 +114,20 @@ describe('misc formatting', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(2_500_000)).toBe('2.4 MB');
     expect(formatBytes(350 * 1024 * 1024)).toBe('350 MB');
+  });
+});
+
+describe('the end of a business day', () => {
+  it('is midnight at the start of the next day, also when the day is not 24 hours long', () => {
+    // An ordinary day in summer time (UTC+11).
+    expect(endOfLocalDay('2026-11-10', 'Australia/Sydney')!.toISOString()).toBe('2026-11-10T13:00:00.000Z');
+    // Daylight saving ends on 5 April 2026: the day has 25 hours and the next midnight is at UTC+10.
+    expect(endOfLocalDay('2026-04-05', 'Australia/Sydney')!.toISOString()).toBe('2026-04-05T14:00:00.000Z');
+    expect(endOfLocalDay('2026-04-05', 'Australia/Sydney')!.getTime() - zonedTimeToUtc('2026-04-05', 'Australia/Sydney')!.getTime()).toBe(25 * 3_600_000);
+    // It starts on 4 October 2026: the day has 23 hours.
+    expect(endOfLocalDay('2026-10-04', 'Australia/Sydney')!.getTime() - zonedTimeToUtc('2026-10-04', 'Australia/Sydney')!.getTime()).toBe(23 * 3_600_000);
+    // Month and year ends roll over.
+    expect(endOfLocalDay('2026-12-31', 'Australia/Sydney')!.toISOString()).toBe('2026-12-31T13:00:00.000Z');
+    expect(endOfLocalDay('not a date')).toBeNull();
   });
 });

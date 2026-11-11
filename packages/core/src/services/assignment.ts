@@ -39,6 +39,8 @@ export async function setOrderOwner(tx: Tx, ctx: Ctx, orderId: string, newOwnerI
     // it belongs in the pool, not under "imported history".
     data: { ownerId: newOwnerId, assignedAt: newOwnerId ? now : undefined, lastStaffActivityAt: now, idleLevel: 0, ...(newOwnerId ? { isBackfill: false } : {}) },
   });
+  // The idle clock starts again with the new owner, so a "no activity" task of the old one is void.
+  await tx.task.updateMany({ where: { orderId, kind: 'IDLE', status: 'OPEN' }, data: { status: 'CANCELLED' } });
   // Open tasks travel with the order. In the pool they belong to nobody.
   await tx.task.updateMany({
     where: { orderId, status: 'OPEN', OR: [{ assigneeId: order.ownerId }, { assigneeId: null }] },

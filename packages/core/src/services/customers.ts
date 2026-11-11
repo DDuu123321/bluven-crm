@@ -209,10 +209,24 @@ export async function moveOrderToNewProperty(ctx: Ctx, input: { orderId: string 
       },
     });
     await tx.order.update({ where: { id: order.id }, data: { propertyId } });
-    // Site photos uploaded under this order belong to the address they were taken at.
-    await tx.document.updateMany({ where: { orderId: order.id, propertyId: old.id }, data: { propertyId } });
+    // Site photos uploaded under this order show the address this order is really for, so they
+    // move with it. Photos taken over from an earlier order show the old address: they are set
+    // aside instead, or the checklist would count pictures of the wrong house.
+    const now = nowOf(ctx);
+    const reused = await tx.document.updateMany({
+      where: { orderId: order.id, propertyId: old.id, deletedAt: null, copiedFromId: { not: null } },
+      data: { deletedAt: now, deletedById: ctx.actor.kind === 'user' ? ctx.actor.id : null },
+    });
+    await tx.document.updateMany({ where: { orderId: order.id, propertyId: old.id, copiedFromId: null }, data: { propertyId } });
     const summary = `Order moved to a different property: ${formatAddress(f)}`;
-    await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'SYSTEM', summary, payload: { from: old.id, to: propertyId } });
+    await addActivity(tx, ctx, {
+      customerId: order.customerId,
+      orderId: order.id,
+      type: 'SYSTEM',
+      summary,
+      body: reused.count > 0 ? `${reused.count} site photo${reused.count === 1 ? '' : 's'} reused from an earlier order at the old address ${reused.count === 1 ? 'was' : 'were'} removed from this order.` : '',
+      payload: { from: old.id, to: propertyId, reusedPhotosRemoved: reused.count },
+    });
     await audit(tx, ctx, {
       action: 'order.move_property',
       entityType: 'Order',

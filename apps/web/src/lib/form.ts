@@ -1,5 +1,5 @@
 import 'server-only';
-import { getConfig, parseDateOnly, parseKiloToUnits, parseMoneyToCents, zonedTimeToUtc } from '@bluven/core';
+import { ValidationError, getConfig, parseDateOnly, parseKiloToUnits, parseMoneyToCents, zonedTimeToUtc } from '@bluven/core';
 
 /** Trimmed string value of a form field ('' when absent). */
 export function str(fd: FormData, name: string): string {
@@ -21,21 +21,30 @@ export function list(fd: FormData, name: string): string[] {
     .filter(Boolean);
 }
 
-/** Dollars typed by a person, as cents. Null when empty or not an amount. */
+/** A field that holds something the application cannot read. Reported on the field, never dropped. */
+function unreadable(name: string, hint: string): never {
+  throw new ValidationError('Please correct the highlighted fields.', { [name]: hint });
+}
+
+/** Dollars typed by a person, as cents. Null when left empty; an error on the field when it is not an amount. */
 export function money(fd: FormData, name: string): number | null {
   const s = str(fd, name);
-  return s ? parseMoneyToCents(s) : null;
+  if (!s) return null;
+  return parseMoneyToCents(s) ?? unreadable(name, 'Enter an amount such as 1850 or 1,850.00.');
 }
 
-/** "6.6" kW or kWh as thousandths (W or Wh). Null when empty or not a number. */
+/** "6.6" kW or kWh as thousandths (W or Wh). Null when left empty; an error on the field when it is not a number. */
 export function kilo(fd: FormData, name: string): number | null {
   const s = str(fd, name);
-  return s ? parseKiloToUnits(s) : null;
+  if (!s) return null;
+  return parseKiloToUnits(s) ?? unreadable(name, 'Enter a number such as 6.6.');
 }
 
+/** A whole number. Null when left empty; an error on the field when it is anything else. */
 export function int(fd: FormData, name: string): number | null {
   const s = str(fd, name);
-  return /^-?\d+$/.test(s) ? Number(s) : null;
+  if (!s) return null;
+  return /^-?\d+$/.test(s) ? Number(s) : unreadable(name, 'Enter a whole number.');
 }
 
 /** <input type="date"> value as a date-only value. */
