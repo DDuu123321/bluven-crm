@@ -6,12 +6,20 @@ import { makeWorld, orderAt, type World } from '../../core/test/setup-order';
 import {
   PylonApiError,
   PylonClient,
+  getPylonSyncState,
+  linkPylonProject,
   parseDesign,
   parseProject,
+  parsePylonProjectRef,
+  pollPylonEvents,
+  previewPylonProject,
   processPylonEvents,
+  purgePylonEvents,
   reconcilePylonEvents,
   recordPylonEvent,
+  refreshFromPylon,
   retryPylonEvent,
+  syncPylonProject,
   signPylonPayload,
   verifyPylonSignature,
   type PylonApi,
@@ -77,8 +85,23 @@ function event(name: string, attributes: Record<string, unknown>, related: Recor
   };
 }
 
-const project = (over: Partial<PylonProject> = {}): PylonProject => ({ id: 'prj_1', referenceNumber: null, isAccepted: false, manuallySold: false, hasEsignature: false, esignaturePdfUrl: null, latestSignedDesignId: null, primaryDesignId: null, ...over });
-const design = (over: Partial<PylonDesign> = {}): PylonDesign => ({ id: 'des_1', projectId: 'prj_1', dcOutputKw: 6.6, storageKwh: 13.5, totalCents: 1_850_000, currency: 'AUD', depositCents: 185_000, webProposalUrl: 'https://app.getpylon.com/p/abc', pdfProposalUrl: 'https://files.getpylon.com/p/abc.pdf', ...over });
+const project = (over: Partial<PylonProject> = {}): PylonProject => ({
+  id: 'prj_1',
+  referenceNumber: null,
+  isAccepted: false,
+  manuallySold: false,
+  hasEsignature: false,
+  esignaturePdfUrl: null,
+  latestSignedDesignId: null,
+  primaryDesignId: null,
+  designIds: [],
+  inAppUrl: `https://app.getpylon.com/library/${over.id ?? 'prj_1'}`,
+  customerName: 'Jane Smith',
+  siteAddress: '12 Sample St, Parramatta, New South Wales, 2150',
+  site: { nmi: null, retailer: null, phases: null },
+  ...over,
+});
+const design = (over: Partial<PylonDesign> = {}): PylonDesign => ({ id: 'des_1', projectId: 'prj_1', title: null, dcOutputKw: 6.6, storageKwh: 13.5, totalCents: 1_850_000, currency: 'AUD', depositCents: 185_000, webProposalUrl: 'https://app.getpylon.com/p/abc', pdfProposalUrl: 'https://files.getpylon.com/p/abc.pdf', ...over });
 const order = (id: string) => db.order.findUniqueOrThrow({ where: { id } });
 const stored = (pylonEventId: string) => db.pylonEvent.findUniqueOrThrow({ where: { pylonEventId } });
 const cancelOrderAsSam = (orderId: string) => cancelOrder(as(w.sam, w.clock), { orderId, note: 'Customer changed their mind', refundStatus: 'NOT_REQUIRED' });
@@ -528,6 +551,229 @@ describe('which project belongs to which order', () => {
   });
 });
 
+describe('reading a whole project', () => {
+  it('brings in every design made before the project could be matched, and the site details Pylon knows', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const orderNo = (await order(orderId)).orderNo;
+    const pylon = new FakePylon();
+    // Two options were designed long ago, before anyone typed the CRM order number into Pylon.
+    pylon.designs.set('des_a', design({ id: 'des_a', title: 'Option A', totalCents: 900_000, storageKwh: null }));
+    pylon.designs.set('des_b', design({ id: 'des_b', title: 'Option B with battery' }));
+    pylon.designs.set('des_empty', design({ id: 'des_empty', totalCents: null, dcOutputKw: null, storageKwh: null }));
+    pylon.projects.set('prj_1', project({ referenceNumber: orderNo, designIds: ['des_a', 'des_b', 'des_empty', 'des_gone'], site: { nmi: '4103 1234 567', retailer: 'AGL', phases: 'three' } }));
+
+    await recordPylonEvent(db, event('solar_projects.updated', { project_reference_number: orderNo }, { solar_project: 'prj_1' }), w.clock.current);
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
+
+    const quotes = await db.quote.findMany({ where: { orderId }, orderBy: { version: 'asc' } });
+    expect(quotes.map((q) => [q.pylonDesignId, q.title, q.totalCents])).toEqual([
+      ['des_a', '6.6 kW solar · Option A', 900_000],
+      ['des_b', '6.6 kW solar with 13.5 kWh battery · Option B with battery', 1_850_000],
+    ]);
+    const o = await db.order.findUniqueOrThrow({ where: { id: orderId }, include: { property: true } });
+    expect(o.pylonSyncedAt).not.toBeNull();
+    expect(o.property).toMatchObject({ nmi: '41031234567', retailer: 'AGL', phase: 'Three phase' });
+    expect(await db.auditLog.count({ where: { orderId, action: 'property.update', summary: { contains: 'filled in from Pylon' } } })).toBe(1);
+
+    // Reading again changes nothing, and what a person has entered is never overwritten.
+    await db.property.update({ where: { id: o.propertyId }, data: { retailer: 'Origin' } });
+    pylon.projects.set('prj_1', project({ referenceNumber: orderNo, designIds: ['des_a', 'des_b'], site: { nmi: '99999999999', retailer: 'Red Energy', phases: 'one' } }));
+    expect(await syncPylonProject(ctx, pylon, orderId)).toEqual({ designs: 2, quotesChanged: 0, signature: null, filled: [] });
+    expect(await db.quote.count({ where: { orderId } })).toBe(2);
+    expect((await db.property.findUniqueOrThrow({ where: { id: o.propertyId } })).retailer).toBe('Origin');
+  });
+
+  it('tries the full read again when Pylon could not be reached the first time', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const orderNo = (await order(orderId)).orderNo;
+    const pylon = new FakePylon();
+    pylon.designs.set('des_a', design({ id: 'des_a' }));
+    pylon.projects.set('prj_1', project({ referenceNumber: orderNo, designIds: ['des_a'] }));
+    const e = event('solar_projects.created', { project_reference_number: orderNo }, { solar_project: 'prj_1' });
+    await recordPylonEvent(db, e, w.clock.current);
+    pylon.down = true;
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ retrying: 1 });
+    // The link is known, the read is still owed.
+    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', pylonSyncedAt: null });
+    pylon.down = false;
+    w.clock.advanceMinutes(2);
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
+    expect(await db.quote.count({ where: { orderId } })).toBe(1);
+    expect((await order(orderId)).pylonSyncedAt).not.toBeNull();
+  });
+
+  it('archives a signature it finds on the project when the "signed" event never came', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const orderNo = (await order(orderId)).orderNo;
+    const pylon = new FakePylon();
+    const url = 'https://app.getpylon.com/files/signed.pdf';
+    pylon.files.set(url, pdf('signed proposal'));
+    pylon.designs.set('des_1', design());
+    pylon.projects.set('prj_1', project({ referenceNumber: orderNo, designIds: ['des_1'], isAccepted: true, manuallySold: true, hasEsignature: true, esignaturePdfUrl: url, latestSignedDesignId: 'des_1', primaryDesignId: 'des_1' }));
+
+    await recordPylonEvent(db, event('solar_projects.updated', { project_reference_number: orderNo }, { solar_project: 'prj_1' }), w.clock.current);
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
+    expect((await order(orderId)).stage).toBe('SIGNED');
+    const contract = await db.contract.findFirstOrThrow({ where: { orderId, voidedAt: null } });
+    expect(contract.source).toBe('PYLON');
+    // Signed on the web, so there is nothing to nag sales about.
+    expect(await db.task.count({ where: { orderId, kind: 'PYLON_ACCEPTED' } })).toBe(0);
+
+    // The real event arriving afterwards, or another read, does not archive it twice.
+    await recordPylonEvent(db, event('web_proposals.signed', {}, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
+    await syncPylonProject(ctx, pylon, orderId);
+    expect(await db.contract.count({ where: { orderId } })).toBe(1);
+    expect(await db.document.count({ where: { orderId, type: { key: 'signed_contract' } } })).toBe(1);
+  });
+
+  it('does not ask Pylon about projects whose events already say they carry no reference', async () => {
+    const pylon = new FakePylon();
+    pylon.projects.set('prj_9', project({ id: 'prj_9' }));
+    // What a busy account sends all day: designs of projects that have nothing to do with the CRM.
+    for (let i = 0; i < 5; i++) await recordPylonEvent(db, event('solar_designs.updated', { project_reference_number: '' }, { solar_project: 'prj_9', solar_design: 'des_9' }), w.clock.current);
+    expect(await processPylonEvents(ctx, pylon)).toEqual({ processed: 0, ignored: 5, retrying: 0, failed: 0 });
+    expect(pylon.calls).toEqual([]);
+    // An event that does not say (a signature) still has to ask.
+    await recordPylonEvent(db, event('web_proposals.signed', {}, { solar_project: 'prj_9' }), w.clock.current);
+    await processPylonEvents(ctx, pylon);
+    expect(pylon.calls).toEqual(['project:prj_9']);
+  });
+});
+
+describe('linking an existing Pylon project by hand', () => {
+  const link = 'https://app.getpylon.com/library/prj_1/view/des_1';
+
+  it('shows which project it is, then links it and reads it in full', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const pylon = new FakePylon();
+    pylon.designs.set('des_1', design({ title: 'Option A' }));
+    pylon.projects.set('prj_1', project({ designIds: ['des_1'], site: { nmi: '41031234567', retailer: null, phases: 'one' } }));
+    const sam = as(w.sam, w.clock);
+
+    expect(await previewPylonProject(sam, pylon, { orderId, ref: link })).toEqual({
+      projectId: 'prj_1',
+      url: 'https://app.getpylon.com/library/prj_1',
+      customerName: 'Jane Smith',
+      siteAddress: '12 Sample St, Parramatta, New South Wales, 2150',
+      designs: 1,
+      signed: false,
+      reference: null,
+    });
+    expect((await order(orderId)).pylonProjectId).toBeNull(); // looking changes nothing
+
+    expect(await linkPylonProject(sam, pylon, { orderId, ref: link })).toEqual({ designs: 1, quotesChanged: 1, signature: null, filled: ['nmi', 'phase'] });
+    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', pylonProjectUrl: 'https://app.getpylon.com/library/prj_1' });
+    expect(await db.quote.count({ where: { orderId, pylonDesignId: 'des_1' } })).toBe(1);
+    expect(await db.auditLog.count({ where: { orderId, action: 'order.pylon_link', actorId: w.sam.id } })).toBe(1);
+    expect(await db.activity.count({ where: { orderId, summary: 'Linked to a project in Pylon' } })).toBe(1);
+
+    // From now on the project's events find the order without any reference number.
+    pylon.designs.set('des_2', design({ id: 'des_2', totalCents: 2_000_000 }));
+    await recordPylonEvent(db, event('solar_designs.created', { project_reference_number: '' }, { solar_project: 'prj_1', solar_design: 'des_2' }), w.clock.current);
+    expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
+    expect(await db.quote.count({ where: { orderId } })).toBe(2);
+
+    // Linking the same project again is a re-read; asking for a fresh read works the same way.
+    expect(await linkPylonProject(sam, pylon, { orderId, ref: 'prj_1' })).toMatchObject({ quotesChanged: 0 });
+    expect(await refreshFromPylon(sam, pylon, { orderId })).toMatchObject({ designs: 1, quotesChanged: 0 });
+    expect(await db.auditLog.count({ where: { orderId, action: 'order.pylon_link' } })).toBe(1);
+  });
+
+  it('keeps one project to one order and respects who may work on the order', async () => {
+    const first = await orderAt(w, 'ASSIGNED');
+    const second = await orderAt(w, 'ASSIGNED', { externalId: 'second', email: 'someone.else@example.com', phone: '0411 222 333', address: '9 Other Rd' });
+    const pylon = new FakePylon();
+    pylon.projects.set('prj_1', project());
+    pylon.projects.set('prj_2', project({ id: 'prj_2' }));
+    const sam = as(w.sam, w.clock);
+    await linkPylonProject(sam, pylon, { orderId: first.orderId, ref: 'prj_1' });
+    const firstNo = (await order(first.orderId)).orderNo;
+
+    // The project is taken: a salesperson is not told by which order, a manager is.
+    await expect(linkPylonProject(sam, pylon, { orderId: second.orderId, ref: 'prj_1' })).rejects.toMatchObject({ code: 'conflict', message: 'That Pylon project is already linked to another order. Please ask your manager.' });
+    await expect(previewPylonProject(as(w.manager, w.clock), pylon, { orderId: second.orderId, ref: 'prj_1' })).rejects.toMatchObject({ code: 'conflict', message: `That Pylon project is already linked to order ${firstNo}. Unlink it there first.` });
+    // The order is taken: changing its project is a manager's decision (unlink first).
+    await expect(linkPylonProject(sam, pylon, { orderId: first.orderId, ref: 'prj_2' })).rejects.toMatchObject({ code: 'conflict' });
+    await unlinkPylonProject(as(w.manager, w.clock), { orderId: first.orderId });
+    await linkPylonProject(sam, pylon, { orderId: first.orderId, ref: 'prj_2' });
+    expect((await order(first.orderId)).pylonProjectId).toBe('prj_2');
+
+    // Not a project, not in Pylon, not your order, no token.
+    await expect(linkPylonProject(sam, pylon, { orderId: second.orderId, ref: 'https://example.com/library/prj_1' })).rejects.toMatchObject({ code: 'validation' });
+    await expect(linkPylonProject(sam, pylon, { orderId: second.orderId, ref: 'nosuchprj' })).rejects.toMatchObject({ code: 'validation', message: 'Pylon has no project with that address.' });
+    await expect(previewPylonProject(as(w.alex, w.clock), pylon, { orderId: second.orderId, ref: 'prj_1' })).rejects.toMatchObject({ code: 'not_found' });
+    await expect(linkPylonProject(sam, null, { orderId: second.orderId, ref: 'prj_1' })).rejects.toBeInstanceOf(PylonApiError);
+    expect((await order(second.orderId)).pylonProjectId).toBeNull();
+  });
+});
+
+describe('reading the event list every minute', () => {
+  it('keeps a record of whether Pylon can be reached and tells the administrators once when it cannot', async () => {
+    const admin = await makeUser(['ADMIN'], 'Ada Admin');
+    const pylon = new FakePylon();
+    const fresh = event('solar_projects.created', { created_at: new Date(w.clock.current.getTime() - 60_000).toISOString() });
+    pylon.pages = [{ events: [fresh.data], next: null }];
+    expect(await pollPylonEvents(ctx, pylon)).toEqual({ added: 1, pages: 1, error: null });
+    expect(await getPylonSyncState(db)).toMatchObject({ lastOkAt: w.clock.current.toISOString(), lastEventAt: w.clock.current.toISOString(), lastError: null, consecutiveFailures: 0 });
+
+    pylon.down = true;
+    for (let i = 0; i < 7; i++) {
+      w.clock.advanceMinutes(1);
+      expect((await pollPylonEvents(ctx, pylon)).error).toContain('503');
+    }
+    expect(await getPylonSyncState(db)).toMatchObject({ consecutiveFailures: 7, alerted: true, lastError: expect.stringContaining('503') });
+    expect(await db.notification.count({ where: { userId: admin.id, type: 'pylon.unreachable' } })).toBe(1);
+
+    pylon.down = false;
+    w.clock.advanceMinutes(1);
+    expect(await pollPylonEvents(ctx, pylon)).toEqual({ added: 0, pages: 1, error: null });
+    expect(await getPylonSyncState(db)).toMatchObject({ consecutiveFailures: 0, alerted: false, lastError: null });
+  });
+
+  it('stops at what it already has, a page or two in', async () => {
+    const pylon = new FakePylon();
+    const at = (minutesAgo: number) => ({ created_at: new Date(w.clock.current.getTime() - minutesAgo * 60_000).toISOString() });
+    const known = [event('solar_designs.updated', at(40)), event('solar_designs.updated', at(50))];
+    const older = [event('solar_designs.updated', at(600))];
+    pylon.pages = [
+      { events: [...known.map((e) => e.data)], next: '1' },
+      { events: older.map((e) => e.data), next: '2' },
+      { events: [event('never.read', at(9000)).data], next: null },
+    ];
+    // The first read ever goes a day back, and on while it keeps finding events it does not have.
+    expect(await pollPylonEvents(ctx, pylon)).toMatchObject({ added: 4, pages: 3 });
+    // A minute later two new events sit on top of the list; the second page is not asked for.
+    w.clock.advanceMinutes(1);
+    const fresh = [event('solar_projects.updated', at(0)), event('solar_designs.created', at(0))];
+    pylon.pages[0] = { events: [...fresh.map((e) => e.data), ...known.map((e) => e.data)], next: '1' };
+    pylon.calls = [];
+    expect(await pollPylonEvents(ctx, pylon)).toMatchObject({ added: 2, pages: 2 });
+    w.clock.advanceMinutes(30);
+    pylon.calls = [];
+    expect(await pollPylonEvents(ctx, pylon)).toMatchObject({ added: 0, pages: 1 });
+    expect(pylon.calls).toEqual(['events:first']);
+  });
+
+  it('clears out old events that never concerned an order', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const orderNo = (await order(orderId)).orderNo;
+    const pylon = new FakePylon();
+    pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));
+    const ours = event('solar_projects.created', { project_reference_number: orderNo }, { solar_project: 'prj_1' });
+    const noise = event('solar_designs.updated', { project_reference_number: '' }, { solar_project: 'prj_9', solar_design: 'des_9' });
+    for (const e of [ours, noise]) await recordPylonEvent(db, e, w.clock.current);
+    await processPylonEvents(ctx, pylon);
+    w.clock.advanceDays(20);
+    const recentNoise = event('solar_designs.updated', { project_reference_number: '' }, { solar_project: 'prj_9', solar_design: 'des_9' });
+    await recordPylonEvent(db, recentNoise, w.clock.current);
+    await processPylonEvents(ctx, pylon);
+    w.clock.advanceDays(20);
+    expect(await purgePylonEvents(ctx)).toEqual({ removed: 1 });
+    expect((await db.pylonEvent.findMany({ orderBy: { receivedAt: 'asc' } })).map((e) => e.pylonEventId)).toEqual([ours.data.id, recentNoise.data.id]);
+  });
+});
+
 describe('reconciliation', () => {
   it('stores events whose webhook never arrived, looking back a few days past what it already knows', async () => {
     const pylon = new FakePylon();
@@ -559,7 +805,21 @@ describe('API client', () => {
         attributes: { reference_number: 'BLV-2026-00001', acceptance: { is_accepted: true, manually_sold: false, latest_esignature: true, latest_esignature_pdf_url: 'https://x/y.pdf' } },
         relationships: { primary_design: { data: null }, latest_signed_design: { data: { type: 'solar_designs', id: 'des_7' } }, designs: { data: [] } },
       }),
-    ).toEqual({ id: 'rukSigcyTR', referenceNumber: 'BLV-2026-00001', isAccepted: true, manuallySold: false, hasEsignature: true, esignaturePdfUrl: 'https://x/y.pdf', latestSignedDesignId: 'des_7', primaryDesignId: null });
+    ).toEqual({
+      id: 'rukSigcyTR',
+      referenceNumber: 'BLV-2026-00001',
+      isAccepted: true,
+      manuallySold: false,
+      hasEsignature: true,
+      esignaturePdfUrl: 'https://x/y.pdf',
+      latestSignedDesignId: 'des_7',
+      primaryDesignId: null,
+      designIds: [],
+      inAppUrl: 'https://app.getpylon.com/library/rukSigcyTR',
+      customerName: null,
+      siteAddress: null,
+      site: { nmi: null, retailer: null, phases: null },
+    });
     expect(
       parseDesign({
         type: 'solar_designs',
@@ -571,10 +831,73 @@ describe('API client', () => {
         },
         relationships: { project: { data: { type: 'solar_projects', id: 'rukSigcyTR' } } },
       }),
-    ).toEqual({ id: 'des_7', projectId: 'rukSigcyTR', dcOutputKw: 6.49, storageKwh: 13.5, totalCents: 760000, currency: 'AUD', depositCents: 176000, webProposalUrl: 'https://w', pdfProposalUrl: 'https://p' });
+    ).toEqual({ id: 'des_7', projectId: 'rukSigcyTR', title: null, dcOutputKw: 6.49, storageKwh: 13.5, totalCents: 760000, currency: 'AUD', depositCents: 176000, webProposalUrl: 'https://w', pdfProposalUrl: 'https://p' });
     // Missing pieces are null, not exceptions.
     expect(parseDesign({ id: 'd', attributes: {} })).toMatchObject({ dcOutputKw: null, totalCents: null, depositCents: null, projectId: null });
     expect(() => parseProject({ attributes: {} })).toThrow(PylonApiError);
+  });
+
+  it('reads documents shaped like the ones the live API returns', () => {
+    const p = parseProject({
+      type: 'solar_projects',
+      id: 'aB3dE5fG7h',
+      attributes: {
+        reference_number: '',
+        site_location: [151.0, -33.8],
+        site_country_code: 'AU',
+        site_address: { line1: '12 Sample St', line2: null, city: 'Parramatta', state: 'New South Wales', zip: '2150', country: 'Australia' },
+        customer_details: { name: 'Jane Smith', phone: '0412345678', email: 'jane.smith@example.com' },
+        site_details: { roof_type: '', number_of_storeys: null, power_phases: 'three', building_classification: null, nmi: '41031234567', meter_number: '', energy_retailer: 'AGL', energy_distributor: 'Ausgrid', dnsp_preapproval_number: '', mpan: '' },
+        acceptance: { is_accepted: true, manually_sold: true, latest_esignature: true, latest_esignature_pdf_url: 'https://app.getpylon.com/a/b/c/d/e/signed.pdf?signature=x' },
+        job_sheet_url: null,
+        is_committed: true,
+        is_archived: false,
+        is_example: false,
+        created_at: '2026-11-11T16:39:22+00:00',
+        updated_at: '2026-11-11T16:40:00+00:00',
+      },
+      relationships: {
+        owner: { data: { type: 'users', id: 'u1' }, links: { related: 'https://api.getpylon.com/v1/users/u1' } },
+        designs: { data: [{ type: 'solar_designs', id: 'des_a' }, { type: 'solar_designs', id: 'des_b' }], links: { related: 'https://api.getpylon.com/v1/solar_designs' } },
+        primary_design: { data: { type: 'solar_designs', id: 'des_b' } },
+        latest_signed_design: { data: { type: 'solar_designs', id: 'des_b' } },
+        opportunities: { data: [] },
+      },
+      links: { self: 'https://api.getpylon.com/v1/solar_projects/aB3dE5fG7h' },
+    });
+    expect(p).toMatchObject({
+      referenceNumber: null, // an empty reference is "none"
+      isAccepted: true,
+      manuallySold: true,
+      hasEsignature: true,
+      latestSignedDesignId: 'des_b',
+      primaryDesignId: 'des_b',
+      designIds: ['des_a', 'des_b'],
+      customerName: 'Jane Smith',
+      siteAddress: '12 Sample St, Parramatta, New South Wales, 2150',
+      site: { nmi: '41031234567', retailer: 'AGL', phases: 'three' },
+    });
+    const d = parseDesign({
+      type: 'solar_designs',
+      id: 'des_b',
+      attributes: {
+        title: 'Option B with battery',
+        summary: { dc_output_kw: 13, storage_kwh: 26.6, description: '13 kW solar system', web_proposal_url: 'https://app.getpylon.com/p/x', pdf_proposal_url: 'https://app.getpylon.com/p/x/pdf', latest_snapshot_url: '' },
+        pricing: { total: 1234567, total_includes_tax: true, currency: 'aud' },
+        proposal_quote: { currency: 'aud', total_price_formatted: '$12,345.67', deposit_amount_formatted: '$500.00', financed_amount_formatted: null },
+      },
+      relationships: {},
+    });
+    expect(d).toMatchObject({ title: 'Option B with battery', dcOutputKw: 13, storageKwh: 26.6, totalCents: 1234567, currency: 'AUD', depositCents: 50000, projectId: null });
+  });
+
+  it('reads a project out of what a person pastes', () => {
+    expect(parsePylonProjectRef('https://app.getpylon.com/library/aB3dE5fG7h')).toBe('aB3dE5fG7h');
+    expect(parsePylonProjectRef(' https://app.getpylon.com/library/aB3dE5fG7h/view/Zz9yX8wV7u?tab=1 ')).toBe('aB3dE5fG7h');
+    expect(parsePylonProjectRef('aB3dE5fG7h')).toBe('aB3dE5fG7h');
+    for (const bad of ['', 'not a link', 'https://evil.example/library/aB3dE5fG7h', 'http://app.getpylon.com/library/aB3dE5fG7h', 'https://app.getpylon.com/settings/api', 'https://app.getpylon.com/library/', '../../etc/passwd']) {
+      expect(parsePylonProjectRef(bad), bad).toBeNull();
+    }
   });
 
   it('follows a download link to its storage host, but not into our own network', async () => {
@@ -615,10 +938,12 @@ describe('API client', () => {
     expect((await client.getSolarProject('a b')).referenceNumber).toBe('R');
     expect(seen[0]).toEqual({ url: 'https://api.getpylon.com/v1/solar_projects/a%20b', auth: 'Bearer tok' });
     await client.getSolarDesign('d1');
-    expect(seen[1]!.url).toBe('https://api.getpylon.com/v1/solar_designs/d1?fields[solar_designs]=summary,pricing,proposal_quote');
+    expect(seen[1]!.url).toBe('https://api.getpylon.com/v1/solar_designs/d1?fields[solar_designs]=title,summary,pricing,proposal_quote,project');
 
     // A "next" link pointing somewhere else never receives the token.
     const page = await client.listEvents();
+    // The list is asked for newest first; left to itself Pylon starts with the oldest event.
+    expect(seen.at(-1)!.url).toBe('https://api.getpylon.com/v1/events?sort=-created_at');
     await expect(client.listEvents(page.next)).rejects.toMatchObject({ retryable: false });
     expect(seen.every((s) => s.url.startsWith('https://api.getpylon.com/'))).toBe(true);
 

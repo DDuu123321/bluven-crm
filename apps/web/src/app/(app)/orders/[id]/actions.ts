@@ -24,9 +24,11 @@ import {
   voidContract,
   withdrawDeposit,
 } from '@bluven/core';
+import { linkPylonProject, previewPylonProject, refreshFromPylon } from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { dateOnly, dateTime, kilo, list, money, str } from '@/lib/form';
+import { describePylonSync, withPylon } from '@/lib/pylon';
 
 /**
  * A date-time field pre-filled with "now" only carries minutes. When the user leaves it alone the
@@ -207,6 +209,30 @@ export async function unlinkPylonAction(orderId: string): Promise<ActionResult> 
   return runAction(async (ctx) => {
     await unlinkPylonProject(ctx, { orderId });
     return { message: 'Unlinked. The next project in Pylon with this order number as its reference will be linked.' };
+  });
+}
+
+/** One form, two buttons: look at which project a pasted Pylon address leads to, or link it. */
+export async function linkPylonAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const ref = str(formData, 'ref');
+    if (str(formData, 'intent') !== 'link') {
+      const p = await withPylon((api) => previewPylonProject(ctx, api, { orderId, ref }));
+      const who = [p.customerName, p.siteAddress].filter(Boolean).join(', ') || 'a project without customer details';
+      const designs = p.designs === 0 ? 'no design yet' : `${p.designs} design${p.designs === 1 ? '' : 's'}`;
+      return { message: `Pylon project for ${who}: ${designs}${p.signed ? ', signed by the customer' : ''}. If this is the right one, press “Link project”.` };
+    }
+    const result = await withPylon((api) => linkPylonProject(ctx, api, { orderId, ref }));
+    return { message: `Linked. ${describePylonSync(result)}` };
+  });
+}
+
+export async function refreshPylonAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const result = await withPylon((api) => refreshFromPylon(ctx, api, { orderId }));
+    return { message: describePylonSync(result) };
   });
 }
 

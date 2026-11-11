@@ -7,6 +7,7 @@ import {
   formatKw,
   formatKwh,
   fullName,
+  getConfig,
   getOrderDeal,
   unitsToKiloInput,
   type Ctx,
@@ -16,7 +17,7 @@ import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal,
 import { Alert, Badge, Card, CardBody, CardHeader, Dl, EmptyState, Input, Label, Select, Table, Td, Textarea, buttonClass, cx } from '@/components/ui';
 import { fmtDate, fmtDateTime, inputDate, inputDateTime } from '@/lib/fmt';
 import { pylonDesignLink } from '@/lib/pylon-link';
-import { deleteQuoteAction, unlinkPylonAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
+import { deleteQuoteAction, linkPylonAction, refreshPylonAction, unlinkPylonAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
 
 const fileInput =
   'block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50';
@@ -80,6 +81,7 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
   const pastDeposits = deposits.filter((d) => d.status === 'REJECTED' || d.status === 'WITHDRAWN');
   const suggestedDeposit = accepted?.depositCents ?? (accepted?.totalCents ? Math.round((accepted.totalCents * defaultDepositPercent) / 100) : null);
   const address = formatAddress(order.property);
+  const pylonConnected = !!getConfig().pylon.apiToken;
   const pylonLink = address
     ? pylonDesignLink({ address, customerName: fullName(order.customer), email: order.customer.emails[0]?.email, phone: order.customer.phones[0]?.raw, orderNo: order.orderNo })
     : null;
@@ -101,6 +103,38 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 >
                   Unlink from Pylon
                 </ActionButton>
+              )}
+              {editable && pylonConnected && order.pylonProjectId && (
+                <ActionButton action={refreshPylonAction.bind(null, order.id)} variant="link" title={order.pylonSyncedAt ? `Last read from Pylon ${fmtDateTime(order.pylonSyncedAt)}` : 'Not read from Pylon yet'}>
+                  Refresh from Pylon
+                </ActionButton>
+              )}
+              {editable && pylonConnected && !order.pylonProjectId && (
+                <Modal
+                  trigger="Link Pylon project"
+                  title="Link a project that already exists in Pylon"
+                  variant="link"
+                  description="For a project that was started in Pylon without this order number as its reference. Open the project in Pylon and copy its address from the browser."
+                >
+                  <ActionForm action={linkPylonAction.bind(null, order.id)} className="space-y-4" keepValues stayOpen>
+                    <div>
+                      <Label htmlFor="pylon-ref">Address of the project in Pylon</Label>
+                      <Input id="pylon-ref" name="ref" placeholder="https://app.getpylon.com/library/…" autoComplete="off" />
+                      <FieldError name="ref" />
+                      <p className="mt-1 text-xs text-slate-500">Its designs become quote versions here, and what the customer signs or pays in Pylon will reach this order.</p>
+                    </div>
+                    <FormMessage />
+                    <div className="flex justify-end gap-2">
+                      <CancelButton>Close</CancelButton>
+                      <SubmitButton name="intent" value="check" variant="secondary" pendingLabel="Checking…">
+                        Check
+                      </SubmitButton>
+                      <SubmitButton name="intent" value="link" pendingLabel="Linking…">
+                        Link project
+                      </SubmitButton>
+                    </div>
+                  </ActionForm>
+                </Modal>
               )}
               {order.pylonProjectUrl ? (
                 <a href={order.pylonProjectUrl} target="_blank" rel="noreferrer" className={buttonClass('secondary')}>

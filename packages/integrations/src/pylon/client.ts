@@ -1,6 +1,6 @@
 // Client for the Pylon API (https://api.getpylon.com). JSON:API over HTTPS with a bearer token.
-// Written from Pylon's developer documentation. Every field is read defensively because the
-// integration has not been exercised against a live Pylon account yet.
+// Written from Pylon's developer documentation and checked against a live account. Fields are
+// still read defensively: a value that is missing or of another type becomes null, never a crash.
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeWebStream } from 'node:stream/web';
 import { parseMoneyToCents } from '@bluven/core';
@@ -28,11 +28,22 @@ export interface PylonProject {
   esignaturePdfUrl: string | null;
   latestSignedDesignId: string | null;
   primaryDesignId: string | null;
+  /** Every design of the project, oldest first as Pylon lists them. */
+  designIds: string[];
+  /** Where a person opens the project in Pylon. */
+  inAppUrl: string;
+  /** For showing a person which project this is before they link it. */
+  customerName: string | null;
+  siteAddress: string | null;
+  /** What Pylon knows about the site. Empty values are null. */
+  site: { nmi: string | null; retailer: string | null; phases: 'one' | 'three' | null };
 }
 
 export interface PylonDesign {
   id: string;
   projectId: string | null;
+  /** The name the designer gave this option in Pylon. */
+  title: string | null;
   dcOutputKw: number | null;
   storageKwh: number | null;
   totalCents: number | null;
@@ -54,7 +65,29 @@ export interface PylonApi {
   getSolarDesign(id: string): Promise<PylonDesign>;
   /** Opens a download of a file Pylon handed us a link to (the signed proposal PDF). */
   download(url: string): Promise<Readable>;
+  /** A page of Pylon's event list, newest first. Pass the previous page's `next` to go further back. */
   listEvents(next?: string | null): Promise<PylonEventPage>;
+}
+
+/** Where a project lives in Pylon's own application. Events carry the same address. */
+export const pylonProjectUrl = (projectId: string): string => `https://app.getpylon.com/library/${encodeURIComponent(projectId)}`;
+
+/**
+ * Reads a project id out of what a person pasted: the address of the project (or of one of its
+ * designs) in Pylon, or the bare id. Returns null for anything else.
+ */
+export function parsePylonProjectRef(input: string): string | null {
+  const text = input.trim();
+  if (/^[A-Za-z0-9_-]{4,40}$/.test(text)) return text;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'app.getpylon.com') return null;
+  const match = /^\/library\/([A-Za-z0-9_-]{4,40})(?:\/|$)/.exec(url.pathname);
+  return match ? match[1]! : null;
 }
 
 type Json = Record<string, unknown>;
@@ -69,6 +102,10 @@ export function parseProject(data: unknown): PylonProject {
   if (!id) throw new PylonApiError('Pylon returned a project without an id.', null, false);
   const a = obj(d.attributes);
   const acceptance = obj(a.acceptance);
+  const address = obj(a.site_address);
+  const site = obj(a.site_details);
+  const designs = obj(obj(d.relationships).designs).data;
+  const phases = str(site.power_phases)?.toLowerCase();
   return {
     id,
     referenceNumber: str(a.reference_number),
@@ -78,6 +115,11 @@ export function parseProject(data: unknown): PylonProject {
     esignaturePdfUrl: str(acceptance.latest_esignature_pdf_url),
     latestSignedDesignId: relatedId(d.relationships, 'latest_signed_design'),
     primaryDesignId: relatedId(d.relationships, 'primary_design'),
+    designIds: (Array.isArray(designs) ? designs : []).map((item) => str(obj(item).id)).filter((v): v is string => v !== null),
+    inAppUrl: pylonProjectUrl(id),
+    customerName: str(obj(a.customer_details).name),
+    siteAddress: [str(address.line1), str(address.line2), str(address.city), str(address.state), str(address.zip)].filter(Boolean).join(', ') || null,
+    site: { nmi: str(site.nmi), retailer: str(site.energy_retailer), phases: phases === 'one' || phases === 'three' ? phases : null },
   };
 }
 
@@ -94,6 +136,7 @@ export function parseDesign(data: unknown): PylonDesign {
   return {
     id,
     projectId: relatedId(d.relationships, 'project') ?? relatedId(d.relationships, 'solar_project'),
+    title: str(a.title),
     dcOutputKw: num(summary.dc_output_kw),
     storageKwh: num(summary.storage_kwh),
     // Pylon reports the total in cents.
@@ -167,7 +210,7 @@ export class PylonClient implements PylonApi {
 
   async getSolarDesign(id: string): Promise<PylonDesign> {
     // The fields parameter is mandatory on design endpoints.
-    return parseDesign((await this.get(`/v1/solar_designs/${encodeURIComponent(id)}?fields[solar_designs]=summary,pricing,proposal_quote`)).data);
+    return parseDesign((await this.get(`/v1/solar_designs/${encodeURIComponent(id)}?fields[solar_designs]=title,summary,pricing,proposal_quote,project`)).data);
   }
 
   async download(url: string): Promise<Readable> {
@@ -200,7 +243,9 @@ export class PylonClient implements PylonApi {
   }
 
   async listEvents(next?: string | null): Promise<PylonEventPage> {
-    const body = await this.get(next ?? '/v1/events');
+    // Without the sort the list starts with the oldest event Pylon still has (30 days back),
+    // 50 to a page, and nothing new would ever be reached.
+    const body = await this.get(next ?? '/v1/events?sort=-created_at');
     return { events: Array.isArray(body.data) ? body.data : [], next: str(obj(body.links).next) };
   }
 }

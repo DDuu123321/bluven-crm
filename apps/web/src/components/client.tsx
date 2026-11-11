@@ -220,7 +220,7 @@ export function Modal({
   );
 }
 
-/** One click, one Server Action. Shows the error inline if it fails. */
+/** One click, one Server Action. Shows the error inline if it fails, and what was done when the action says so. */
 export function ActionButton({
   action,
   children,
@@ -241,6 +241,7 @@ export function ActionButton({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
   return (
     <span className="inline-flex flex-col items-start gap-1">
       <button
@@ -251,6 +252,7 @@ export function ActionButton({
         onClick={() => {
           if (confirm && !window.confirm(confirm)) return;
           setError(null);
+          setDone(null);
           startTransition(async () => {
             let result: ActionResult;
             try {
@@ -260,6 +262,7 @@ export function ActionButton({
             }
             if (!result.ok) setError(result.error);
             else if (result.redirectTo) router.push(result.redirectTo);
+            else if (result.message) setDone(result.message);
           });
         }}
       >
@@ -268,6 +271,11 @@ export function ActionButton({
       {error && (
         <span role="alert" className="max-w-xs text-xs text-red-600">
           {error}
+        </span>
+      )}
+      {done && !error && (
+        <span role="status" className="max-w-xs text-xs text-emerald-700">
+          {done}
         </span>
       )}
     </span>
