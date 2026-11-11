@@ -429,6 +429,17 @@ async function ingestOne(tx: Tx, ctx: Ctx, lead: LeadInput, source: LeadSource, 
       },
     });
   }
+  // In the pool the flag is in front of the managers anyway. An order that went straight to a
+  // salesperson would carry it unseen, so they are told.
+  if (possibleDuplicateOfId && ownerId && !opts.backfill) {
+    await notifyUsers(tx, ctx, await managerIds(tx), {
+      type: 'order.possible_duplicate',
+      title: `${orderNo} may be a duplicate of another customer's order`,
+      body: `${name}: the phone and email point at two different customers, or the address is another customer's. Compare the two and dismiss the flag if all is well.`,
+      href: orderHref(orderId),
+      orderId,
+    });
+  }
   if (ownerId && !opts.backfill) {
     await notifyUsers(tx, ctx, [ownerId], {
       type: 'order.assigned',

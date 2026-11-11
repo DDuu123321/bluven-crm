@@ -162,6 +162,8 @@ export function canCancel(o: SideStateInput): Check {
 export function canHold(o: SideStateInput): Check {
   if (o.sideState !== 'NONE') return no(`This order is ${SIDE_STATE_LABEL[o.sideState].toLowerCase()}.`);
   if (o.stage === 'PUSHED' || o.stage === 'HANDED_OVER') return no('This order is with operations.');
+  // Once an order has been to operations it is not parked: what they asked for gets fixed and it goes back.
+  if (o.stage === 'RETURNED') return no('This order came back from operations. Fix what they asked for and push it again.');
   return ok;
 }
 

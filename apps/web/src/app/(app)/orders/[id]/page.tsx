@@ -13,6 +13,7 @@ import {
   formatAddress,
   fullName,
   getOrderHeader,
+  getSettings,
   idleDays,
   isIdleTrackedStage,
   isManager,
@@ -66,6 +67,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
   const now = new Date();
   const idle = order.ownerId && order.sideState === 'NONE' && isIdleTrackedStage(order.stage) ? Math.floor(idleDays(order.lastStaffActivityAt, now)) : 0;
 
+  const idleThreshold = (await getSettings(ctx.db)).idle.remindOwnerDays;
   const [salespeople, lostReasons, lastReturn] = await Promise.all([
     manager ? listSalespeople(ctx.db) : Promise.resolve([]),
     staff ? ctx.db.lostReason.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } }) : Promise.resolve([]),
@@ -264,7 +266,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
             </p>
           </Alert>
         )}
-        {idle >= 5 && <Alert tone="amber">No activity has been recorded on this order for {idle} days.</Alert>}
+        {idle >= idleThreshold && <Alert tone="amber">No activity has been recorded on this order for {idle} days.</Alert>}
         {staff && !editable && order.stage !== 'PUSHED' && order.stage !== 'HANDED_OVER' && order.sideState === 'NONE' && <Alert tone="slate">{editBlockReason(order)}</Alert>}
       </div>
 

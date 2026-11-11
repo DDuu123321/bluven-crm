@@ -2,7 +2,8 @@
 import { Prisma, type Db } from '@bluven/db';
 import { inTx, nowOf, systemCtx, type Ctx } from '../context';
 import { getConfig } from '../config';
-import { evaluateIdle, idleDays, isIdleTrackedStage, ORDER_STAGES, todayDateOnly } from '../domain';
+import { evaluateIdle, idleDays, isAutoReturnStage, isIdleTrackedStage, ORDER_STAGES, todayDateOnly } from '../domain';
+import { newId } from '../ids';
 import { audit } from './audit';
 import { setOrderOwner } from './assignment';
 import { managerIds, notifyUsers } from './notify';
@@ -32,6 +33,13 @@ export interface IdleRunResult {
 }
 
 /**
+ * Nobody loses an order to the pool without having been warned. If the reminders could not go
+ * out in time (the worker was down, the thresholds were lowered), the warning is sent first and
+ * the order is only taken back this long after it.
+ */
+const RETURN_GRACE_DAYS = 2;
+
+/**
  * The 5 / 10 / 15 day rules: remind the salesperson, remind the managers, and take unsigned
  * orders back into the pool. Thresholds come from the settings.
  */
@@ -41,13 +49,20 @@ export async function runIdleRules(base: Ctx | Db): Promise<IdleRunResult> {
   await withJobLock(ctx.db, 760101, async () => {
     const thresholds = (await getSettings(ctx.db)).idle;
     const now = nowOf(ctx);
-    const cutoff = new Date(now.getTime() - thresholds.remindOwnerDays * 86_400_000);
+    const before = (days: number) => new Date(now.getTime() - days * 86_400_000);
+    const graceMs = Math.min(RETURN_GRACE_DAYS, thresholds.returnToPoolDays - thresholds.remindOwnerDays) * 86_400_000;
+    // Only orders something is due for. Orders that have had all their reminders and cannot be
+    // returned (signed ones) would otherwise fill the batch for ever and starve the rest.
     const candidates = await ctx.db.order.findMany({
       where: {
         ownerId: { not: null },
         sideState: 'NONE',
         stage: { in: ORDER_STAGES.filter(isIdleTrackedStage) },
-        lastStaffActivityAt: { lte: cutoff },
+        OR: [
+          { idleLevel: { lt: 1 }, lastStaffActivityAt: { lte: before(thresholds.remindOwnerDays) } },
+          { idleLevel: { lt: 2 }, lastStaffActivityAt: { lte: before(thresholds.remindManagerDays) } },
+          { stage: { in: ORDER_STAGES.filter(isAutoReturnStage) }, lastStaffActivityAt: { lte: before(thresholds.returnToPoolDays) } },
+        ],
       },
       select: { id: true },
       orderBy: { lastStaffActivityAt: 'asc' },
@@ -59,28 +74,58 @@ export async function runIdleRules(base: Ctx | Db): Promise<IdleRunResult> {
         await lockOrder(tx, id);
         const order = await tx.order.findUniqueOrThrow({
           where: { id },
-          select: { id: true, orderNo: true, customerId: true, ownerId: true, stage: true, sideState: true, lastStaffActivityAt: true, idleLevel: true, owner: { select: { name: true } } },
+          select: {
+            id: true,
+            orderNo: true,
+            customerId: true,
+            ownerId: true,
+            stage: true,
+            sideState: true,
+            lastStaffActivityAt: true,
+            idleLevel: true,
+            owner: { select: { name: true } },
+            deposits: { where: { status: { in: ['PENDING', 'CONFIRMED'] } }, select: { id: true }, take: 1 },
+          },
         });
-        const action = evaluateIdle(order, now, thresholds);
+        let action = evaluateIdle(order, now, thresholds);
         if (action === 'NONE') return;
         const days = Math.floor(idleDays(order.lastStaffActivityAt, now));
 
+        let lastWarning = false;
         if (action === 'RETURN_TO_POOL') {
-          await setOrderOwner(tx, ctx, id, null, { kind: 'idle', days });
-          result.returnedToPool++;
-          return;
+          // An order the customer has already paid towards is nobody's to hand around: it stays
+          // with its salesperson and the managers are told instead.
+          const paidTowards = order.deposits.length > 0;
+          const warned = paidTowards ? null : await tx.auditLog.findFirst({ where: { orderId: id, action: 'order.idle_reminder', at: { gte: order.lastStaffActivityAt } }, orderBy: { at: 'asc' }, select: { at: true } });
+          if (!paidTowards && warned && now.getTime() - warned.at.getTime() >= graceMs) {
+            await setOrderOwner(tx, ctx, id, null, { kind: 'idle', days });
+            result.returnedToPool++;
+            return;
+          }
+          if (order.idleLevel >= 2) return; // warned, waiting out the grace period (or paid towards)
+          action = 'REMIND_MANAGER';
+          lastWarning = !paidTowards;
         }
+
         if (order.idleLevel < 1) {
           await notifyUsers(tx, ctx, [order.ownerId], {
             type: 'order.idle_owner',
             title: `${order.orderNo} has had no activity for ${days} days`,
-            body:
-              action === 'REMIND_OWNER'
+            body: lastWarning
+              ? `It will go back to the unassigned pool in ${Math.round(graceMs / 86_400_000)} days unless something is recorded on it. Your manager has been told as well.`
+              : action === 'REMIND_OWNER'
                 ? `Your manager will be told at ${thresholds.remindManagerDays} days.`
                 : 'Your manager has been told as well.',
             href: orderHref(id),
             orderId: id,
           });
+          // Also as a task, so it stays in view after the notification has been read. It closes
+          // itself as soon as anything is recorded on the order.
+          if (!(await tx.task.findFirst({ where: { orderId: id, kind: 'IDLE', status: 'OPEN' }, select: { id: true } }))) {
+            await tx.task.create({
+              data: { id: newId('tsk'), orderId: id, assigneeId: order.ownerId, title: `No activity for ${days} days: follow up with the customer, or record what happened`, dueAt: now, kind: 'IDLE', remindedAt: now, createdAt: now },
+            });
+          }
           result.ownerReminders++;
         }
         if (action === 'REMIND_MANAGER') {

@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   assignOrders,
+  createGatewayDeposit,
   createTask,
   decideDeposit,
+  inTx,
+  lockOrderForStaff,
   logActivity,
   parseDateOnly,
   requireOrderView,
@@ -123,6 +126,90 @@ describe('idle rules', () => {
     w.clock.advanceDays(2);
     expect((await idle()).returnedToPool).toBe(1);
     expect((await order(orderId)).ownerId).toBeNull();
+  });
+});
+
+describe('idle rules: fairness', () => {
+  it('warns first when the reminders could not go out in time, and only then takes the order back', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    // The worker was down for three weeks: no reminder at 5 days, none at 10.
+    w.clock.advanceDays(20);
+    expect(await idle()).toEqual({ ownerReminders: 1, managerReminders: 1, returnedToPool: 0 });
+    expect((await order(orderId)).ownerId).toBe(w.sam.id);
+    const warning = await db.notification.findFirstOrThrow({ where: { userId: w.sam.id, type: 'order.idle_owner' } });
+    expect(warning.body).toContain('will go back to the unassigned pool in 2 days');
+
+    // Still theirs the next day, and they are not warned again.
+    w.clock.advanceDays(1);
+    expect(await idle()).toEqual({ ownerReminders: 0, managerReminders: 0, returnedToPool: 0 });
+    expect((await order(orderId)).ownerId).toBe(w.sam.id);
+
+    // Two days after the warning, with nothing recorded, it goes back.
+    w.clock.advanceDays(1.1);
+    expect(await idle()).toEqual({ ownerReminders: 0, managerReminders: 0, returnedToPool: 1 });
+    expect((await order(orderId)).ownerId).toBeNull();
+  });
+
+  it('keeps the order with its salesperson when the warning is acted on', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    w.clock.advanceDays(20);
+    await idle();
+    w.clock.advanceDays(1);
+    await logActivity(as(w.sam, w.clock), { orderId, type: 'CALL', outcome: 'connected', body: 'Back from holiday, wants a quote.' });
+    w.clock.advanceDays(3);
+    expect(await idle()).toEqual({ ownerReminders: 0, managerReminders: 0, returnedToPool: 0 });
+    expect((await order(orderId)).ownerId).toBe(w.sam.id);
+  });
+
+  it('never returns an order the customer has already paid towards', async () => {
+    const { orderId } = await orderAt(w, 'QUOTED');
+    // Paid through the Pylon gateway before any contract was archived: the stage is still Quoted.
+    const pylon = systemCtx(db, 'Pylon', w.clock.now);
+    await inTx(db, async (tx) => createGatewayDeposit(tx, pylon, await lockOrderForStaff(tx, pylon, orderId), { amountCents: 90_000, currency: 'AUD', receiptUrl: null, pylonEventId: 'evt_paid' }));
+    expect((await order(orderId)).stage).toBe('QUOTED');
+
+    w.clock.advanceDays(5.1);
+    await idle();
+    w.clock.advanceDays(25);
+    expect(await idle()).toMatchObject({ managerReminders: 1, returnedToPool: 0 });
+    w.clock.advanceDays(10);
+    expect(await idle()).toEqual({ ownerReminders: 0, managerReminders: 0, returnedToPool: 0 });
+    expect((await order(orderId)).ownerId).toBe(w.sam.id);
+  });
+
+  it('puts a task in the salesperson\'s list that closes itself when work is recorded', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    w.clock.advanceDays(5.1);
+    await idle();
+    const task = await db.task.findFirstOrThrow({ where: { orderId, kind: 'IDLE' } });
+    expect(task).toMatchObject({ assigneeId: w.sam.id, status: 'OPEN' });
+    expect(task.title).toContain('No activity for 5 days');
+    // Not a second one when the managers are told.
+    w.clock.advanceDays(5);
+    await idle();
+    expect(await db.task.count({ where: { orderId, kind: 'IDLE' } })).toBe(1);
+
+    await logActivity(as(w.sam, w.clock), { orderId, type: 'NOTE', body: 'Left a message.' });
+    expect((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('DONE');
+
+    // And it does not follow the order to somebody else.
+    w.clock.advanceDays(5.1);
+    await idle();
+    await assignOrders(as(w.manager, w.clock), { orderIds: [orderId], ownerId: w.alex.id });
+    const tasks = await db.task.findMany({ where: { orderId, kind: 'IDLE' }, orderBy: { createdAt: 'asc' } });
+    expect(tasks.map((t) => t.status)).toEqual(['DONE', 'CANCELLED']);
+  });
+
+  it('does not let finished business crowd out orders that need a reminder', async () => {
+    // A signed order that has had both reminders stays idle for good; it must not be looked at again and again.
+    const signed = await orderAt(w, 'SIGNED');
+    w.clock.advanceDays(11);
+    expect(await idle()).toEqual({ ownerReminders: 1, managerReminders: 1, returnedToPool: 0 });
+    const fresh = await orderAt(w, 'ASSIGNED', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    w.clock.advanceDays(5.1);
+    expect(await idle()).toEqual({ ownerReminders: 1, managerReminders: 0, returnedToPool: 0 });
+    expect((await order(fresh.orderId)).idleLevel).toBe(1);
+    expect((await order(signed.orderId)).idleLevel).toBe(2);
   });
 });
 

@@ -8,10 +8,15 @@ export function formatCents(cents: number | null | undefined, currency = 'AUD'):
   return new Intl.NumberFormat('en-AU', { style: 'currency', currency }).format(cents / 100);
 }
 
-/** Parses "12,345.50", "$12345.5" or "12345" into cents. Returns null when the text is not an amount. */
+/**
+ * Parses "12,345.50", "$12345.5" or "12345" into cents. Returns null when the text is not an amount.
+ * A comma is only accepted as a thousands separator. "900,00" is how much of the world writes nine
+ * hundred; read as ninety thousand it would be a hundred times off, so it is refused instead.
+ */
 export function parseMoneyToCents(text: string): number | null {
-  const s = text.replace(/[$,\s]/g, '');
-  if (!/^\d+(\.\d{1,2})?$/.test(s)) return null;
+  const typed = text.replace(/[$\s]/g, '');
+  if (!/^(\d+|\d{1,3}(,\d{3})+)(\.\d{1,2})?$/.test(typed)) return null;
+  const s = typed.replace(/,/g, '');
   const [whole, frac = ''] = s.split('.');
   const cents = Number(whole) * 100 + Number(frac.padEnd(2, '0'));
   return Number.isSafeInteger(cents) && cents <= 2_000_000_000 ? cents : null;
@@ -122,6 +127,18 @@ export function zonedTimeToUtc(text: string, timeZone = DEFAULT_TIMEZONE): Date 
   let utc = guess - zoneOffsetMinutes(new Date(guess), timeZone) * 60000;
   utc = guess - zoneOffsetMinutes(new Date(utc), timeZone) * 60000;
   return new Date(utc);
+}
+
+/**
+ * The instant a business-local day ends, that is, midnight at the start of the next day. A day is
+ * not always 24 hours long: the days daylight saving starts and ends are 23 and 25 hours, so the
+ * end is found from the calendar, never by adding 24 hours. Null when the text is not a date.
+ */
+export function endOfLocalDay(date: string, timeZone = DEFAULT_TIMEZONE): Date | null {
+  const day = parseDateOnly(date);
+  if (!day) return null;
+  const next = new Date(day.getTime() + 24 * 60 * 60 * 1000); // date-only values are UTC midnights, which are always 24 h apart
+  return zonedTimeToUtc(next.toISOString().slice(0, 10), timeZone);
 }
 
 // ---- date-only values (stored as UTC midnight in @db.Date columns)

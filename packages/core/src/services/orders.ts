@@ -194,6 +194,8 @@ export async function syncOrderStage(tx: Tx, ctx: Ctx, orderId: string): Promise
 export async function touchStaffActivity(tx: Tx, ctx: Ctx, order: Pick<OrderState, 'id' | 'ownerId'>): Promise<void> {
   if (ctx.actor.kind !== 'user' || !isOrderStaff(ctx.actor, order)) return;
   await tx.order.update({ where: { id: order.id }, data: { lastStaffActivityAt: nowOf(ctx), idleLevel: 0 } });
+  // The "no activity" task has done its job.
+  await tx.task.updateMany({ where: { orderId: order.id, kind: 'IDLE', status: 'OPEN' }, data: { status: 'DONE', completedAt: nowOf(ctx), completedById: ctx.actor.id } });
 }
 
 /** Allocates the next order number of the current year, e.g. BLV-2026-00123. */

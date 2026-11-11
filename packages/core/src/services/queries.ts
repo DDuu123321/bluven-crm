@@ -6,6 +6,7 @@ import {
   FINANCE_VISIBLE_DOC_TYPES,
   ORDER_STAGES,
   can,
+  endOfLocalDay,
   hasRole,
   isIdleTrackedStage,
   isManager,
@@ -119,9 +120,19 @@ function viewWhere(view: OrderListView): Prisma.OrderWhereInput {
   }
 }
 
-/** Free-text search across order number, names, phone numbers, emails and address. Every word must match something. */
+/**
+ * Free-text search across order number, names, phone numbers, emails and address. Every word must
+ * match something. A phone number may be typed the way it is shown, in groups ("0412 345 678",
+ * "+61 412 345 678", "(02) 9123 4567"): each group of three or more digits is looked for inside the
+ * stored numbers, and a stray country or area code is left out of the search.
+ */
 export function searchWhere(q: string): Prisma.OrderWhereInput {
-  const words = q.trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  const tokens = q.trim().split(/\s+/).filter(Boolean);
+  const digitsOf = (word: string) => word.replace(/\D/g, '');
+  const numeric = (word: string) => /^[+()\-.\d]+$/.test(word);
+  const hasNumberPart = tokens.some((t) => numeric(t) && digitsOf(t).length >= 3);
+  // "+61" or "(02)" in front of a number says nothing on its own.
+  const words = tokens.filter((t) => !(hasNumberPart && numeric(t) && digitsOf(t).length < 3)).slice(0, 6);
   if (words.length === 0) return {};
   return {
     AND: words.map((word): Prisma.OrderWhereInput => {
@@ -135,8 +146,8 @@ export function searchWhere(q: string): Prisma.OrderWhereInput {
         { property: { suburb: contains } },
         { property: { postcode: { startsWith: word } } },
       ];
-      const digits = word.replace(/\D/g, '');
-      if (digits.length >= 4) {
+      const digits = digitsOf(word);
+      if (digits.length >= 3) {
         // Match however the number was typed: "0412..." finds "+61412...".
         const normalized = normalizePhone(word).normalized.replace(/^\+/, '');
         or.push({ customer: { phones: { some: { normalized: { contains: digits.replace(/^0/, '') } } } } });
@@ -490,10 +501,10 @@ export async function listPendingRefunds(ctx: Ctx) {
 
 export async function listHandoffs(ctx: Ctx, decision: 'PENDING' | 'RETURNED' | 'ACCEPTED') {
   if (!can(user(ctx), 'ops.handoffs')) throw new ForbiddenError();
-  return ctx.db.handoffPackage.findMany({
+  const rows = await ctx.db.handoffPackage.findMany({
     where:
       decision === 'RETURNED'
-        ? { decision: 'RETURNED', order: { stage: 'RETURNED' } } // still waiting on sales
+        ? { decision: 'RETURNED', order: { stage: 'RETURNED', sideState: { in: ['NONE', 'ON_HOLD'] } } } // still waiting on sales
         : { decision },
     include: {
       order: { select: { id: true, orderNo: true, stage: true, sideState: true, returnCount: true, customer: { select: { firstName: true, lastName: true } }, property: { select: { addressLine1: true, suburb: true, state: true, postcode: true } }, owner: { select: { name: true } } } },
@@ -503,6 +514,10 @@ export async function listHandoffs(ctx: Ctx, decision: 'PENDING' | 'RETURNED' | 
     orderBy: decision === 'PENDING' ? [{ pushedAt: 'asc' }] : [{ decidedAt: 'desc' }],
     take: 200,
   });
+  if (decision !== 'RETURNED') return rows;
+  // An order that came back more than once is one order waiting on sales, shown with its latest return.
+  const seen = new Set<string>();
+  return rows.filter((r) => (seen.has(r.orderId) ? false : (seen.add(r.orderId), true)));
 }
 
 export async function pendingHandoffCount(db: Db): Promise<number> {
@@ -538,9 +553,8 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   if (!can(actor, 'orders.work')) throw new ForbiddenError();
   const tz = getConfig().timeZone;
   const start = zonedTimeToUtc(range.from, tz);
-  const endDay = zonedTimeToUtc(range.to, tz);
-  if (!start || !endDay) throw new NotFoundError('Invalid date range.');
-  const end = new Date(endDay.getTime() + 24 * 60 * 60 * 1000);
+  const end = endOfLocalDay(range.to, tz);
+  if (!start || !end) throw new NotFoundError('Invalid date range.');
   // Signing dates are date-only values.
   const signedFrom = new Date(`${range.from}T00:00:00Z`);
   const signedTo = new Date(`${range.to}T00:00:00Z`);
@@ -560,7 +574,7 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     db.order.count({ where: { AND: [scope, { handedOverAt: { gte: start, lt: end } }] } }),
     db.order.count({ where: { AND: [scope, { sideState: 'LOST', lostAt: { gte: start, lt: end } }] } }),
     isManager(actor) ? unassignedCount(db) : Promise.resolve(0),
-    db.deposit.count({ where: { status: 'PENDING', order: scope } }),
+    db.order.count({ where: { AND: [scope, { stage: 'DEPOSIT_PENDING', sideState: { in: ['NONE', 'ON_HOLD'] } }] } }),
     db.order.count({ where: { AND: [scope, { stage: 'RETURNED', sideState: 'NONE' }] } }),
     db.order.count({ where: idleWhere(thresholds.remindOwnerDays) }),
     db.order.count({ where: idleWhere(thresholds.remindManagerDays) }),
@@ -569,8 +583,9 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   const bySource = await db.$queryRaw<Dashboard['bySource']>(Prisma.sql`
     SELECT s."id" AS "sourceId", s."name",
            COUNT(*)::int AS "leads",
-           COUNT(*) FILTER (WHERE o."firstContactedAt" IS NOT NULL)::int AS "contacted",
-           COUNT(*) FILTER (WHERE o."quotedAt" IS NOT NULL)::int AS "quoted",
+           -- A funnel only narrows: an order that was quoted counts as contacted even if nobody logged the call.
+           COUNT(*) FILTER (WHERE o."firstContactedAt" IS NOT NULL OR o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "contacted",
+           COUNT(*) FILTER (WHERE o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "quoted",
            COUNT(*) FILTER (WHERE o."signedAt" IS NOT NULL)::int AS "signed",
            COUNT(*) FILTER (WHERE o."sideState" = 'LOST')::int AS "lost"
     FROM "Order" o JOIN "LeadSource" s ON s."id" = o."sourceId"
@@ -620,9 +635,12 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     WHERE o."sideState" = 'LOST' AND o."lostAt" >= ${start} AND o."lostAt" < ${end} AND ${mine}
     GROUP BY 1 ORDER BY 2 DESC, 1`);
 
+  // As text with its zone spelled out: a bare date parameter would be read in whatever time zone
+  // the database session happens to use.
+  const nowIso = now.toISOString();
   const weekly = await db.$queryRaw<Dashboard['weekly']>(Prisma.sql`
     WITH weeks AS (
-      SELECT generate_series(date_trunc('week', (${now}::timestamptz AT TIME ZONE ${tz})) - interval '7 weeks', date_trunc('week', (${now}::timestamptz AT TIME ZONE ${tz})), interval '1 week') AS w
+      SELECT generate_series(date_trunc('week', (${nowIso}::timestamptz AT TIME ZONE ${tz})) - interval '7 weeks', date_trunc('week', (${nowIso}::timestamptz AT TIME ZONE ${tz})), interval '1 week') AS w
     )
     SELECT to_char(weeks.w, 'YYYY-MM-DD') AS "weekStart",
            (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('week', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = weeks.w) AS "leads",
@@ -660,9 +678,9 @@ function auditWhere(filters: AuditFilters, orderIds: string[] | null): Prisma.Au
   if (orderIds) and.push({ orderId: { in: orderIds } });
   if (filters.q) and.push({ summary: { contains: filters.q, mode: 'insensitive' } });
   const from = filters.from ? zonedTimeToUtc(filters.from, tz) : null;
-  const to = filters.to ? zonedTimeToUtc(filters.to, tz) : null;
+  const to = filters.to ? endOfLocalDay(filters.to, tz) : null;
   if (from) and.push({ at: { gte: from } });
-  if (to) and.push({ at: { lt: new Date(to.getTime() + 24 * 60 * 60 * 1000) } });
+  if (to) and.push({ at: { lt: to } });
   return { AND: and };
 }
 

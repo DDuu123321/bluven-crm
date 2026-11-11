@@ -529,18 +529,24 @@ describe('which project belongs to which order', () => {
 });
 
 describe('reconciliation', () => {
-  it('stores events whose webhook never arrived and stops at known ground', async () => {
+  it('stores events whose webhook never arrived, looking back a few days past what it already knows', async () => {
     const pylon = new FakePylon();
-    const [a, b, c, d] = [event('solar_projects.created', {}), event('solar_projects.updated', {}), event('opportunities.created', {}), event('solar_projects.deleted', {})];
-    await recordPylonEvent(db, c, w.clock.current); // already delivered by webhook
-    await recordPylonEvent(db, d, w.clock.current);
+    const ago = (hours: number) => ({ created_at: new Date(w.clock.current.getTime() - hours * 3_600_000).toISOString() });
+    const [a, b] = [event('solar_projects.created', ago(1)), event('solar_projects.updated', ago(2))];
+    const [c, d] = [event('opportunities.created', ago(5)), event('solar_projects.deleted', ago(6))];
+    const missed = event('solar_designs.updated', ago(40)); // lost while later deliveries arrived fine
+    const [old1, old2] = [event('solar_projects.updated', ago(100)), event('solar_projects.updated', ago(120))];
+    for (const known of [c, d, old1, old2]) await recordPylonEvent(db, known, w.clock.current); // delivered by webhook
     pylon.pages = [
       { events: [a.data, b.data, { nonsense: true }], next: '1' },
-      { events: [c.data, d.data], next: '2' },
-      { events: [event('never.read', {}).data], next: null },
+      { events: [c.data, d.data], next: '2' }, // nothing new here, but recent: keep looking
+      { events: [missed.data], next: '3' },
+      { events: [old1.data, old2.data], next: '4' }, // nothing new and older than the look-back: stop
+      { events: [event('never.read', ago(200)).data], next: null },
     ];
-    expect(await reconcilePylonEvents(ctx, pylon)).toEqual({ added: 2, pages: 2 });
-    expect(await db.pylonEvent.count()).toBe(4);
+    expect(await reconcilePylonEvents(ctx, pylon)).toEqual({ added: 3, pages: 4 });
+    expect(await db.pylonEvent.count()).toBe(7);
+    expect(await db.pylonEvent.count({ where: { name: 'never.read' } })).toBe(0);
   });
 });
 
