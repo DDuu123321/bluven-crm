@@ -4,6 +4,7 @@
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeWebStream } from 'node:stream/web';
 import { parseMoneyToCents } from '@bluven/core';
+import { assertPublicHttpsUrl, type Resolver } from '../net';
 
 export class PylonApiError extends Error {
   constructor(
@@ -109,7 +110,12 @@ export interface PylonClientOptions {
   apiToken: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** How host names of download links are resolved. For tests; defaults to the system resolver. */
+  resolve?: Resolver;
 }
+
+/** A download link may send us on to its storage host, but not round in circles. */
+const MAX_DOWNLOAD_REDIRECTS = 3;
 
 export class PylonClient implements PylonApi {
   private readonly base: string;
@@ -132,6 +138,8 @@ export class PylonClient implements PylonApi {
       res = await this.fetchImpl(url, {
         headers: { Authorization: `Bearer ${this.opts.apiToken}`, Accept: 'application/vnd.api+json' },
         signal: AbortSignal.timeout(this.timeoutMs),
+        // The API has no reason to send us elsewhere, and the token must not follow a redirect.
+        redirect: 'error',
       });
     } catch (e) {
       throw new PylonApiError(`Could not reach Pylon: ${e instanceof Error ? e.message : 'network error'}`, null, true);
@@ -163,16 +171,32 @@ export class PylonClient implements PylonApi {
   }
 
   async download(url: string): Promise<Readable> {
-    if (new URL(url).protocol !== 'https:') throw new PylonApiError('Refusing to download over an insecure connection.', null, false);
-    let res: Response;
-    try {
-      // Pre-signed link: no credentials are sent.
-      res = await this.fetchImpl(url, { signal: AbortSignal.timeout(60_000) });
-    } catch (e) {
-      throw new PylonApiError(`Could not download the file from Pylon: ${e instanceof Error ? e.message : 'network error'}`, null, true);
+    let target = url;
+    for (let hop = 0; ; hop++) {
+      // The link comes out of an API response. It must be HTTPS and lead to the public internet,
+      // and so must every address it redirects to.
+      try {
+        await assertPublicHttpsUrl(target, this.opts.resolve);
+      } catch (e) {
+        throw new PylonApiError(e instanceof Error ? e.message : 'The download link was refused.', null, false);
+      }
+      let res: Response;
+      try {
+        // Pre-signed link: no credentials are sent.
+        res = await this.fetchImpl(target, { signal: AbortSignal.timeout(60_000), redirect: 'manual' });
+      } catch (e) {
+        throw new PylonApiError(`Could not download the file from Pylon: ${e instanceof Error ? e.message : 'network error'}`, null, true);
+      }
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location');
+        await res.body?.cancel().catch(() => undefined);
+        if (!location || hop >= MAX_DOWNLOAD_REDIRECTS) throw new PylonApiError('The download link redirects too many times.', res.status, false);
+        target = new URL(location, target).toString();
+        continue;
+      }
+      if (!res.ok || !res.body) throw new PylonApiError(`Downloading the file from Pylon failed with status ${res.status}.`, res.status, res.status >= 500 || res.status === 429);
+      return Readable.fromWeb(res.body as unknown as NodeWebStream<Uint8Array>);
     }
-    if (!res.ok || !res.body) throw new PylonApiError(`Downloading the file from Pylon failed with status ${res.status}.`, res.status, res.status >= 500 || res.status === 429);
-    return Readable.fromWeb(res.body as unknown as NodeWebStream<Uint8Array>);
   }
 
   async listEvents(next?: string | null): Promise<PylonEventPage> {

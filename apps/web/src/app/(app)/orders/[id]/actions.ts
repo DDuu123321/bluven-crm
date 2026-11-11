@@ -16,6 +16,7 @@ import {
   resumeOrder,
   returnOrdersToPool,
   reuseDocuments,
+  unlinkPylonProject,
   updateCustomer,
   updateHandoffNotes,
   updateProperty,
@@ -198,6 +199,14 @@ export async function deleteQuoteAction(quoteId: string): Promise<ActionResult> 
   if (!validArgs(quoteId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await deleteQuote(ctx, { quoteId });
+  });
+}
+
+export async function unlinkPylonAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await unlinkPylonProject(ctx, { orderId });
+    return { message: 'Unlinked. The next project in Pylon with this order number as its reference will be linked.' };
   });
 }
 

@@ -2,13 +2,13 @@
 // actually gone to the customer.
 import type { Document, Quote, QuoteSentVia, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
-import { formatCents, formatKw, formatKwh } from '../domain';
-import { ConflictError, FieldErrors, NotFoundError } from '../errors';
+import { formatCents, formatKw, formatKwh, isManager } from '../domain';
+import { ConflictError, FieldErrors, ForbiddenError, NotFoundError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
 import { attachStaged, cleanupStaged, finishImage, type StagedFile } from './documents';
-import { lockOrderForEdit, requireEditableOrder, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { lockOrderForEdit, lockOrderForStaff, requireEditableOrder, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 import { DOC_TYPE } from './reference';
 
 export interface QuoteFields {
@@ -236,6 +236,32 @@ export async function deleteQuote(ctx: Ctx, input: { quoteId: string }): Promise
 // ---------------------------------------------------------------------------
 // Pylon
 // ---------------------------------------------------------------------------
+
+/**
+ * Cuts the tie between an order and its Pylon project. For a manager, when the project was
+ * replaced in Pylon on purpose: the next event of the new project (same order number as its
+ * reference) links it. Until then a second project claiming the order number is kept out.
+ */
+export async function unlinkPylonProject(ctx: Ctx, input: { orderId: string }): Promise<void> {
+  if (ctx.actor.kind !== 'user' || !isManager(ctx.actor)) throw new ForbiddenError('Only a manager can unlink an order from its Pylon project.');
+  await inTx(ctx.db, async (tx) => {
+    const order = await lockOrderForStaff(tx, ctx, input.orderId);
+    const current = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { pylonProjectId: true } });
+    if (!current.pylonProjectId) return;
+    await tx.order.update({ where: { id: order.id }, data: { pylonProjectId: null, pylonProjectUrl: null } });
+    await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'SYSTEM', summary: 'Unlinked from its project in Pylon', payload: { pylonProjectId: current.pylonProjectId } });
+    await audit(tx, ctx, {
+      action: 'order.pylon_unlink',
+      entityType: 'Order',
+      entityId: order.id,
+      orderId: order.id,
+      customerId: order.customerId,
+      summary: `${order.orderNo}: unlinked from Pylon project ${current.pylonProjectId}`,
+      before: { pylonProjectId: current.pylonProjectId },
+      after: { pylonProjectId: null },
+    });
+  });
+}
 
 export interface PylonQuoteData {
   pylonDesignId: string;
