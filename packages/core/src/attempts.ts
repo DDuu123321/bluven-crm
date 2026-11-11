@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 /**
  * Counts recent failures per key, in memory. It slows guessing down; it is not the record of
  * anything. The counts are per process and are lost on a restart, which matches how the web
@@ -61,6 +63,25 @@ export class FailureLimiter {
       }
     }
   }
+}
+
+/**
+ * The visitor's address, as the proxy in front of the application reports it.
+ *
+ * `X-Real-IP` comes first: Railway's edge sets it, and so does the bundled Caddy configuration,
+ * each replacing whatever the visitor sent. `X-Forwarded-For` is the fallback for other proxies.
+ * Of its entries only the last one was written by the proxy next to us; the ones before it are
+ * what the visitor claimed, so they are not used.
+ *
+ * Anything that is not an address is dropped: the value ends up in the audit log and in the
+ * keys of the rate limits.
+ */
+export function clientAddress(headers: { get(name: string): string | null }): string | null {
+  for (const candidate of [headers.get('x-real-ip'), headers.get('x-forwarded-for')?.split(',').at(-1)]) {
+    const value = (candidate ?? '').trim();
+    if (value && isIP(value)) return value.toLowerCase();
+  }
+  return null;
 }
 
 /**

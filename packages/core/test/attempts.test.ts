@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FailureLimiter, networkKey } from '../src';
+import { FailureLimiter, clientAddress, networkKey } from '../src';
 
 describe('failure limiter', () => {
   it('blocks after the limit inside the window and says for how long', () => {
@@ -45,5 +45,26 @@ describe('network of a client address', () => {
   it('has no key when there is no address', () => {
     expect(networkKey(null)).toBeNull();
     expect(networkKey('  ')).toBeNull();
+  });
+});
+
+describe('client address', () => {
+  const from = (headers: Record<string, string>) => clientAddress(new Headers(headers));
+
+  it('takes the address the proxy vouches for, not the one the visitor claims', () => {
+    // Railway and the bundled Caddy set X-Real-IP themselves.
+    expect(from({ 'x-real-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.99, 203.0.113.7' })).toBe('203.0.113.7');
+    // Another proxy that only appends to X-Forwarded-For: its own entry is the last one.
+    expect(from({ 'x-forwarded-for': '198.51.100.99, 10.9.9.9 , 203.0.113.7' })).toBe('203.0.113.7');
+    expect(from({ 'x-forwarded-for': '203.0.113.7' })).toBe('203.0.113.7');
+    expect(from({ 'x-real-ip': ' 2001:DB8::1 ' })).toBe('2001:db8::1');
+  });
+
+  it('gives nothing rather than something that is not an address', () => {
+    expect(from({})).toBeNull();
+    expect(from({ 'x-real-ip': 'not-an-address' })).toBeNull();
+    expect(from({ 'x-real-ip': '203.0.113.7; DROP', 'x-forwarded-for': 'unknown' })).toBeNull();
+    // An unusable X-Real-IP falls back to the forwarded list.
+    expect(from({ 'x-real-ip': 'junk', 'x-forwarded-for': '203.0.113.8' })).toBe('203.0.113.8');
   });
 });
