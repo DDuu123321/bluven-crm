@@ -1,17 +1,130 @@
-# Bluven 网站 → CRM 线索转发接口规范
+# Bluven 网站 → CRM 线索对接说明
 
-版本：v1.2
-日期：2026-11-10
-读者：Bluven 网站的开发者
-配套文档：`docs/sales-crm-design.md` 第 5 节
+版本：v2.0
+日期：2026-11-11
+读者：维护 Bluven 网站（仓库 `Website-Restructuring`）的人
+配套文档：`docs/sales-crm-design.md` 第 5 节，`docs/deployment-guide.md` 第 4 节
 
 ---
+
+## 先看这里：有两种对接方式
+
+| | 方式一：CRM 从网站取 | 方式二：网站推给 CRM |
+|---|---|---|
+| 谁发起 | CRM 每分钟向网站后台要一次新线索 | 网站每收到一条线索就发给 CRM |
+| 网站要改代码吗 | **不用**。网站后台已有 `GET /api/crm/leads` | 要。新增转发任务、重试队列和状态字段 |
+| CRM 这边 | 已实现，已测试 | 已实现，已测试 |
+| CRM 停机时 | 线索留在网站，恢复后自动补上 | 靠网站自己的重试队列 |
+| 时效 | 最长 1 分钟 | 几秒 |
+| 带过来的信息 | 目前较少，改十几行可带全（见 A.4） | 完整 |
+
+**建议用方式一上线。** 它不需要改网站，也是网站当初设计时就预留好的做法（网站自己的库是入站缓冲，CRM 停机不丢单）。方式二留作以后需要秒级到达时的选项。
+
+两种方式不要同时开。如果以后从方式一换到方式二，`externalId` 请沿用方式一的写法（`quote:<编号>`、`assessment:<编号>`），这样换的过程中同一条线索不会进来两次。
+
+---
+
+# 第一部分 方式一：CRM 从网站取线索
+
+## A.1 怎么接通
+
+只需要两边填同一把密钥，步骤见 `docs/deployment-guide.md` 第 4 节：
+
+- 网站后台（Railway 上的 CMS 服务）：`CRM_SYNC_KEY=<密钥>`
+- CRM：`BLUVEN_LEADS_URL=https://cms.bluven.com.au/api/crm/leads`，`BLUVEN_LEADS_KEY=<同一把密钥>`
+
+接通后在 CRM 的 Administration → Lead sources 页能看到连接状态、最近一次检查时间和最近一条线索的到达时间。
+
+## A.2 CRM 依赖网站接口的哪些行为
+
+网站后台 `cms/src/server.ts` 里的 `GET /api/crm/leads` 现在的行为，CRM 就是按这个写的。**以后改这个接口时，下面几条不要变**：
+
+1. 认证：请求头 `Authorization: Bearer <CRM_SYNC_KEY>`。密钥不对返回 401，没配置返回 503。
+2. 参数 `since`：ISO 时间。返回 `createdAt` **大于等于** 它的线索。
+3. 返回 `{ "items": [...], "count": n }`，按 `createdAt` 从早到晚。
+4. 每次每类（quote、assessment）最多 200 条。
+5. 每条有 `kind`（`quote` 或 `assessment`）、`externalId`（`quote:<编号>` / `assessment:<编号>`，永不改变）和 `createdAt`。
+
+CRM 的做法：记住上次取到的最后一条的时间，下次从那个时间取；边界上那一条会被再次返回，CRM 认得它，不会重复入库。某一类取满 200 条时，说明后面还有，CRM 会接着取，直到取完。
+
+一个已知的边界：如果有超过 200 条线索的 `createdAt` 精确到毫秒完全相同，CRM 无法翻过这一页，会在 Lead sources 页报错并通知管理员。正常提交不会出现这种情况。
+
+## A.3 现在带过来哪些信息
+
+| 网站返回的字段 | 在 CRM 里 |
+|---|---|
+| `externalId` | 线索的外部编号，用于防重复 |
+| `createdAt` | 线索的提交时间 |
+| `firstName` `lastName` `email` `phone` | 客户 |
+| `address` `suburb` `state` `postcode` | 房产 |
+| `source` | 来源明细：`WEBSITE_QUOTE` → `website/quote-form`，`WEBSITE_ASSESSMENT` → `website/assessment`，`AI_CHAT` → `website/ai-chat`，`PARTNER` → `website/partner` |
+| `title`（如 `Solar + Battery`） | 感兴趣的产品。只有当它正好是产品名用 `+` 连起来时才识别 |
+| `householdSize` `goals` `productPreference` | 原样带入 |
+
+**现在不带的**：物业类型、想要的系统和电池大小、月电费、购买时间、方便联系的时间、备注，以及评估问卷的答案和结论。这些在网站后台的线索里有，但接口没有输出。销售在 CRM 里看不到，需要的话要回网站后台查。
+
+## A.4 可选：让网站把信息带全
+
+改动只在网站后台的 `cms/src/server.ts`，`GET /api/crm/leads` 里拼 `items` 的那两段。**只加字段，不改已有字段**，CRM 不用跟着改：它会自动读取下面这些名字的字段。
+
+询价（`quotes.docs.map` 里，在 `productPreference` 那一行后面加）：
+
+```ts
+        // Enquiry details for the CRM. The CRM reads whichever of these are present.
+        components: Array.isArray(q.components) ? q.components : [],
+        propertyType: q.propertyType || '',
+        systemKw: q.systemKw ?? null,
+        batteryKwh: q.batteryKwh ?? null,
+        monthlyBill: q.monthlyBill ?? null,
+        timeline: q.timeline || '',
+        bestTime: q.bestTime || '',
+        notes: q.notes || '',
+```
+
+评估问卷（`assessments.docs.map` 里，在 `title` 那一行后面加）：
+
+```ts
+        // What the quiz learned, for the salesperson's first call.
+        householdSize: a.answers?.occupants || '',
+        goals: Array.isArray(a.answers?.mainGoal) ? a.answers.mainGoal : [],
+        notes: [a.result?.recommendationType && `Recommendation: ${a.result.recommendationType}`, a.result?.summary]
+          .filter(Boolean)
+          .join('\n')
+          .slice(0, 5000),
+```
+
+字段的取值规则和下面第二部分 3.3 节的表格相同（它们本来就是照网站的线索字段定的）。有一条要注意：某个字段的值不合规则时，CRM 会拒收整条线索并通知经理，所以 `notes` 要截到 5000 字以内，枚举字段只发网站表单里已有的那些值。
+
+改完部署后，新线索就会带上这些信息。已经进了 CRM 的线索不会回头补。
+
+## A.5 其他行为
+
+- **只取接通之后的线索。** 想把之前的也带进来，在 CRM 第一次启动前设 `BLUVEN_LEADS_SINCE`。旧线索作为历史数据进入，不进未分派池、不发通知。
+- **去重规则和其他入口一样。** 同一个人同一个地址已有进行中的订单时，新线索并入那张订单的时间线，不另建订单。
+- **网站里之后的修改不会同步。** 线索进了 CRM 之后，在网站后台再改状态、改备注，CRM 不会跟着变。销售在 CRM 里跟进。
+- **进不来的线索会报出来。** 例如电话号码不合规则。经理会收到通知，审计日志里有记录，线索本身仍在网站后台。
+- **连接出问题会报出来。** 连续 5 次失败，管理员收到通知；Lead sources 页显示原因。
+
+## A.6 验收
+
+- 在网站提交一条询价，两分钟内出现在 CRM 的 Unassigned leads 里，姓名、电话、地址正确。
+- 同一条线索不会出现两次。
+- 把 CRM 停掉，在网站提交一条询价，再启动 CRM：这条线索在启动后一两分钟内出现。
+- 把 CRM 的密钥改错：Lead sources 页显示 Failing 和原因；改回后恢复 Connected。
+
+---
+
+# 第二部分 方式二：网站主动推送到 CRM（可选）
+
+以下是 CRM 的线索接收接口的完整规范。用方式一上线时可以不看这一部分。
+
+这个接口也用于其他系统向 CRM 送线索（例如合作方）。其他系统的密钥由管理员在 Administration → Lead sources 里新建来源后生成。**其他公司的系统权限更小**：不能用 `dryRun` 和 `backfill`；它送来的线索如果和已有客户重复，只会被告知"重复"，不会得到订单号，也不会改动已有客户的联系方式。
 
 ## 1. 目标
 
 Bluven 网站每收到一条新线索，立即转发一份到 CRM。Bluven 仍然是线索的入口和第一落库点，CRM 是销售跟进的系统。转发失败不能影响 Bluven 自己的入库。
 
-这个接口的请求体和 Bluven 现有的"线索导入 API"**同构**：字段名、枚举值、校验规则、限制、返回格式都一致，只多了几个可选字段。Bluven 现在怎么组装线索对象，就可以原样发给 CRM。
+这个接口的请求体和 Bluven 现有的"线索导入 API"（`/api/partner-import`）**同构**：字段名、枚举值、校验规则、限制、返回格式都一致，只多了几个可选字段。Bluven 现在怎么组装线索对象，就可以原样发给 CRM。
 
 ---
 
@@ -21,7 +134,7 @@ Bluven 网站每收到一条新线索，立即转发一份到 CRM。Bluven 仍�
 2. **顺序**：单线程顺序发送，不并发。
 3. **批量**：实时转发每次发 1 条即可；历史补录每次最多 200 条。
 4. **重试**：只对 HTTP 429、5xx 和网络超时重试；400、401、413 不重试，记录并告警。
-5. **幂等**：每条线索带 `externalId`（Bluven 线索编号）。同一个 `externalId` 重发多少次，CRM 都只有一条记录。
+5. **幂等**：每条线索带 `externalId`。同一个 `externalId` 重发多少次，CRM 都只有一条记录。写法用 `quote:<编号>` 和 `assessment:<编号>`，和方式一保持一致。
 6. **密钥**：token 只放服务端环境变量，不进前端代码，不进代码仓库。
 7. **后续修改不同步**：线索转发之后，在 Bluven 里再编辑不会同步到 CRM，销售在 CRM 里改。Bluven 里删除线索也不影响 CRM。
 
@@ -32,17 +145,15 @@ Bluven 网站每收到一条新线索，立即转发一份到 CRM。Bluven 仍�
 ### 3.1 地址
 
 ```
-POST https://<CRM 域名>/api/intake/leads
+POST https://crm.bluven.com.au/api/intake/leads
 ```
-
-测试环境和正式环境分别提供地址，各有独立的 token。域名由 CRM 侧确定后提供。
 
 token 由 CRM 管理员在 Administration → Lead sources 里为 "Bluven website" 这个来源生成，只显示一次。CRM 侧的这个接口已经实现，本文描述的行为均有自动化测试覆盖。
 
 健康检查（可选，用于发送前探活）：
 
 ```
-GET https://<CRM 域名>/api/intake/health   →  200 {"ok": true}
+GET https://crm.bluven.com.au/api/intake/health   →  200 {"ok": true}
 ```
 
 ### 3.2 请求头
@@ -229,13 +340,13 @@ HTTP 200 中 `ok: false` 的行不是网络问题，不要自动重试。在 Blu
 
 ## 6. 联调流程
 
-1. CRM 侧提供测试地址和测试 token。
+1. 在 CRM 的 Administration → Lead sources 里为 "Bluven website" 生成 token。没有单独的测试环境时，用 `dryRun: true` 联调，它不会写入任何数据。
 2. 用 `dryRun: true` 发一批样例，确认校验通过。
 3. 正式发送三类样例：字段齐全的、只有 `firstName` + `phone` + `externalId` 的、故意带错误枚举值的。
 4. 幂等验证：同一 `externalId` 连发两次，第二次应返回 `already_received`。
 5. 去重验证：同一手机号、同一地址、不同 `externalId` 连发两次，第二次应返回 `duplicate`。
 6. 失败路径验证：用错误 token 应得到 401；241 条一批应得到 400。
-7. 切换到正式地址和正式 token。
+7. 去掉 `dryRun`，开始正式发送。
 
 ---
 
@@ -254,21 +365,20 @@ HTTP 200 中 `ok: false` 的行不是网络问题，不要自动重试。在 Blu
 - 仅 HTTPS，TLS 1.2 以上。
 - token 由 CRM 生成，Bluven 存环境变量。
 - 轮换：CRM 可同时接受新旧两把 token 7 天，Bluven 切换后通知 CRM 作废旧 token。
-- 可选：Bluven 提供服务器出口 IP，CRM 加白名单。
 
 ---
 
 ## 9. 调用示例
 
 ```bash
-curl -sS -X POST "https://<CRM 域名>/api/intake/leads" \
+curl -sS -X POST "https://crm.bluven.com.au/api/intake/leads" \
   -H "Authorization: Bearer $CRM_INTAKE_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   --max-time 60 \
   -d '{
     "leads": [{
-      "externalId": "1042",
+      "externalId": "quote:1042",
       "createdAt": "2026-11-09T10:21:00+11:00",
       "sourceDetail": "website/quote-form",
       "firstName": "Jane", "lastName": "Smith",
@@ -288,5 +398,5 @@ curl -sS -X POST "https://<CRM 域名>/api/intake/leads" \
 
 | 方 | 事项 |
 |---|---|
-| CRM | 确定正式 / 测试域名；生成两把 token；上线 `/api/intake/leads` 与 `/api/intake/health` |
-| Bluven | 新增后台转发任务与重试队列；线索表加 `crmId`、`forwardStatus`、`forwardAttempts`、`lastForwardError` 字段；后台展示转发状态与"重新发送"；可选提供出口 IP；告知历史线索总量以估算补录时间 |
+| CRM | 已完成：`https://crm.bluven.com.au/api/intake/leads` 与 `/api/intake/health`。上线后生成 token |
+| Bluven | 新增后台转发任务与重试队列；线索表加 `crmId`、`forwardStatus`、`forwardAttempts`、`lastForwardError` 字段；后台展示转发状态与"重新发送" |

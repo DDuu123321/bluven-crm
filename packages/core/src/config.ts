@@ -13,7 +13,17 @@ export interface AppConfig {
   maxUploadBytes: number;
   smtpUrl: string;
   mailFrom: string;
+  /**
+   * Sending email through an HTTPS relay instead of SMTP, for hosts that block outgoing SMTP.
+   * The Bluven website already runs such a relay (POST /api/send-mail, header x-relay-key).
+   */
+  mailRelay: { url: string; key: string };
   pylon: { apiToken: string; webhookSecret: string; apiBase: string };
+  /**
+   * Pulling leads from the Bluven website's CMS (GET /api/crm/leads there). Off unless both the
+   * address and the shared key are set.
+   */
+  bluvenLeads: { url: string; key: string; since: string };
 }
 
 let cached: AppConfig | undefined;
@@ -31,10 +41,16 @@ export function getConfig(): AppConfig {
     maxUploadBytes: (Number.isFinite(maxMb) && maxMb > 0 ? maxMb : 500) * 1024 * 1024,
     smtpUrl: env.SMTP_URL?.trim() ?? '',
     mailFrom: env.MAIL_FROM?.trim() || 'Bluven CRM <crm@localhost>',
+    mailRelay: { url: env.MAIL_RELAY_URL?.trim() ?? '', key: env.MAIL_RELAY_KEY?.trim() ?? '' },
     pylon: {
       apiToken: env.PYLON_API_TOKEN?.trim() ?? '',
       webhookSecret: env.PYLON_WEBHOOK_SECRET?.trim() ?? '',
       apiBase: (env.PYLON_API_BASE?.trim() || 'https://api.getpylon.com').replace(/\/+$/, ''),
+    },
+    bluvenLeads: {
+      url: env.BLUVEN_LEADS_URL?.trim() ?? '',
+      key: env.BLUVEN_LEADS_KEY?.trim() ?? '',
+      since: env.BLUVEN_LEADS_SINCE?.trim() ?? '',
     },
   };
   return cached;

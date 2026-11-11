@@ -9,9 +9,14 @@ x-app-env: &app-env
   MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
   SMTP_URL: ${SMTP_URL:-}
   MAIL_FROM: ${MAIL_FROM:-Bluven CRM <crm@localhost>}
+  MAIL_RELAY_URL: ${MAIL_RELAY_URL:-}
+  MAIL_RELAY_KEY: ${MAIL_RELAY_KEY:-}
   PYLON_API_TOKEN: ${PYLON_API_TOKEN:-}
   PYLON_WEBHOOK_SECRET: ${PYLON_WEBHOOK_SECRET:-}
   PYLON_API_BASE: ${PYLON_API_BASE:-https://api.getpylon.com}
+  BLUVEN_LEADS_URL: ${BLUVEN_LEADS_URL:-}
+  BLUVEN_LEADS_KEY: ${BLUVEN_LEADS_KEY:-}
+  BLUVEN_LEADS_SINCE: ${BLUVEN_LEADS_SINCE:-}
 
 # Container logs are rotated so they cannot fill the disk.
 x-logging: &logging

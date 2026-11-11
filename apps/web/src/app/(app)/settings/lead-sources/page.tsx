@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { can, getConfig } from '@bluven/core';
+import { getBluvenPullState } from '@bluven/integrations';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
 import { Badge, Card, CardBody, CardHeader, Checkbox, Input, Label, PageHeader, Select, Table, Td } from '@/components/ui';
 import { fmtDate, fmtDateTime } from '@/lib/fmt';
@@ -18,6 +19,11 @@ export default async function LeadSourcesPage() {
   const sources = await ctx.db.leadSource.findMany({ orderBy: [{ kind: 'asc' }, { name: 'asc' }], include: { _count: { select: { orders: true } } } });
   const endpoint = `${getConfig().appUrl}/api/intake/leads`;
   const now = new Date();
+  const website = getConfig().bluvenLeads;
+  const pulling = !!(website.url && website.key);
+  const pull = pulling ? await getBluvenPullState(ctx.db) : null;
+  // The worker asks once a minute. Several minutes of silence mean it is not running.
+  const stale = !!pull?.lastRunAt && now.getTime() - new Date(pull.lastRunAt).getTime() > 5 * 60_000;
 
   return (
     <>
@@ -55,7 +61,42 @@ export default async function LeadSourcesPage() {
       />
 
       <Card className="mb-4">
-        <CardHeader title="Sending leads to the CRM" />
+        <CardHeader
+          title={
+            <span className="flex flex-wrap items-center gap-2">
+              Bluven website
+              {!pulling ? <Badge>Not connected</Badge> : !pull ? <Badge tone="amber">Waiting for the first check</Badge> : pull.lastError ? <Badge tone="red">Failing</Badge> : stale ? <Badge tone="amber">Not checking</Badge> : <Badge tone="green">Connected</Badge>}
+            </span>
+          }
+          description="The CRM collects new quote requests and assessments from the website once a minute. The website keeps every lead, so nothing is lost while the CRM is offline."
+        />
+        <CardBody className="space-y-1.5 text-sm text-slate-600">
+          {!pulling ? (
+            <p>
+              To connect, set <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">BLUVEN_LEADS_URL</code> and <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">BLUVEN_LEADS_KEY</code> on
+              the CRM server, with the key equal to <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">CRM_SYNC_KEY</code> on the website. The steps are in docs/deployment-guide.md.
+            </p>
+          ) : (
+            <>
+              <p>
+                Collecting from <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">{new URL(website.url).host}</code>
+                {pull?.lastOkAt ? ` · last successful check ${fmtDateTime(new Date(pull.lastOkAt))}` : ''}
+                {pull?.lastLeadAt ? ` · last lead received ${fmtDateTime(new Date(pull.lastLeadAt))}` : ''}
+                {pull ? ` · ${pull.imported} lead${pull.imported === 1 ? '' : 's'} taken over so far` : ''}
+              </p>
+              {pull?.lastError && (
+                <p className="font-medium text-red-700">
+                  {pull.lastError} ({pull.consecutiveFailures} failed check{pull.consecutiveFailures === 1 ? '' : 's'} in a row)
+                </p>
+              )}
+              {!pull?.lastError && stale && <p className="font-medium text-amber-700">No check for more than five minutes. Is the worker process running?</p>}
+            </>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card className="mb-4">
+        <CardHeader title="Sending leads to the CRM" description="For other systems, and as an alternative way for the website to hand leads over." />
         <CardBody className="space-y-1.5 text-sm text-slate-600">
           <p>
             Endpoint: <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">POST {endpoint}</code>

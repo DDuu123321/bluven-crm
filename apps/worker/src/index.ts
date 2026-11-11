@@ -2,8 +2,8 @@
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
 import { getConfig, purgeExpiredSessions, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, processPylonEvents, reconcilePylonEvents } from '@bluven/integrations';
-import { sendNotificationEmails } from './mailer';
+import { PylonClient, processPylonEvents, pullBluvenLeads, reconcilePylonEvents } from '@bluven/integrations';
+import { describeMailSetup, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
 const SECOND = 1_000;
@@ -69,8 +69,24 @@ if (pylon) {
   });
 }
 
+const website = config.bluvenLeads;
+if (website.url && website.key) {
+  jobs.push({
+    name: 'website-leads',
+    everyMs: MINUTE,
+    run: async () => {
+      const r = await pullBluvenLeads(systemCtx(db, 'Bluven website'), { url: website.url, key: website.key, since: website.since });
+      return r ? some([[r.created, 'new leads from the website'], [r.duplicates, 'repeat enquiries'], [r.failed, 'leads rejected']]) : undefined;
+    },
+  });
+}
+
 console.log(`[${new Date().toISOString()}] worker started (${jobs.map((j) => j.name).join(', ')})`);
-console.log(`  time zone: ${config.timeZone} · notification emails: ${config.smtpUrl ? 'on' : 'off (SMTP_URL not set)'} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'}`);
+console.log(
+  `  time zone: ${config.timeZone} · notification emails: ${describeMailSetup()} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'} · website leads: ${
+    website.url && website.key ? `pulled from ${new URL(website.url).host}` : 'not pulled (BLUVEN_LEADS_URL and BLUVEN_LEADS_KEY not set)'
+  }`,
+);
 
 const scheduler = startScheduler(jobs);
 
