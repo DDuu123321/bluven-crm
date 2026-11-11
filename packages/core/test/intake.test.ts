@@ -315,6 +315,31 @@ describe('CSV import', () => {
     expect(await db.order.count()).toBe(2);
   });
 
+  it('reads files the way spreadsheets write them', () => {
+    const parsed = parseLeadCsv(
+      [
+        'Name,Phone,Postcode,State,Date',
+        'Dana Van Der Berg,0411 000 111,800,NT,12/03/2025',
+        'Cher,0411 000 222,2000,NSW,2025-03-12 14:30',
+        'Eve Adams,0411 000 333,2000,NSW,3/7/2025 2:05 pm',
+        'Finn Oak,0411 000 444,2000,NSW,2025-03-12T09:00:00+11:00',
+        'Gus Hill,0411 000 555,2000,NSW,next Tuesday',
+      ].join('\n'),
+    );
+    // One "name" column is split; a Northern Territory postcode gets its zero back.
+    expect(parsed.leads[0]).toMatchObject({ firstName: 'Dana Van Der', lastName: 'Berg', postcode: '0800' });
+    expect(parsed.leads[1]).toMatchObject({ firstName: 'Cher' });
+    expect(parsed.leads[1]).not.toHaveProperty('lastName');
+    expect(parsed.leads[0]).not.toHaveProperty('fullName');
+    // Dates are day-first and business-local; a bare date is midday so it stays on its day.
+    expect(parsed.leads[0]!.createdAt).toBe('2025-03-12T01:00:00.000Z'); // 12 March, noon in Sydney (UTC+11)
+    expect(parsed.leads[1]!.createdAt).toBe('2025-03-12T03:30:00.000Z');
+    expect(parsed.leads[2]!.createdAt).toBe('2025-07-03T04:05:00.000Z'); // 3 July, 2:05 pm (UTC+10)
+    expect(parsed.leads[3]!.createdAt).toBe('2025-03-12T09:00:00+11:00');
+    // What cannot be read is left for the normal validation to report on that row.
+    expect(parsed.leads[4]!.createdAt).toBe('next Tuesday');
+  });
+
   it('is for managers only', async () => {
     const csvSource = await source('csv-import');
     await expect(importLeadCsv(as(sam), csv, { sourceId: csvSource.id, dryRun: true, backfill: false })).rejects.toMatchObject({ code: 'forbidden' });

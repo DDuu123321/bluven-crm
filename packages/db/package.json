@@ -13,7 +13,6 @@
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset --force",
-    "seed": "tsx src/seed.ts",
     "postinstall": "prisma generate",
     "typecheck": "tsc --noEmit -p ."
   },

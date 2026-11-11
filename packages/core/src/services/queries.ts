@@ -242,7 +242,23 @@ export interface OrderHeader {
 export async function getOrderHeader(ctx: Ctx, orderId: string): Promise<OrderHeader> {
   const actor = user(ctx);
   const { order: state, view } = await requireOrderView(ctx.db, ctx, orderId);
-  const order = await ctx.db.order.findUniqueOrThrow({ where: { id: orderId }, include: detailInclude });
+  let order = await ctx.db.order.findUniqueOrThrow({ where: { id: orderId }, include: detailInclude });
+  // What leaves this function is already what the view allows; pages do not have to remember to hide things.
+  // A possible duplicate names another customer and their salesperson: managers only.
+  if (!isManager(actor)) order = { ...order, possibleDuplicateOf: null };
+  // Finance works from the deposit pages. Here it gets enough to recognise the order, nothing more.
+  if (view === 'FINANCE') {
+    order = {
+      ...order,
+      customer: { ...order.customer, phones: [], emails: [], notes: '' },
+      property: { ...order.property, nmi: '', retailer: '', phase: '', roofType: '', storeys: '', notes: '' },
+      leadDetails: {},
+      attribution: {},
+      handoffNotes: '',
+      lostNote: '',
+      onHoldNote: '',
+    };
+  }
   const siblings =
     view === 'FULL'
       ? await ctx.db.order.findMany({
@@ -342,7 +358,9 @@ export async function getOrderDeal(ctx: Ctx, orderId: string) {
 }
 
 export async function getOrderHandoff(ctx: Ctx, orderId: string): Promise<{ checklist: Checklist; packages: Prisma.HandoffPackageGetPayload<{ include: { pushedBy: { select: { name: true } }; decidedBy: { select: { name: true } } } }>[] }> {
-  await requireOrderView(ctx.db, ctx, orderId);
+  const { view } = await requireOrderView(ctx.db, ctx, orderId);
+  // The package holds the whole order as operations receives it; finance has no part in it.
+  if (view === 'FINANCE') throw new NotFoundError('Order not found.');
   const [checklist, packages] = await Promise.all([
     getHandoffChecklist(ctx.db, orderId),
     ctx.db.handoffPackage.findMany({
@@ -358,10 +376,15 @@ export async function getOrderHandoff(ctx: Ctx, orderId: string): Promise<{ chec
 // Tasks and notifications
 // ---------------------------------------------------------------------------
 
+/** A task counts as the actor's only while they can still see its order (managers see every order). */
+function myTasksWhere(actor: UserActor): Prisma.TaskWhereInput {
+  return { assigneeId: actor.id, ...(isManager(actor) ? {} : { order: { ownerId: actor.id } }) };
+}
+
 export async function listMyTasks(ctx: Ctx, opts: { includeDone?: boolean } = {}) {
   const actor = user(ctx);
   return ctx.db.task.findMany({
-    where: { assigneeId: actor.id, status: opts.includeDone ? { in: ['OPEN', 'DONE'] } : 'OPEN' },
+    where: { ...myTasksWhere(actor), status: opts.includeDone ? { in: ['OPEN', 'DONE'] } : 'OPEN' },
     include: { order: { select: { id: true, orderNo: true, customer: { select: { firstName: true, lastName: true } } } } },
     orderBy: [{ status: 'asc' }, { dueAt: 'asc' }],
     take: 200,
@@ -372,8 +395,8 @@ export async function openTaskCount(ctx: Ctx): Promise<{ open: number; overdue: 
   const actor = user(ctx);
   const now = nowOf(ctx);
   const [open, overdue] = await Promise.all([
-    ctx.db.task.count({ where: { assigneeId: actor.id, status: 'OPEN' } }),
-    ctx.db.task.count({ where: { assigneeId: actor.id, status: 'OPEN', dueAt: { lte: now } } }),
+    ctx.db.task.count({ where: { ...myTasksWhere(actor), status: 'OPEN' } }),
+    ctx.db.task.count({ where: { ...myTasksWhere(actor), status: 'OPEN', dueAt: { lte: now } } }),
   ]);
   return { open, overdue };
 }

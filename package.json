@@ -19,6 +19,6 @@
     "db:generate": "pnpm --filter @bluven/db generate",
     "db:migrate": "pnpm --filter @bluven/db migrate:dev",
     "db:deploy": "pnpm --filter @bluven/db migrate:deploy",
-    "db:seed": "pnpm --filter @bluven/db seed"
+    "db:seed": "pnpm --filter @bluven/core seed"
   }
 }

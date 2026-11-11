@@ -39,6 +39,10 @@ export default async function LeadSourcesPage() {
                   <option value="CSV">Uploaded as CSV files</option>
                 </Select>
                 <FieldError name="kind" />
+                <p className="mt-1.5 text-xs text-slate-500">
+                  Another company&rsquo;s system gets its own token and can only hand leads in. When one of its leads is a repeat of a customer you already have, it is told so but not which order, and the details it sent go on the timeline without
+                  changing the customer&rsquo;s contact details. Previews and history loads are reserved for the Bluven website.
+                </p>
               </div>
               <FormMessage />
               <div className="flex justify-end gap-2">

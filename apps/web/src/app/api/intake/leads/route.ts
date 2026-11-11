@@ -1,6 +1,6 @@
 // Lead intake for the Bluven website and other sources.
 // Contract: docs/bluven-lead-forwarding-spec.md
-import { authenticateIntakeToken, ingestLeads, readTextBody, systemCtx } from '@bluven/core';
+import { audit, authenticateIntakeToken, ingestLeads, isOwnSystem, readTextBody, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { allow, retryAfter } from '@/lib/rate-limit';
 
@@ -40,11 +40,24 @@ export async function POST(request: Request): Promise<Response> {
   if (leads.length < 1 || leads.length > MAX_LEADS) return reply({ error: `"leads" must contain between 1 and ${MAX_LEADS} items.` }, 400);
   if (backfill !== undefined && typeof backfill !== 'boolean') return reply({ error: '"backfill" must be true or false.' }, 400);
   if (dryRun !== undefined && typeof dryRun !== 'boolean') return reply({ error: '"dryRun" must be true or false.' }, 400);
+  // A preview answers "do you already have this person?" without leaving a trace, and a history
+  // load skips the pool. Both are for our own systems only.
+  const trusted = isOwnSystem(source);
+  if (!trusted && (backfill === true || dryRun === true)) return reply({ error: '"dryRun" and "backfill" are not available for this source.' }, 403);
 
   try {
     const forwarded = request.headers.get('x-forwarded-for');
     const ctx = { ...systemCtx(db, source.name), ip: forwarded ? forwarded.split(',')[0]!.trim() : null, userAgent: request.headers.get('user-agent') };
-    const summary = await ingestLeads(ctx, leads, { sourceId: source.id, requireExternalId: true, backfill: backfill === true, dryRun: dryRun === true });
+    const summary = await ingestLeads(ctx, leads, { sourceId: source.id, requireExternalId: true, backfill: backfill === true, dryRun: dryRun === true, trusted });
+    if (dryRun === true) {
+      // Nothing was stored, but who asked what is still worth knowing.
+      await audit(db, ctx, {
+        action: 'lead.dry_run',
+        entityType: 'LeadSource',
+        entityId: source.id,
+        summary: `${source.name} previewed ${summary.received} lead${summary.received === 1 ? '' : 's'}: ${summary.created} new, ${summary.duplicates} repeat, ${summary.alreadyReceived} already received, ${summary.failed} invalid`,
+      });
+    }
     return reply(summary);
   } catch (e) {
     // Leads already processed in this batch are safe: a retry reports them as already_received.

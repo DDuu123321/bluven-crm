@@ -284,10 +284,6 @@ model LeadSource {
   /// During rotation the previous token keeps working until prevTokenExpiresAt.
   prevTokenHash      String?        @unique
   prevTokenExpiresAt DateTime?
-  /// Our own systems (the Bluven website). Only these may preview with dryRun, load history
-  /// with backfill, learn which order a repeat enquiry joined, and add contact details to an
-  /// existing customer automatically.
-  firstParty         Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 

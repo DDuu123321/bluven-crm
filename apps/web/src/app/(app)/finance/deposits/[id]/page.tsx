@@ -60,7 +60,11 @@ export default async function DepositPage({ params }: { params: Promise<{ id: st
         }
         description={`${fullName(deposit.order.customer)} · ${formatAddress(deposit.order.property) || 'no address'} · Salesperson: ${deposit.order.owner?.name ?? 'unassigned'}`}
       />
-      {cancelled && <Alert tone="red">This order has been cancelled.</Alert>}
+      {cancelled && (
+        <Alert tone="red">
+          This order has been cancelled.{deposit.status === 'PENDING' && ' The submission still needs your decision: whether the money arrived is what a refund depends on.'}
+        </Alert>
+      )}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <div className="space-y-4">
@@ -124,7 +128,7 @@ export default async function DepositPage({ params }: { params: Promise<{ id: st
         </div>
 
         <div className="space-y-4">
-          {deposit.status === 'PENDING' && !cancelled && (
+          {deposit.status === 'PENDING' && (
             <>
               <Card>
                 <CardHeader title="Confirm that the money has arrived" />

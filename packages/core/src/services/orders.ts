@@ -185,7 +185,11 @@ export async function syncOrderStage(tx: Tx, ctx: Ctx, orderId: string): Promise
 
 /**
  * Resets the idle clock. Only actions by the order's salesperson or a manager count: customer
- * emails, finance, operations and the system never do.
+ * emails, finance, operations and the system never do. And only work on the deal counts: a call
+ * or note, a file, a quote, the contract, the deposit, a push, a completed task. Planning (adding
+ * or moving tasks) and record keeping (correcting contact details or the address, notes for
+ * operations, re-filing a document) do not, or an order could be kept "active" for ever without
+ * anyone speaking to the customer.
  */
 export async function touchStaffActivity(tx: Tx, ctx: Ctx, order: Pick<OrderState, 'id' | 'ownerId'>): Promise<void> {
   if (ctx.actor.kind !== 'user' || !isOrderStaff(ctx.actor, order)) return;
