@@ -16,7 +16,7 @@ import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal,
 import { Alert, Badge, Card, CardBody, CardHeader, Dl, EmptyState, Input, Label, Select, Table, Td, Textarea, buttonClass, cx } from '@/components/ui';
 import { fmtDate, fmtDateTime, inputDate, inputDateTime } from '@/lib/fmt';
 import { pylonDesignLink } from '@/lib/pylon-link';
-import { deleteQuoteAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
+import { deleteQuoteAction, unlinkPylonAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
 
 const fileInput =
   'block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50';
@@ -70,7 +70,7 @@ function QuoteFields({ q, idPrefix }: { q?: Quote; idPrefix: string }) {
   );
 }
 
-export async function DealTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
+export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean; manager: boolean }) {
   const { order } = header;
   const { quotes, contract, deposits, defaultDepositPercent } = await getOrderDeal(ctx, order.id);
   const api = `/api/orders/${order.id}`;
@@ -93,6 +93,15 @@ export async function DealTab({ ctx, header, editable, staff }: { ctx: Ctx; head
           description="Each version is kept. Recording a version does not change the stage; marking it as sent to the customer does."
           actions={
             <>
+              {manager && order.pylonProjectId && (
+                <ActionButton
+                  action={unlinkPylonAction.bind(null, order.id)}
+                  variant="link"
+                  confirm="Unlink this order from its project in Pylon? Do this only when the project was replaced in Pylon: the next project that carries this order number as its reference will be linked instead."
+                >
+                  Unlink from Pylon
+                </ActionButton>
+              )}
               {order.pylonProjectUrl ? (
                 <a href={order.pylonProjectUrl} target="_blank" rel="noreferrer" className={buttonClass('secondary')}>
                   Open in Pylon
