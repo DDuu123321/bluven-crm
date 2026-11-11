@@ -2,7 +2,7 @@
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
 import { getConfig, purgeExpiredSessions, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, processPylonEvents, pullBluvenLeads, reconcilePylonEvents } from '@bluven/integrations';
+import { PylonClient, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents } from '@bluven/integrations';
 import { describeMailSetup, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
@@ -62,11 +62,30 @@ const jobs: Job[] = [
 ];
 
 if (pylon) {
-  jobs.push({
-    name: 'pylon-reconcile',
-    everyMs: 24 * HOUR,
-    run: async () => some([[(await reconcilePylonEvents(systemCtx(db, 'Pylon'), pylon)).added, 'missed Pylon events recovered']]),
-  });
+  jobs.push(
+    {
+      // What makes Pylon work with the API token alone: its event list is read every minute.
+      // A webhook, once one is configured, only gets the same events here a little sooner.
+      name: 'pylon-poll',
+      everyMs: MINUTE,
+      run: async () => {
+        const r = await pollPylonEvents(systemCtx(db, 'Pylon'), pylon);
+        if (r.error) return `could not read from Pylon: ${r.error}`;
+        return some([[r.added, 'new Pylon events']]);
+      },
+    },
+    {
+      // The thorough pass: three days back, for anything the short reads did not see.
+      name: 'pylon-reconcile',
+      everyMs: 24 * HOUR,
+      run: async () => {
+        const ctx = systemCtx(db, 'Pylon');
+        const found = await reconcilePylonEvents(ctx, pylon);
+        const purged = await purgePylonEvents(ctx);
+        return some([[found.added, 'missed Pylon events recovered'], [purged.removed, 'old unrelated Pylon events removed']]);
+      },
+    },
+  );
 }
 
 const website = config.bluvenLeads;

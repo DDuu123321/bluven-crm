@@ -41,7 +41,7 @@ CRM 不放在 `www.bluven.com.au/某个路径` 下面，原因有两个：网站
 - 两种方式用的镜像都在 Docker 里构建并运行过：数据库迁移、登录、接线索、上传与缩略图、从网站拉线索、备份、恢复、命令行重置密码。
 - 方式 B 的整套 Compose（含 Caddy 的 HTTPS）在本机完整跑过。
 - 方式 A 用的单容器镜像在本机按 Railway 的条件跑过（平台指定端口、磁盘属主为 root、外部 Postgres）。**但没有在 Railway 平台本身部署过**，第 2 节的页面步骤是按 Railway 2026 年 11 月的官方文档写的，按钮名称可能略有出入。
-- 正式域名的证书签发、真实的 Zoho 邮箱、真实的 Pylon 账号都没有接过。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
+- Pylon 已用真实账号只读验证过（见第 6 节）。正式域名的证书签发、真实的 Zoho 邮箱都没有接过。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
 
 ---
 
@@ -308,24 +308,25 @@ docker compose ps
 
 Pylon 那边，进入 Settings → Integrations & API → API settings：
 
-1. 点 Create API token，权限选 read。把得到的 token 填进 `PYLON_API_TOKEN`。
+1. 点 Create API token，权限选 Read。把得到的 token 填进 `PYLON_API_TOKEN`。**只做这一步，Pylon 对接就能用了**：CRM 每分钟去 Pylon 读一次新事件。
    **token 只在创建成功的那一刻显示一次**，是一长串字符，当场复制下来。关掉之后页面上只剩名称，再也看不到，Pylon 发来的通知邮件里也没有。没来得及复制的话，再建一个新的，然后在旧的那一行点右侧的 ⋮ 把它删掉。
-2. 点 Add a destination，URL 填 `https://crm.bluven.com.au/api/webhooks/pylon`，勾选这六类事件：
+2. 可选，想让事件几秒内到达再做：点 Add a destination，URL 填 `https://crm.bluven.com.au/api/webhooks/pylon`，勾选这六类事件：
    `solar_projects.created`、`solar_projects.updated`、`solar_designs.created`、`solar_designs.updated`、`web_proposals.signed`、`gateway_payments.created`。
-3. Pylon 会显示一次 secret，把它填进 `PYLON_WEBHOOK_SECRET`。同样只显示一次，当场复制。这一步要等 CRM 已经部署在上面那个地址之后再做。
+   Pylon 会显示一次 secret，把它填进 `PYLON_WEBHOOK_SECRET`，同样只显示一次，当场复制。这一步要等 CRM 已经部署在上面那个地址之后才能做。不做也不影响功能，事件会在一分钟内到达。
 
 变量填在哪：方式 A 是 Railway 的 Variables，保存后自动生效；方式 B 是服务器的 `.env`，然后执行 `docker compose up -d`。
 
-回到 CRM 的 Administration → Pylon，"Connection" 一栏两项都应显示 Configured。这个页面也列出最近收到的事件和处理结果，失败的可以点 Try again。
+回到 CRM 的 Administration → Pylon，"Connection" 一栏的 API token 应显示 Configured，"Reading Pylon’s events" 应显示最近一次读取的时间。这个页面也列出与订单有关的事件和处理结果，失败的可以点 Try again。
 
 接好之后的效果：
 
 - 销售在订单的 "Quote, contract & deposit" 页点 Design in Pylon，Pylon 会带着客户信息和 CRM 订单号打开。**订单号就是两边对账的依据，不要在 Pylon 里改项目的 reference number。**
+- 项目已经在 Pylon 里、当初没带订单号的：在同一页点 Link Pylon project，粘贴这个项目在 Pylon 里的地址（浏览器地址栏里 `https://app.getpylon.com/library/...` 那一串），先点 Check 核对客户和地址，再点 Link project。它已有的设计会立刻变成报价版本；客户已经签过字的，签字 PDF 直接归档为合同。
 - Pylon 里每做一版设计，CRM 自动出现一个报价版本。这一步不改变订单阶段。
 - 客户在 Pylon 网页上签字，CRM 自动把签字 PDF 归档，订单变为 Signed。
 - 客户通过 Pylon 支付网关付定金，CRM 自动生成一条待财务确认的定金。
 
-说明：Pylon 对接是按 Pylon 的开发者文档实现的，并用模拟数据测试过，但还没有连过真实的 Pylon 账号。第一次接通后，请先用一张测试订单走一遍，在 Administration → Pylon 页面确认事件都是 Done。如果出现 Failed，把页面上的错误信息发给开发者。
+说明：读取 Pylon 的事件、项目和设计，关联项目生成报价，以及已签字项目的合同归档，都已经用 Bluven 的真实 Pylon 账号验证过（只读，没有改动 Pylon 里的任何东西）。Webhook 投递和支付网关付款这两条还没有在真实账号上见过，第一次出现时请在 Administration → Pylon 页面确认事件是 Done；如果出现 Failed，把页面上的错误信息发给开发者。
 
 ---
 

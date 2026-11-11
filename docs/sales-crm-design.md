@@ -285,7 +285,9 @@ Content-Type: application/json
 
 ## 9. 报价与签约：Pylon 集成
 
-以下依据 Pylon 开发者文档（2026-11 查阅）：API 基址 `https://api.getpylon.com/v1`，JSON:API 格式，`Authorization: Bearer <token>`，`Accept: application/vnd.api+json`；限流每团队 50 次/秒、600 次/分钟；Webhook 签名为 HMAC-SHA256。
+以下依据 Pylon 开发者文档（2026-11 查阅），并已用 Bluven 的真实 Pylon 账号只读验证过：API 基址 `https://api.getpylon.com/v1`，JSON:API 格式，`Authorization: Bearer <token>`，`Accept: application/vnd.api+json`；限流每团队 50 次/秒、600 次/分钟；Webhook 签名为 HMAC-SHA256。
+
+实测得到、文档里没写的三点：事件列表默认从最旧的排起，必须带 `sort=-created_at` 才是最新在前；每页固定 50 条，时间和名称过滤参数不生效；一个活跃账号每小时能产生几十条事件，绝大多数来自与 CRM 无关的项目。
 
 ### 9.0 使用前提：设计一定在 Pylon，发送和签约不一定
 
@@ -299,12 +301,20 @@ Content-Type: application/json
 
 路径 A 下 Pylon 不会发签约事件，CRM 不依赖它。
 
-### 9.1 接入方式（两步）
+### 9.1 接入方式
 
-1. 在 Pylon 的 Settings → Integrations & API → API settings 创建 API token（权限 `read` 即可；若将来由 CRM 直接创建 Pylon 项目再加 `write`，不需要 `payment`）。
-2. 同页添加 Webhook destination，URL 填 CRM 的 `https://<crm-domain>/api/webhooks/pylon`，勾选下列事件，并保存只显示一次的 secret。
+**只需要一个 API token。** 在 Pylon 的 Settings → Integrations & API → API settings 创建 API token，权限 `Read` 即可（CRM 对 Pylon 只读不写）。token 只在创建时显示一次。
 
-Webhook 目的地必须是公网可达的 HTTPS 地址，所以 CRM 需要先有域名和证书；开发期可用隧道。7 天没有成功投递，Pylon 会把目的地置为 inactive，需手动重新激活，CRM 对此做监控告警。
+有了 token，worker 每分钟读一次 Pylon 的事件列表，新事件一分钟内进入 CRM。这条路不依赖 CRM 有没有公网地址，本地和上线前都能用。连续 5 次读不到（例如 token 被删）通知管理员一次，Administration → Pylon 页面显示最近一次成功读取的时间。
+
+**Webhook 是可选的加速。** 同页添加 Webhook destination，URL 填 `https://crm.bluven.com.au/api/webhooks/pylon`，勾选 9.3 的事件，保存只显示一次的 secret。配置后事件几秒内到达；不配置，功能完全一样，只是慢到一分钟内。两条路收到的是同一批事件，按事件 id 只处理一次。
+
+**订单怎么对上 Pylon 项目，有两种方式：**
+
+1. 销售在订单页点 Design in Pylon 新建项目，CRM 订单号作为项目的 reference number 带过去（见 9.2）。
+2. 项目已经在 Pylon 里了（没带订单号）：销售在订单的报价页点 Link Pylon project，粘贴该项目在 Pylon 里的地址。先点 Check 看到这是哪位客户、哪个地址的项目，确认无误再点 Link project。
+
+无论哪种方式，对上的那一刻 CRM 会把这个项目完整读一遍：每个设计生成一个报价版本；客户已经在 Pylon 网页上签过字的，签字 PDF 直接归档为合同；Pylon 里有而 CRM 房产上还空着的 NMI、零售商、供电相数自动填上（已有内容不覆盖，并记入操作日志）。之后也可以随时点 Refresh from Pylon 再读一遍，重复读取不会产生重复数据。
 
 ### 9.2 CRM → Pylon：从订单创建 / 打开 Pylon 项目
 
@@ -328,7 +338,7 @@ https://app.getpylon.com/map/address?search=<URL编码的完整地址>&country=A
 | `solar_designs.created` / `solar_designs.updated` | 调 `GET /v1/solar_designs/{id}?fields[solar_designs]=summary,pricing,proposal_quote`，写入或更新一条 Quote：`summary.dc_output_kw`、`summary.storage_kwh`、`pricing.total`（分）、`proposal_quote.deposit_amount_formatted`、`summary.web_proposal_url`。只记报价版本的数字和网页报价链接，不改变订单阶段，也**不自动下载方案 PDF**：设计过程中 Pylon 会频繁触发更新事件，每次都存一份 PDF 没有意义；真正发给客户的那份文件由销售在"标记为已发送"时附上。若该设计对应的报价版本已经发给过客户而关键数字有变，则另建新版本，保留已发出的那版 |
 | `web_proposals.signed`（仅路径 B 触发） | 订单进入 SIGNED；调 `GET /v1/solar_projects/{id}` 取 `acceptance.latest_esignature_pdf_url`（有效期 1 小时，须立即下载）存为 Contract 文档；`latest_signed_design` 对应的 Quote 标为 accepted |
 | `gateway_payments.created`，`purpose = "deposit"` | 自动创建 Deposit（`amount` 分、`currency`、`receipt_url`，method = gateway），订单进入 DEPOSIT_PENDING，等财务确认。未使用 Pylon 网关时此步由销售手动上传凭证。其他用途的付款只在时间线上记一笔，不生成定金 |
-| `solar_projects.updated` | 同步 `is_committed`、`job_sheet_url` 等；若 `acceptance.manually_sold` 为真而 CRM 尚无 Contract，提醒销售归档签字合同 |
+| `solar_projects.updated` | 若项目已有网页签字（`acceptance.latest_esignature`）而 CRM 尚无 Contract，直接归档签字 PDF（签约事件丢了也能补上）；若只是在 Pylon 里手动标了已成交（`manually_sold`）而没有签字件，提醒销售归档签字合同 |
 
 Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设计的创建 / 更新为准。
 
@@ -341,12 +351,13 @@ Pylon 未提供 e-sign 单独事件或"报价被拒"事件，报价版本以设�
 - 校验签名：`hs256=HMAC_SHA256(secret, "<Pylon-Webhook-Timestamp>.<原始请求体>")`（十六进制）与 `Pylon-Webhook-Signature` 比对。时间戳允许 36 小时偏差：Pylon 的重试会持续约 31 小时，重试时可能沿用原时间戳；窗口内的重放无害，因为事件按 id 只入库一次。
 - 10 秒内必须返回 2xx，否则 Pylon 视为失败并重试（共 5 次，最后一次约 31 小时后）。所以接口只做校验和入队，处理放到后台任务。
 - 幂等：以事件 id 去重，重复投递不重复处理。
-- 对账：worker 每天拉一次 `GET /v1/events`（Pylon 只保留 30 天），把没收到过的事件补进来。每次至少回看三天，因为可能漏掉一条而后面的都正常收到。
+- 读取事件列表：worker 每分钟读一次 `GET /v1/events?sort=-created_at`，从最新往回读到已经有的为止，通常一页；另外每天做一次回看三天的完整核对。Pylon 只保留 30 天的事件。
+- 与 CRM 无关的项目的事件：事件本身带着项目的 reference number（空的也带），所以不需要再向 Pylon 查询就能判断无关，直接记为不需处理。这类记录保留 35 天后自动清除；Administration → Pylon 页面默认只显示与订单有关、等待中或失败的事件。
 - 处理失败的事件按 1 分钟、5 分钟、30 分钟、2 小时、6 小时退避重试，仍失败则标记 Failed 并通知管理员，管理员在 Administration → Pylon 页面查看原因并手动重试。
-- 项目还没对上订单时到达的事件，在项目绑定后自动补处理。
+- 项目还没对上订单时到达的事件，在项目绑定后自动补处理；绑定时还会把整个项目读一遍（见 9.1），所以更早的设计也不会漏。这次完整读取如果失败，下一个事件到来时会重试。
 - 订单已关闭（丢单、取消）或已在运营手里时，设计类事件只记录不生效；签约和付款事件见 9.3 的说明。
 - 从 Pylon 下载文件只走 HTTPS，且地址必须解析到公网，跳转后同样检查；调用 API 不跟随跳转。
-- **尚未连接真实 Pylon 账号验证。** 客户端和事件处理按 Pylon 开发者文档编写，用模拟数据测试；字段读取全部做了容错。首次接通后需用一张测试订单完整走一遍。
+- **已用真实 Pylon 账号验证的部分**（只读）：读取事件列表、项目和设计；关联项目后生成报价版本（金额、定金、网页报价链接）；已签字项目的签字 PDF 下载并归档为合同；每分钟读取与事件处理；token 无效时的报错。**尚未验证的部分**：Webhook 投递与签名（需要 CRM 有公网地址后才能在 Pylon 里添加目的地）；支付网关的付款事件（账号里近期没有这类事件）。字段读取全部做了容错。
 - 路径 A 不产生 Pylon 签约事件，签约状态以 CRM 内归档的 Contract 为准；销售也可在订单页直接上传签字合同（source = upload）。
 
 ---

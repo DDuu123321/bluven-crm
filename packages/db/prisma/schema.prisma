@@ -378,6 +378,8 @@ model Order {
   // ---- Pylon
   pylonProjectId  String?
   pylonProjectUrl String?
+  /// When the linked Pylon project was last read in full. Null after linking until that has succeeded.
+  pylonSyncedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -119,7 +119,8 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `BLUVEN_LEADS_SINCE` | First run only: also take over leads created since this time, as history | from now |
 | `MAIL_RELAY_URL`, `MAIL_RELAY_KEY` | Send notification emails through an HTTPS relay (the website's `/api/send-mail`). For hosts that block outgoing SMTP; wins over SMTP when both are set | off |
 | `SMTP_URL`, `MAIL_FROM` | Send notification emails by SMTP | off |
-| `PYLON_API_TOKEN`, `PYLON_WEBHOOK_SECRET`, `PYLON_API_BASE` | Pylon connection. Without them quotes and contracts are entered by hand | off |
+| `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quotes and contracts are entered by hand | off |
+| `PYLON_WEBHOOK_SECRET` | Optional: lets Pylon deliver the same events within seconds through `/api/webhooks/pylon` | off |
 | `DATABASE_URL_TEST`, `DATABASE_URL_E2E` | Databases for `pnpm test` and `pnpm e2e` | see `.env.example` |
 
 ## HTTP API
@@ -128,6 +129,6 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 |---|---|---|
 | `POST /api/intake/leads` | Receives leads from the Bluven website and other sources | Bearer token per lead source |
 | `GET /api/intake/health` | Liveness probe | none |
-| `POST /api/webhooks/pylon` | Receives events from Pylon | HMAC signature |
+| `POST /api/webhooks/pylon` | Receives events from Pylon (optional; the worker also reads them itself) | HMAC signature |
 
 Everything else under `/api` serves the application's own pages and requires a signed-in session.
