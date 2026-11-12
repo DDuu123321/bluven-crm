@@ -11,6 +11,7 @@
   "devDependencies": {
     "@bluven/core": "workspace:*",
     "@bluven/db": "workspace:*",
+    "@bluven/integrations": "workspace:*",
     "@playwright/test": "1.63.0",
     "@types/node": "^22",
     "@types/pg": "^8",

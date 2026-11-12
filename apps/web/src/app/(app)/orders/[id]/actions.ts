@@ -24,7 +24,7 @@ import {
   voidContract,
   withdrawDeposit,
 } from '@bluven/core';
-import { linkPylonProject, previewPylonProject, refreshFromPylon } from '@bluven/integrations';
+import { addSenderToCustomer, archiveContractFromAttachment, assignEmailToOrder, fileEmailAttachment, linkPylonProject, previewPylonProject, refreshFromPylon, sendOrderEmail } from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { dateOnly, dateTime, kilo, list, money, str } from '@/lib/form';
@@ -247,6 +247,55 @@ export async function withdrawDepositAction(depositId: string): Promise<ActionRe
   if (!validArgs(depositId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await withdrawDeposit(ctx, { depositId });
+  });
+}
+
+// ---- e-mail
+
+export async function sendEmailAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const sent = await sendOrderEmail(ctx, {
+      orderId,
+      to: [str(formData, 'to')],
+      cc: [str(formData, 'cc')],
+      subject: str(formData, 'subject'),
+      body: str(formData, 'body'),
+      documentIds: list(formData, 'documentIds'),
+      replyToEmailId: str(formData, 'replyTo') || null,
+    });
+    return { message: sent.id ? 'Sent.' : 'Sent. It will appear here within a few minutes.' };
+  });
+}
+
+export async function placeEmailAction(orderId: string, emailId: string): Promise<ActionResult> {
+  if (!validArgs(orderId, emailId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await assignEmailToOrder(ctx, { emailId, orderId });
+  });
+}
+
+export async function addSenderAction(emailId: string): Promise<ActionResult> {
+  if (!validArgs(emailId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const { address } = await addSenderToCustomer(ctx, { emailId });
+    return { message: `${address} is now on the customer’s record.` };
+  });
+}
+
+export async function fileAttachmentAction(attachmentId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(attachmentId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await fileEmailAttachment(ctx, { attachmentId, typeId: str(formData, 'typeId') });
+    return { message: 'Filed.' };
+  });
+}
+
+export async function archiveAttachmentAction(attachmentId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(attachmentId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await archiveContractFromAttachment(ctx, { attachmentId, quoteId: str(formData, 'quoteId') || null, signedOn: dateOnly(formData, 'signedOn') });
+    return { message: 'Contract archived.' };
   });
 }
 

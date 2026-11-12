@@ -24,11 +24,11 @@ return loop when something is missing.
 ```
 apps/web                Next.js 16 application: all pages, Server Actions and the HTTP API
 apps/worker             Background process: idle rules, reminders, notification emails, Pylon events,
-                        collecting the website's leads
+                        collecting the website's leads, reading connected mailboxes
 packages/db             Prisma schema, migrations and the database client
 packages/core           Business rules (src/domain) and application services (src/services)
-packages/integrations   Pylon (API client, webhook verification, event processing) and the pull of
-                        new leads from the Bluven website
+packages/integrations   Pylon (API client, webhook verification, event processing), the pull of new
+                        leads from the Bluven website, and customer e-mail through Zoho Mail
 e2e                     Playwright tests that drive the built application through the whole journey
 deploy                  Start script of the single-container image; Caddyfile, environment template
                         and backup script for Docker Compose
@@ -119,6 +119,8 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `BLUVEN_LEADS_SINCE` | First run only: also take over leads created since this time, as history | from now |
 | `MAIL_RELAY_URL`, `MAIL_RELAY_KEY` | Send notification emails through an HTTPS relay (the website's `/api/send-mail`). For hosts that block outgoing SMTP; wins over SMTP when both are set | off |
 | `SMTP_URL`, `MAIL_FROM` | Send notification emails by SMTP | off |
+| `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET` | Customer e-mail: the Zoho application through which each salesperson connects their own mailbox (redirect address `<APP_URL>/api/zoho/callback`). The secret also protects the stored mailbox tokens | off |
+| `ZOHO_ACCOUNTS_URL`, `ZOHO_MAIL_URL` | Zoho's sign-in and mail addresses, for an account outside the Australian data centre | `accounts.zoho.com.au`, `mail.zoho.com.au` |
 | `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quotes and contracts are entered by hand | off |
 | `PYLON_WEBHOOK_SECRET` | Optional: lets Pylon deliver the same events within seconds through `/api/webhooks/pylon` | off |
 | `DATABASE_URL_TEST`, `DATABASE_URL_E2E` | Databases for `pnpm test` and `pnpm e2e` | see `.env.example` |
@@ -130,5 +132,6 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `POST /api/intake/leads` | Receives leads from the Bluven website and other sources | Bearer token per lead source |
 | `GET /api/intake/health` | Liveness probe | none |
 | `POST /api/webhooks/pylon` | Receives events from Pylon (optional; the worker also reads them itself) | HMAC signature |
+| `GET /api/zoho/connect`, `GET /api/zoho/callback` | Start and finish connecting a salesperson's Zoho mailbox | signed-in session, plus a one-time value kept in a cookie |
 
 Everything else under `/api` serves the application's own pages and requires a signed-in session.

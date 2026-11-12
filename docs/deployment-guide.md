@@ -41,7 +41,7 @@ CRM 不放在 `www.bluven.com.au/某个路径` 下面，原因有两个：网站
 - 两种方式用的镜像都在 Docker 里构建并运行过：数据库迁移、登录、接线索、上传与缩略图、从网站拉线索、备份、恢复、命令行重置密码。
 - 方式 B 的整套 Compose（含 Caddy 的 HTTPS）在本机完整跑过。
 - 方式 A 用的单容器镜像在本机按 Railway 的条件跑过（平台指定端口、磁盘属主为 root、外部 Postgres）。**但没有在 Railway 平台本身部署过**，第 2 节的页面步骤是按 Railway 2026 年 11 月的官方文档写的，按钮名称可能略有出入。
-- Pylon 已用真实账号只读验证过（见第 6 节）。正式域名的证书签发、真实的 Zoho 邮箱都没有接过。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
+- Pylon 已用真实账号只读验证过（见第 6 节）。正式域名的证书签发没有做过。客户邮件（第 7 节）是对着一个替身 Zoho 服务测的，没有连过真实的 Zoho 账号。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
 
 ---
 
@@ -92,11 +92,14 @@ SEED_ADMIN_PASSWORD=<临时密码，至少 10 位，第一次登录会被要求�
 BLUVEN_LEADS_URL=https://cms.bluven.com.au/api/crm/leads
 BLUVEN_LEADS_KEY=<见第 4 节>
 
-MAIL_RELAY_URL=<见第 7 节，可先留空>
-MAIL_RELAY_KEY=<见第 7 节，可先留空>
+MAIL_RELAY_URL=<见第 8 节，可先留空>
+MAIL_RELAY_KEY=<见第 8 节，可先留空>
 
 PYLON_API_TOKEN=
 PYLON_WEBHOOK_SECRET=
+
+ZOHO_CLIENT_ID=<见第 7 节，可先留空>
+ZOHO_CLIENT_SECRET=<见第 7 节，可先留空>
 ```
 
 要点：
@@ -149,7 +152,7 @@ PYLON_WEBHOOK_SECRET=
 ### 2.9 在 Railway 上要知道的几件事
 
 - **上传。** Railway 要求一个请求的上传部分在 5 分钟内完成。照片和 PDF 没问题，几百 MB 的视频在慢网络下可能失败，所以上面把 `MAX_UPLOAD_MB` 设成了 200。
-- **邮件。** Railway 屏蔽了外发 SMTP（网站后台已经踩过这个坑），CRM 的通知邮件要通过网站的邮件中继发送，见第 7 节。系统内的通知不受影响。
+- **邮件。** Railway 屏蔽了外发 SMTP（网站后台已经踩过这个坑），CRM 的通知邮件要通过网站的邮件中继发送，见第 8 节。客户邮件（第 7 节）走的是 Zoho 的网页接口，不受这个限制。系统内的通知不受影响。
 - **只能跑一个副本。** 挂了磁盘的服务不能开多副本，CRM 也不需要。
 - **进程。** 网页服务和后台任务在同一个容器里。任何一个意外退出，容器都会退出并由 Railway 重启。
 
@@ -302,6 +305,8 @@ docker compose ps
 
 6. **接 Pylon（可选）。** 见第 6 节。不接也能用，报价和合同由销售手动录入和上传。
 
+7. **接客户邮件（可选）。** 见第 7 节。不接也能用，只是和客户的邮件往来不会出现在订单里。
+
 ---
 
 ## 6. 接入 Pylon
@@ -330,7 +335,62 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 
 ---
 
-## 7. 通知邮件、时区和上传上限
+## 7. 接入客户邮件（Zoho Mail）
+
+接好之后，每个销售把自己的 Zoho 邮箱连到 CRM。他和客户的邮件自动出现在对应的订单里，也可以直接在订单里写信和回信，信从他自己的邮箱发出，Zoho 的已发送里照常有一份。
+
+这里说的是**销售和客户之间的邮件**，和第 8 节的系统通知邮件是两回事，互不影响。
+
+### 7.1 在 Zoho 里登记一次
+
+整个公司只做一次，由管理 Zoho 的人来做：
+
+1. 打开 `https://api-console.zoho.com.au`，用公司的 Zoho 账号登录。Bluven 的邮箱在澳大利亚数据中心，所以是 `.com.au` 这个地址。
+2. 点 Add Client，类型选 **Server-based Applications**。
+3. 填三项：
+   - Client Name：`Bluven CRM`
+   - Homepage URL：`https://crm.bluven.com.au`
+   - Authorized Redirect URIs：`https://crm.bluven.com.au/api/zoho/callback`
+4. 点 Create。页面给出 Client ID 和 Client Secret。
+5. 把这两个值填进 `ZOHO_CLIENT_ID` 和 `ZOHO_CLIENT_SECRET`。方式 A 填在 Railway 的 Variables，保存后自动生效。方式 B 填在服务器的 `.env`，然后执行 `docker compose up -d`。
+
+回到 CRM 的 Administration → Email，"Zoho application" 应显示 Configured。这个页面上也写着要填的回调地址，以它为准。
+
+第 3 步的回调地址必须和 CRM 的正式地址一字不差，所以要等 CRM 已经在 `https://crm.bluven.com.au` 上能打开之后再做。
+
+### 7.2 每个销售连接自己的邮箱
+
+每人做一次：
+
+1. 登录 CRM，点右上角自己的名字，选 Mailbox。
+2. 点 Connect Zoho Mail。浏览器会跳到 Zoho 的登录页，用**自己的**邮箱登录，点 Accept。
+3. 跳回 CRM，页面显示 Connected。最近两周和客户的邮件会在几分钟内出现在各自的订单里。
+
+经理在 Administration → Email 能看到谁已经连接、最近一次读取的时间和状态，也可以替别人断开。
+
+### 7.3 它读什么，不读什么
+
+- **只保存和 CRM 里已有客户往来的邮件。** 判断依据是客户资料上的邮箱地址。邮箱里的其他邮件一概不保存。
+- 读取收件箱、已发送和自己建的文件夹。不删除、不移动、不标记已读。
+- 每分钟读一次。新客户的邮箱地址录进 CRM 之后，会回头把最近两周和这个地址的往来补进来。
+- 客户来信时，订单的负责销售会在 CRM 里收到一条通知。
+- 邮件带的附件跟着邮件保存。销售在订单的 Email 页给附件选一个资料类型，点 File，它就进了订单的资料；签字合同可以直接归档为合同。
+- 销售从订单里发信时，可以勾选订单里已有的资料作为附件，单封合计不超过 20 MB。收件人里至少要有一个是客户资料上的地址，防止把客户的资料发错人。
+- 运营能在自己的订单页上看这些邮件，只读。财务看不到。
+- 销售随时可以自己断开。已经在订单里的邮件保留。
+
+### 7.4 要知道的几件事
+
+- **不要随意重新生成 Client Secret。** 各人邮箱的授权是用它加密保存的。换了之后原来的授权全部读不出来，所有人都要重新点一次 Connect。CRM 会在各人的 Mailbox 页和通知里提示。
+- 某个人改了 Zoho 密码、在 Zoho 里撤销了授权、或者账号被停用，他的邮箱会显示 Needs connecting again，本人重新连接一次即可。其他人不受影响。
+- 一个邮箱只能被一个 CRM 用户连接。
+- 如果公司的 Zoho 账号不在澳大利亚数据中心，另外设置 `ZOHO_ACCOUNTS_URL` 和 `ZOHO_MAIL_URL`，例如 `https://accounts.zoho.com` 和 `https://mail.zoho.com`，并到对应数据中心的 API console 登记。
+
+说明：这部分是按 Zoho 的官方接口文档写的，自动测试对着的是一个替身 Zoho 服务，**还没有连过真实的 Zoho 账号**。第一次连接时请先用一个人的邮箱试：连接、看最近的客户邮件是否出现、从订单里发一封信给自己。如果连接失败或读取失败，把 Mailbox 页或 Administration → Email 页上显示的错误信息发给开发者。
+
+---
+
+## 8. 通知邮件、时区和上传上限
 
 ### 通知邮件
 
@@ -366,7 +426,7 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 
 ---
 
-## 8. 日常检查
+## 9. 日常检查
 
 | 看什么 | 怎么看 | 正常的样子 |
 |---|---|---|
@@ -375,13 +435,14 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 | 网站线索 | CRM 的 Administration → Lead sources | "Bluven website" 显示 Connected，检查时间在几分钟内 |
 | 后台任务 | 方式 A：Railway 的部署日志。方式 B：`docker compose logs --since 1h worker` | 有提醒、回池、新线索时才有日志，没有报错 |
 | Pylon 事件 | CRM 的 Administration → Pylon | 没有 Failed，最近收到事件的时间合理 |
+| 客户邮件 | CRM 的 Administration → Email | 每个邮箱都是 Working，Last read 在几分钟内 |
 | 磁盘空间 | 方式 A：Railway 磁盘的用量。方式 B：`df -h` | 留有余量 |
 
-后台任务负责的事：从网站取线索、闲置 5 / 10 / 15 天的提醒和回池、暂缓到期自动恢复、待办到期提醒、通知邮件、处理 Pylon 事件。**后台任务不在运行时这些都不会发生**，但不影响大家正常使用系统，恢复运行后会补上。
+后台任务负责的事：从网站取线索、闲置 5 / 10 / 15 天的提醒和回池、暂缓到期自动恢复、待办到期提醒、通知邮件、处理 Pylon 事件、读取已连接的邮箱。**后台任务不在运行时这些都不会发生**，但不影响大家正常使用系统，恢复运行后会补上。
 
 ---
 
-## 9. 常见问题
+## 10. 常见问题
 
 **打不开，或者证书错误。**
 确认 `crm` 这条 DNS 记录已生效。方式 A 看 Railway 的 Custom Domain 状态是否变绿，CNAME 和 TXT 两条记录是否都加了。方式 B 确认 80 和 443 端口对公网开放，然后看 `docker compose logs caddy`。
@@ -416,6 +477,12 @@ cd /repo/packages/core && node --import tsx src/cli/reset-password.ts 管理员�
 
 **收不到通知邮件。**
 方式 A 只能走邮件中继，直接填 `SMTP_URL` 是发不出去的。检查 `MAIL_RELAY_URL` 和 `MAIL_RELAY_KEY` 是否和网站后台的一致。系统内的通知不受影响。
+
+**连接邮箱时 Zoho 提示 Invalid Redirect Uri，或者跳回来显示出错。**
+Zoho 里登记的回调地址和 CRM 的地址不一致。到 `api-console.zoho.com.au` 打开那个 Client，把 Authorized Redirect URIs 改成 Administration → Email 页面上显示的那一串。提示 "already connected by another user" 说明这个邮箱已经被另一个 CRM 用户连接了。
+
+**客户的邮件没有出现在订单里。**
+先看这封信的对方地址是不是写在客户资料上，不在的话在客户资料里补上，几分钟后会自动补进来。再看 Administration → Email 里这个销售的邮箱是不是 Working。超过两周以前的旧邮件不会被读取。
 
 **想看某张订单谁改过什么。**
 经理打开订单的 History 标签页，或者在 Administration → Audit log 按订单号搜索，可以导出 CSV。

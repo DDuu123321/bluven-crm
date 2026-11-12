@@ -19,7 +19,9 @@ import {
   type OrderHeader,
 } from '@bluven/core';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
+import { getOrderMail } from '@bluven/integrations';
 import { DocTile } from '@/components/doc-tile';
+import { EmailList } from '@/components/email-list';
 import { Timeline } from '@/components/timeline';
 import { Alert, Badge, Card, CardBody, CardHeader, Checkbox, Dl, Label, PageHeader, StageBadge, Textarea } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
@@ -40,7 +42,7 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
     throw e;
   }
   const { order } = header;
-  const [{ packages }, { documents, types }, timeline] = await Promise.all([getOrderHandoff(ctx, id), getOrderDocuments(ctx, id), getOrderTimeline(ctx, id)]);
+  const [{ packages }, { documents, types }, timeline, mail] = await Promise.all([getOrderHandoff(ctx, id), getOrderDocuments(ctx, id), getOrderTimeline(ctx, id), getOrderMail(ctx, id)]);
   const latest = packages.find((p) => p.decision !== 'WITHDRAWN') ?? packages[0];
   if (!latest) notFound();
   const snap = latest.snapshot as unknown as HandoffSnapshot;
@@ -227,6 +229,12 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
               {documents.length === 0 && <p className="text-sm text-slate-500">No files.</p>}
             </CardBody>
           </Card>
+          {mail.emails.length > 0 && (
+            <Card>
+              <CardHeader title="Email with the customer" description="What sales and the customer wrote to each other, newest first." />
+              <EmailList emails={mail.emails} />
+            </Card>
+          )}
           <Card>
             <CardHeader title="Timeline" description="The full history of the sale, for context." />
             <Timeline entries={timeline} />

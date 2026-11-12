@@ -35,6 +35,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     ...(can(user, 'admin.leadSources') ? [{ href: '/settings/lead-sources', label: 'Lead sources' }] : []),
     ...(can(user, 'admin.settings') ? [{ href: '/settings/rules', label: 'Rules' }] : []),
     ...(can(user, 'admin.pylon') ? [{ href: '/settings/pylon', label: 'Pylon' }] : []),
+    ...(isManager(user) ? [{ href: '/settings/email', label: 'Email' }] : []),
     ...(can(user, 'audit.view') ? [{ href: '/audit', label: 'Audit log' }] : []),
   ];
   if (admin.length > 0) sections.push({ title: 'Administration', items: admin });
@@ -74,7 +75,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           ) : (
             <span />
           )}
-          <UserMenu name={user.name} roles={user.roles.map((r) => ROLE_LABEL[r]).join(', ')} />
+          <UserMenu name={user.name} roles={user.roles.map((r) => ROLE_LABEL[r]).join(', ')} mailbox={can(user, 'orders.work')} />
         </header>
         {/* Small screens get the navigation as a strip under the header. */}
         <div className="border-b border-slate-200 bg-white px-2 py-2 md:hidden">

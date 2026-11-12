@@ -96,6 +96,9 @@ importers:
       '@bluven/db':
         specifier: workspace:*
         version: link:../packages/db
+      '@bluven/integrations':
+        specifier: workspace:*
+        version: link:../packages/integrations
       '@playwright/test':
         specifier: 1.63.0
         version: 1.63.0

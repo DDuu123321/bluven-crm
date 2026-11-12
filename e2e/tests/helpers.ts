@@ -6,8 +6,21 @@ import { E2E, type E2EState } from '../env';
 
 export const state = (): E2EState => JSON.parse(readFileSync(E2E.stateFile, 'utf8')) as E2EState;
 
-/** Signs in as one of the prepared users in a fresh browser context. */
+// The application limits how many sign-ins it accepts from one address in ten minutes, and every
+// test comes from the same one. So each person signs in once per run; later tests start from the
+// session that sign-in left behind, in a browser context of their own.
+const sessions = new Map<string, Awaited<ReturnType<BrowserContext['storageState']>>>();
+
+/** A fresh browser context signed in as one of the prepared users, on the page they land on after signing in. */
 export async function signIn(browser: Browser, who: keyof E2EState['users']): Promise<{ context: BrowserContext; page: Page }> {
+  const saved = sessions.get(who);
+  if (saved) {
+    const context = await browser.newContext({ storageState: saved });
+    const page = await context.newPage();
+    await page.goto('/');
+    await page.waitForURL((url) => url.pathname !== '/' && url.pathname !== '/login');
+    return { context, page };
+  }
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto('/login');
@@ -15,6 +28,7 @@ export async function signIn(browser: Browser, who: keyof E2EState['users']): Pr
   await page.getByLabel('Password').fill(E2E.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.waitForURL((url) => url.pathname !== '/login');
+  sessions.set(who, await context.storageState());
   return { context, page };
 }
 

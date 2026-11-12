@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { logoutAction } from '@/app/login/actions';
 import { ActionButton } from './client';
 
-export function UserMenu({ name, roles }: { name: string; roles: string }) {
+export function UserMenu({ name, roles, mailbox }: { name: string; roles: string; mailbox?: boolean }) {
   return (
     <details className="relative">
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-100 [&::-webkit-details-marker]:hidden">
@@ -17,6 +17,11 @@ export function UserMenu({ name, roles }: { name: string; roles: string }) {
         </span>
       </summary>
       <div className="absolute right-0 z-20 mt-1 w-48 rounded-md border border-slate-200 bg-white p-1 shadow-lg">
+        {mailbox && (
+          <Link href="/account/email" className="block rounded px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100">
+            Mailbox
+          </Link>
+        )}
         <Link href="/account/password" className="block rounded px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100">
           Change password
         </Link>
