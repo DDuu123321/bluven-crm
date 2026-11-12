@@ -23,9 +23,9 @@ return loop when something is missing.
 
 ```
 apps/web                Next.js 16 application: all pages, Server Actions and the HTTP API
-apps/worker             Background process: idle rules, reminders, notification emails, Pylon events,
-                        collecting the website's leads, reading connected mailboxes, the
-                        assistant's unattended work
+apps/worker             Background process: idle rules, reminders, notification emails and daily
+                        summaries, Pylon events, collecting the website's leads, reading connected
+                        mailboxes, the assistant's unattended work, document retention
 packages/db             Prisma schema, migrations and the database client
 packages/core           Business rules (src/domain) and application services (src/services)
 packages/integrations   Pylon (API client, webhook verification, event processing), the pull of new
@@ -87,6 +87,10 @@ pnpm e2e        # builds the app and drives it in a browser; uses its own databa
 
 `pnpm e2e` needs Chromium for Playwright once: `pnpm --filter @bluven/e2e exec playwright install chromium`.
 It leaves full-page screenshots of the main screens in `e2e/screenshots`.
+
+No test talks to an outside service. Zoho and the language model are played by small local servers
+(`e2e/scripts/fake-zoho.ts`, `e2e/scripts/fake-model.ts`) that speak the same HTTP as the real
+ones, so the application's own client code runs against them unchanged.
 
 ## Production
 

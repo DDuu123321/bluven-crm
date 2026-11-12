@@ -772,6 +772,17 @@ describe('what the assistant used', () => {
     expect(usage.automaticLast24h).toBe(0);
     expect(usage.recentFailures).toEqual([expect.objectContaining({ kind: 'reply', error: '529 overloaded', orderNo: expect.stringMatching(/^BLV-/), automatic: false })]);
 
+    // One person cannot run the bill up by hammering a button: sixty requests an hour, then a pause.
+    await db.aiRun.createMany({ data: Array.from({ length: 56 }, (_, i) => ({ id: `air_fill_${i}`, kind: 'reply', userId: w.sam.id, model: 'claude-opus-5-5', status: 'OK' as const, createdAt: w.clock.now() })) });
+    model.fail.reply = undefined;
+    const before = model.requests.length;
+    await expect(draftReply(sam(), { orderId, instruction: 'hello' }, model)).rejects.toThrow('asked the assistant a great deal');
+    expect(model.requests).toHaveLength(before);
+    // Others are not held back by it, and neither is the same person an hour later.
+    await summariseOrder(as(w.manager, w.clock), { orderId }, model);
+    w.clock.advanceMinutes(61);
+    await draftReply(sam(), { orderId, instruction: 'hello' }, model);
+
     expect(estimateCostUsd('claude-haiku-5-5', { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBeCloseTo(0.6, 6);
     expect(estimateCostUsd('some-future-model', { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBeNull();
   });

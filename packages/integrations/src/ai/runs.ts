@@ -1,7 +1,7 @@
 // Every request to the model goes through here: it is recorded with what it used and how it
 // ended, and background work is held back when it keeps failing or has used up the day's allowance.
 import type { Db, Prisma } from '@bluven/db';
-import { FieldErrors, ForbiddenError, actorId, audit, can, inTx, isManager, newId, nowOf, requireUser, type Ctx } from '@bluven/core';
+import { FieldErrors, ForbiddenError, ValidationError, actorId, audit, can, inTx, isManager, newId, nowOf, requireUser, type Ctx } from '@bluven/core';
 import { AI_MESSAGES, AiError, type AiModel, type AiRequest, type AiUsage } from './model';
 
 export const AI_KINDS = ['summary', 'reply', 'attachment', 'bill', 'brief'] as const;
@@ -99,11 +99,19 @@ export function unusable(detail: string): AiError {
   return new AiError(AI_MESSAGES.unreadable, 'unreadable', detail);
 }
 
+/** The most requests one person can make with the assistant's buttons in an hour. Far more than work needs; a stuck key or a script stops here. */
+export const REQUESTS_PER_PERSON_PER_HOUR = 60;
+
 /**
  * Sends one request, checks the answer and records the outcome. `parse` turns the raw answer
  * into the value the caller wants and throws (see `unusable`) when it cannot.
  */
 export async function runAi<T>(ctx: Ctx, model: AiModel, meta: AiRunMeta, request: AiRequest, parse: (output: unknown) => T): Promise<{ value: T; model: string }> {
+  const asker = actorId(ctx);
+  if (asker) {
+    const recent = await ctx.db.aiRun.count({ where: { userId: asker, createdAt: { gte: new Date(nowOf(ctx).getTime() - 3_600_000) } } });
+    if (recent >= REQUESTS_PER_PERSON_PER_HOUR) throw new ValidationError('You have asked the assistant a great deal in the last hour. Please try again a little later.');
+  }
   const started = Date.now();
   const record = async (status: 'OK' | 'REFUSED' | 'FAILED', usage: AiUsage, servedBy: string, failure: AiError | null) => {
     await ctx.db.aiRun.create({
