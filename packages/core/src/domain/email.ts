@@ -170,3 +170,40 @@ export function stripQuotedReply(text: string): string {
   }
   return text.trim();
 }
+
+// ---------------------------------------------------------------------------
+// Ready-made texts
+// ---------------------------------------------------------------------------
+
+/** What a ready-made text can refer to. Each is written in double braces, for example {{first_name}}. */
+export const TEMPLATE_FIELDS = {
+  first_name: 'The customer’s first name',
+  full_name: 'The customer’s full name',
+  address: 'The address of the property',
+  order_no: 'The order number',
+  my_name: 'Your own name',
+  my_first_name: 'Your own first name',
+} as const;
+export type TemplateField = keyof typeof TEMPLATE_FIELDS;
+
+/**
+ * Puts the values into a ready-made text. A field that has no value, and anything in braces that
+ * is not a known field, is left as it is written, so the person sending sees that something is
+ * still to be filled in.
+ */
+export function fillTemplate(text: string, values: Partial<Record<TemplateField, string>>): string {
+  return text.replace(/\{\{\s*([a-z_]+)\s*\}\}/gi, (whole, name: string) => {
+    const value = values[name.toLowerCase() as TemplateField];
+    return value && value.trim() ? value.trim() : whole;
+  });
+}
+
+/** The names in double braces that are not known fields, for telling the person writing a template. */
+export function unknownTemplateFields(text: string): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/g)) {
+    const name = m[1]!.toLowerCase();
+    if (!(name in TEMPLATE_FIELDS)) found.add(m[1]!);
+  }
+  return [...found];
+}

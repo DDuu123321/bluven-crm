@@ -30,7 +30,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   if (can(user, 'ops.handoffs')) sections.push({ title: 'Operations', items: [{ href: '/ops', label: 'Incoming orders', countKey: 'handoffs', urgent: true }] });
   sections.push({ items: [{ href: '/notifications', label: 'Notifications', countKey: 'notifications' }] });
   const admin = [
-    ...(can(user, 'config.manage') ? [{ href: '/settings/checklist', label: 'Handoff checklist' }, { href: '/settings/lost-reasons', label: 'Lost reasons' }] : []),
+    ...(can(user, 'config.manage') ? [{ href: '/settings/checklist', label: 'Handoff checklist' }, { href: '/settings/lost-reasons', label: 'Lost reasons' }, { href: '/settings/email-templates', label: 'Email templates' }] : []),
     ...(can(user, 'admin.users') ? [{ href: '/settings/users', label: 'Users' }] : []),
     ...(can(user, 'admin.leadSources') ? [{ href: '/settings/lead-sources', label: 'Lead sources' }] : []),
     ...(can(user, 'admin.settings') ? [{ href: '/settings/rules', label: 'Rules' }] : []),

@@ -14,10 +14,28 @@ import {
   updateSettings,
   updateUser,
 } from '@bluven/core';
-import { updateAssistantSettings } from '@bluven/integrations';
+import { createEmailTemplate, deleteEmailTemplate, updateAssistantSettings, updateEmailTemplate } from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { bool, int, list, str } from '@/lib/form';
+
+// ---- e-mail templates
+
+export async function saveTemplateAction(id: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(id, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const input = { name: str(formData, 'name'), subject: str(formData, 'subject'), body: String(formData.get('body') ?? ''), isActive: bool(formData, 'isActive'), sortOrder: int(formData, 'sortOrder') ?? -1 };
+    if (id === 'new') await createEmailTemplate(ctx, input);
+    else await updateEmailTemplate(ctx, { id, ...input });
+  });
+}
+
+export async function deleteTemplateAction(id: string): Promise<ActionResult> {
+  if (!validArgs(id)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await deleteEmailTemplate(ctx, { id });
+  });
+}
 
 // ---- the assistant
 

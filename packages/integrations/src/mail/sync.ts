@@ -360,7 +360,7 @@ export interface MailSyncSummary {
  */
 export async function syncAllMailboxes(ctx: Ctx, apiFor: (account: EmailAccount) => MailApi): Promise<MailSyncSummary> {
   const summary: MailSyncSummary = { mailboxes: 0, stored: 0, failed: 0 };
-  await withJobLock(ctx.db, 760301, async () => {
+  await withJobLock(ctx.db, 760601, async () => {
     const accounts = await ctx.db.emailAccount.findMany({ where: { needsReconnect: false, user: { isActive: true } }, orderBy: { lastSyncAt: { sort: 'asc', nulls: 'first' } } });
     for (const account of accounts) {
       summary.mailboxes++;

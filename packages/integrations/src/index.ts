@@ -16,3 +16,4 @@ export * from './ai/attachments';
 export * from './ai/bills';
 export * from './ai/brief';
 export * from './ai/jobs';
+export * from './mail/templates';
