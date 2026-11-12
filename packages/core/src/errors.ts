@@ -49,6 +49,9 @@ export class FieldErrors {
   get any(): boolean {
     return Object.keys(this.errors).length > 0;
   }
+  has(field: string): boolean {
+    return field in this.errors;
+  }
   throwIfAny(message = 'Please correct the highlighted fields.'): void {
     if (this.any) throw new ValidationError(message, this.errors);
   }

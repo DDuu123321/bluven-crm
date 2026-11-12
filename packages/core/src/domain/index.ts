@@ -5,3 +5,4 @@ export * from './permissions';
 export * from './normalize';
 export * from './lead';
 export * from './format';
+export * from './email';

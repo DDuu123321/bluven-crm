@@ -3,3 +3,7 @@ export * from './pylon/webhook';
 export * from './pylon/events';
 export * from './bluven/pull';
 export * from './net';
+export * from './zoho/client';
+export * from './mail/accounts';
+export * from './mail/sync';
+export * from './mail/messages';

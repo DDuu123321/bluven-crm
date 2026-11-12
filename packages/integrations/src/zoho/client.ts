@@ -1,0 +1,392 @@
+// Zoho Mail: OAuth 2.0 and the REST API, as far as the CRM needs them.
+// Written from Zoho's developer documentation (accounts: /oauth/v2, mail: /api/accounts/...).
+// It has not been exercised against a live Zoho account yet, so every field is read defensively.
+import { Readable } from 'node:stream';
+import type { ReadableStream as NodeWebStream } from 'node:stream/web';
+import { parseAddressList, type Mailbox } from '@bluven/core';
+
+export interface ZohoSettings {
+  clientId: string;
+  clientSecret: string;
+  /** For example https://accounts.zoho.com.au (the data centre the company's account lives in). */
+  accountsUrl: string;
+  /** For example https://mail.zoho.com.au */
+  mailUrl: string;
+  /** Where Zoho sends the browser back to: <APP_URL>/api/zoho/callback. */
+  redirectUri: string;
+}
+
+/** Read accounts and folders, read messages and their attachments, send messages. Nothing else. */
+export const ZOHO_SCOPES = ['ZohoMail.accounts.READ', 'ZohoMail.folders.READ', 'ZohoMail.messages.READ', 'ZohoMail.messages.CREATE'] as const;
+
+export class MailApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+    /** Worth trying again later: network trouble, rate limiting, server errors. */
+    readonly retryable: boolean,
+    /** The provider no longer accepts our credentials. */
+    readonly authFailed = false,
+  ) {
+    super(message);
+    this.name = 'MailApiError';
+  }
+}
+
+type Json = Record<string, unknown>;
+const obj = (v: unknown): Json => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Json) : {});
+const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+const text = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : null);
+
+// ---------------------------------------------------------------------------
+// OAuth
+// ---------------------------------------------------------------------------
+
+/** The page a salesperson is sent to in order to let the CRM use their mailbox. */
+export function zohoAuthorizeUrl(settings: ZohoSettings, state: string): string {
+  const params = new URLSearchParams({
+    client_id: settings.clientId,
+    response_type: 'code',
+    redirect_uri: settings.redirectUri,
+    scope: ZOHO_SCOPES.join(','),
+    // "offline" is what makes Zoho hand out a refresh token; "consent" makes it do so every
+    // time, also when the same person connects a second time.
+    access_type: 'offline',
+    prompt: 'consent',
+    state,
+  });
+  return `${settings.accountsUrl}/oauth/v2/auth?${params.toString()}`;
+}
+
+export interface ZohoTokens {
+  accessToken: string;
+  /** Present on the first exchange only. */
+  refreshToken: string | null;
+  expiresInSeconds: number;
+}
+
+async function tokenRequest(settings: ZohoSettings, params: Record<string, string>, fetchImpl: typeof fetch): Promise<ZohoTokens> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${settings.accountsUrl}/oauth/v2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({ client_id: settings.clientId, client_secret: settings.clientSecret, ...params }).toString(),
+      signal: AbortSignal.timeout(20_000),
+      redirect: 'error',
+    });
+  } catch (e) {
+    throw new MailApiError(`Could not reach Zoho: ${e instanceof Error ? e.message : 'network error'}`, null, true);
+  }
+  let body: Json = {};
+  try {
+    body = obj(await res.json());
+  } catch {
+    /* handled below */
+  }
+  // Zoho answers 200 with an "error" field when it refuses.
+  const error = text(body.error);
+  const accessToken = text(body.access_token);
+  if (!res.ok || error || !accessToken) {
+    const refused = error === 'invalid_code' || error === 'invalid_client' || error === 'invalid_grant' || error === 'access_denied' || res.status === 400 || res.status === 401;
+    throw new MailApiError(`Zoho refused the request${error ? ` (${error})` : ` (status ${res.status})`}.`, res.status, !refused && (res.status >= 500 || res.status === 429), refused);
+  }
+  const expires = Number(body.expires_in);
+  return { accessToken, refreshToken: text(body.refresh_token), expiresInSeconds: Number.isFinite(expires) && expires > 0 ? expires : 3600 };
+}
+
+/** Turns the code Zoho passes back after consent into tokens. The code is valid for two minutes. */
+export function exchangeZohoCode(settings: ZohoSettings, code: string, fetchImpl: typeof fetch = fetch): Promise<ZohoTokens> {
+  return tokenRequest(settings, { grant_type: 'authorization_code', code, redirect_uri: settings.redirectUri }, fetchImpl);
+}
+
+export function refreshZohoToken(settings: ZohoSettings, refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<ZohoTokens> {
+  return tokenRequest(settings, { grant_type: 'refresh_token', refresh_token: refreshToken }, fetchImpl);
+}
+
+/** Tells Zoho to forget the grant. Best effort: a failure here must not stop a disconnect. */
+export async function revokeZohoToken(settings: ZohoSettings, refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  try {
+    const res = await fetchImpl(`${settings.accountsUrl}/oauth/v2/token/revoke?token=${encodeURIComponent(refreshToken)}`, { method: 'POST', signal: AbortSignal.timeout(15_000), redirect: 'error' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The mailbox, as the CRM's mail logic sees it. Tests supply a stand-in.
+// ---------------------------------------------------------------------------
+
+export interface MailAccountInfo {
+  accountId: string;
+  primaryAddress: string;
+  /** Primary address and aliases, lower-cased. */
+  addresses: string[];
+  displayName: string;
+}
+
+export interface MailFolder {
+  id: string;
+  name: string;
+  /** Zoho's folder type: "Inbox" (also for folders the user made), "Sent", "Drafts", "Spam", "Trash"... */
+  type: string;
+  path: string;
+}
+
+export interface MailListItem {
+  messageId: string;
+  folderId: string;
+  threadId: string | null;
+  subject: string;
+  from: Mailbox | null;
+  to: Mailbox[];
+  cc: Mailbox[];
+  /** When the mailbox received it (or, in the sent folder, when it was sent). */
+  time: Date;
+  hasAttachment: boolean;
+  summary: string;
+}
+
+export interface MailAttachmentInfo {
+  attachmentId: string;
+  name: string;
+  size: number;
+}
+
+export interface UploadedAttachment {
+  storeName: string;
+  attachmentPath: string;
+  attachmentName: string;
+}
+
+export interface OutgoingMail {
+  from: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  html: string;
+  attachments: UploadedAttachment[];
+  /** The provider's id of the message this one answers, in the same mailbox. */
+  replyToMessageId?: string | null;
+}
+
+export interface MailApi {
+  listAccounts(): Promise<MailAccountInfo[]>;
+  listFolders(accountId: string): Promise<MailFolder[]>;
+  /** Newest first. `start` counts from 1. */
+  listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailListItem[]>;
+  getContent(accountId: string, folderId: string, messageId: string): Promise<string>;
+  /** Header names in lower case. */
+  getHeaders(accountId: string, folderId: string, messageId: string): Promise<Record<string, string[]>>;
+  listAttachments(accountId: string, folderId: string, messageId: string): Promise<MailAttachmentInfo[]>;
+  downloadAttachment(accountId: string, folderId: string, messageId: string, attachmentId: string): Promise<Readable>;
+  uploadAttachment(accountId: string, fileName: string, body: Readable): Promise<UploadedAttachment>;
+  /** Returns the provider's id of the sent message when it tells us. */
+  send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null }>;
+}
+
+export function parseAccount(data: unknown): MailAccountInfo | null {
+  const a = obj(data);
+  const accountId = text(a.accountId);
+  const listed = arr(a.emailAddress)
+    .map((e) => text(obj(e).mailId)?.toLowerCase())
+    .filter((v): v is string => !!v);
+  const primary = (text(a.primaryEmailAddress) ?? text(a.incomingUserName) ?? listed[0] ?? '').toLowerCase();
+  if (!accountId || !primary.includes('@')) return null;
+  // Only a mailbox that Zoho itself hosts: an external IMAP account added inside Zoho is not ours to read.
+  const type = text(a.type);
+  if (type && type !== 'ZOHO_ACCOUNT') return null;
+  return { accountId, primaryAddress: primary, addresses: [...new Set([primary, ...listed])], displayName: text(a.displayName) ?? '' };
+}
+
+export function parseListItem(data: unknown): MailListItem | null {
+  const m = obj(data);
+  const messageId = text(m.messageId);
+  const folderId = text(m.folderId);
+  const ms = Number(text(m.receivedTime) ?? text(m.sentDateInGMT));
+  if (!messageId || !folderId || !Number.isFinite(ms) || ms <= 0) return null;
+  const from = parseAddressList(text(m.fromAddress))[0] ?? null;
+  const sender = text(m.sender);
+  return {
+    messageId,
+    folderId,
+    threadId: text(m.threadId),
+    subject: text(m.subject) ?? '',
+    from: from ? { address: from.address, name: from.name || (sender && !sender.includes('@') ? sender : '') } : null,
+    to: parseAddressList(text(m.toAddress)),
+    cc: parseAddressList(text(m.ccAddress)),
+    time: new Date(ms),
+    hasAttachment: m.hasAttachment === '1' || m.hasAttachment === 1 || m.hasAttachment === true || m.hasAttachment === 'true',
+    summary: text(m.summary) ?? '',
+  };
+}
+
+export interface ZohoMailClientOptions {
+  mailUrl: string;
+  /** Supplies a valid access token; called again with `true` after the API refused the last one. */
+  accessToken: (forceRefresh?: boolean) => Promise<string>;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+export class ZohoMailClient implements MailApi {
+  private readonly base: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+
+  constructor(private readonly opts: ZohoMailClientOptions) {
+    this.base = `${opts.mailUrl.replace(/\/+$/, '')}/api`;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+  }
+
+  private async request(path: string, init: { method?: string; body?: string | ArrayBuffer; headers?: Record<string, string>; accept?: string } = {}): Promise<Response> {
+    const call = async (force: boolean): Promise<Response> => {
+      const token = await this.opts.accessToken(force);
+      try {
+        return await this.fetchImpl(`${this.base}${path}`, {
+          method: init.method ?? 'GET',
+          headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: init.accept ?? 'application/json', ...init.headers },
+          body: init.body,
+          signal: AbortSignal.timeout(this.timeoutMs),
+          // The token must never follow a redirect to another host.
+          redirect: 'error',
+        });
+      } catch (e) {
+        throw new MailApiError(`Could not reach Zoho Mail: ${e instanceof Error ? e.message : 'network error'}`, null, true);
+      }
+    };
+    let res = await call(false);
+    // An access token lives for an hour; one that has just run out is replaced once.
+    if (res.status === 401) {
+      await res.body?.cancel().catch(() => undefined);
+      res = await call(true);
+    }
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = obj(await res.json());
+        detail = text(obj(body.data).errorCode) ?? text(obj(body.data).moreInfo) ?? text(obj(body.status).description) ?? '';
+      } catch {
+        /* no readable body */
+      }
+      const authFailed = res.status === 401 || /INVALID_OAUTHTOKEN|INVALID_TICKET|OAUTH_SCOPE_MISMATCH/i.test(detail);
+      throw new MailApiError(`Zoho Mail answered ${res.status}${detail ? ` (${detail})` : ''} for ${path.split('?')[0]}`, res.status, !authFailed && (res.status === 429 || res.status >= 500 || res.status === 408), authFailed);
+    }
+    return res;
+  }
+
+  private async data(path: string, init?: Parameters<ZohoMailClient['request']>[1]): Promise<unknown> {
+    const res = await this.request(path, init);
+    try {
+      return obj(await res.json()).data;
+    } catch {
+      throw new MailApiError('Zoho Mail returned a response that is not JSON.', res.status, true);
+    }
+  }
+
+  async listAccounts(): Promise<MailAccountInfo[]> {
+    return arr(await this.data('/accounts'))
+      .map(parseAccount)
+      .filter((a): a is MailAccountInfo => a !== null);
+  }
+
+  async listFolders(accountId: string): Promise<MailFolder[]> {
+    const out: MailFolder[] = [];
+    for (const item of arr(await this.data(`/accounts/${encodeURIComponent(accountId)}/folders`))) {
+      const f = obj(item);
+      const id = text(f.folderId);
+      if (id) out.push({ id, name: text(f.folderName) ?? '', type: text(f.folderType) ?? '', path: text(f.path) ?? '' });
+    }
+    return out;
+  }
+
+  async listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailListItem[]> {
+    const params = new URLSearchParams({ folderId, start: String(opts.start), limit: String(Math.min(200, Math.max(1, opts.limit))), sortBy: 'date', sortorder: 'false', includeto: 'true' });
+    return arr(await this.data(`/accounts/${encodeURIComponent(accountId)}/messages/view?${params.toString()}`))
+      .map(parseListItem)
+      .filter((m): m is MailListItem => m !== null);
+  }
+
+  private messagePath(accountId: string, folderId: string, messageId: string): string {
+    return `/accounts/${encodeURIComponent(accountId)}/folders/${encodeURIComponent(folderId)}/messages/${encodeURIComponent(messageId)}`;
+  }
+
+  async getContent(accountId: string, folderId: string, messageId: string): Promise<string> {
+    return text(obj(await this.data(`${this.messagePath(accountId, folderId, messageId)}/content`)).content) ?? '';
+  }
+
+  async getHeaders(accountId: string, folderId: string, messageId: string): Promise<Record<string, string[]>> {
+    const content = obj(await this.data(`${this.messagePath(accountId, folderId, messageId)}/header?raw=false`)).headerContent;
+    const out: Record<string, string[]> = {};
+    if (typeof content === 'string') {
+      // The raw form, should Zoho send it anyway: unfold continuation lines, then split.
+      for (const line of content.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+        const at = line.indexOf(':');
+        if (at > 0) (out[line.slice(0, at).trim().toLowerCase()] ??= []).push(line.slice(at + 1).trim());
+      }
+      return out;
+    }
+    for (const [name, values] of Object.entries(obj(content))) {
+      const list = (Array.isArray(values) ? values : [values]).map((v) => text(v)).filter((v): v is string => v !== null);
+      if (list.length) out[name.toLowerCase()] = list;
+    }
+    return out;
+  }
+
+  async listAttachments(accountId: string, folderId: string, messageId: string): Promise<MailAttachmentInfo[]> {
+    const out: MailAttachmentInfo[] = [];
+    // Inline images (signatures, logos) are left out by default, which is what we want.
+    for (const item of arr(obj(await this.data(`${this.messagePath(accountId, folderId, messageId)}/attachmentinfo`)).attachments)) {
+      const a = obj(item);
+      const attachmentId = text(a.attachmentId);
+      const size = Number(a.attachmentSize);
+      if (attachmentId) out.push({ attachmentId, name: text(a.attachmentName) ?? 'attachment', size: Number.isFinite(size) && size >= 0 ? size : 0 });
+    }
+    return out;
+  }
+
+  async downloadAttachment(accountId: string, folderId: string, messageId: string, attachmentId: string): Promise<Readable> {
+    const res = await this.request(`${this.messagePath(accountId, folderId, messageId)}/attachments/${encodeURIComponent(attachmentId)}`, { accept: 'application/octet-stream' });
+    if (!res.body) throw new MailApiError('Zoho Mail sent an empty attachment.', res.status, true);
+    return Readable.fromWeb(res.body as unknown as NodeWebStream<Uint8Array>);
+  }
+
+  async uploadAttachment(accountId: string, fileName: string, body: Readable): Promise<UploadedAttachment> {
+    // The file is held in memory for the upload: a stream cannot be sent again if the token has
+    // to be renewed in between, and attachments are limited to what mail accepts anyway.
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) chunks.push(Buffer.from(chunk as Uint8Array));
+    const bytes = Buffer.concat(chunks);
+    const d = obj(
+      await this.data(`/accounts/${encodeURIComponent(accountId)}/messages/attachments?fileName=${encodeURIComponent(fileName)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        // A copy in a buffer of its own: Node's buffers may share a larger pool.
+        body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      }),
+    );
+    const storeName = text(d.storeName);
+    const attachmentPath = text(d.attachmentPath);
+    if (!storeName || !attachmentPath) throw new MailApiError('Zoho Mail did not confirm the uploaded attachment.', 200, true);
+    return { storeName, attachmentPath, attachmentName: text(d.attachmentName) ?? fileName };
+  }
+
+  async send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null }> {
+    const body: Json = {
+      fromAddress: mail.from,
+      toAddress: mail.to.join(','),
+      subject: mail.subject,
+      content: mail.html,
+      mailFormat: 'html',
+      askReceipt: 'no',
+    };
+    if (mail.cc.length) body.ccAddress = mail.cc.join(',');
+    if (mail.attachments.length) body.attachments = mail.attachments;
+    const path = mail.replyToMessageId ? `/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(mail.replyToMessageId)}` : `/accounts/${encodeURIComponent(accountId)}/messages`;
+    if (mail.replyToMessageId) body.action = 'reply';
+    const d = obj(await this.data(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
+    return { messageId: text(d.messageId) ?? text(d.mailId) };
+  }
+}

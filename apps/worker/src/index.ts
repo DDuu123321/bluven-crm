@@ -2,7 +2,7 @@
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
 import { getConfig, purgeExpiredSessions, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents } from '@bluven/integrations';
+import { PylonClient, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
 import { describeMailSetup, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
@@ -88,6 +88,19 @@ if (pylon) {
   );
 }
 
+const mail = zohoSettings();
+if (mail) {
+  jobs.push({
+    // Each connected mailbox is read once a minute; only mail with known customers is kept.
+    name: 'mail-sync',
+    everyMs: MINUTE,
+    run: async () => {
+      const r = await syncAllMailboxes(systemCtx(db, 'Mail'), mailApiFactory(db));
+      return some([[r.stored, 'e-mails added to timelines'], [r.failed, 'mailboxes could not be read']]);
+    },
+  });
+}
+
 const website = config.bluvenLeads;
 if (website.url && website.key) {
   jobs.push({
@@ -102,7 +115,7 @@ if (website.url && website.key) {
 
 console.log(`[${new Date().toISOString()}] worker started (${jobs.map((j) => j.name).join(', ')})`);
 console.log(
-  `  time zone: ${config.timeZone} · notification emails: ${describeMailSetup()} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'} · website leads: ${
+  `  time zone: ${config.timeZone} · notification emails: ${describeMailSetup()} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'} · customer e-mail: ${mail ? `Zoho (${new URL(mail.mailUrl).host})` : 'off (ZOHO_CLIENT_ID and ZOHO_CLIENT_SECRET not set)'} · website leads: ${
     website.url && website.key ? `pulled from ${new URL(website.url).host}` : 'not pulled (BLUVEN_LEADS_URL and BLUVEN_LEADS_KEY not set)'
   }`,
 );
