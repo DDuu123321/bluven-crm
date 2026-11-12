@@ -8,6 +8,7 @@ export * from './ids';
 export * from './storage';
 export * from './body';
 export * from './attempts';
+export * from './secrets';
 export * from './services/audit';
 export * from './services/activity';
 export * from './services/notify';

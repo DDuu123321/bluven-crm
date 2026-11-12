@@ -10,6 +10,8 @@ export interface NotificationInput {
   /** In-app path the notification links to. */
   href?: string;
   orderId?: string | null;
+  /** Shown in the CRM only, never e-mailed. For news the recipient already gets by e-mail, such as a customer's e-mail. */
+  inAppOnly?: boolean;
 }
 
 /**
@@ -30,7 +32,7 @@ export async function notifyUsers(db: DbOrTx, ctx: Ctx, userIds: Iterable<string
       body: (n.body ?? '').slice(0, 2000),
       href: n.href ?? '',
       orderId: n.orderId ?? null,
-      emailStatus: 'PENDING' as const,
+      emailStatus: n.inAppOnly ? ('NONE' as const) : ('PENDING' as const),
       createdAt: now,
     })),
   });

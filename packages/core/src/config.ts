@@ -24,6 +24,12 @@ export interface AppConfig {
    * address and the shared key are set.
    */
   bluvenLeads: { url: string; key: string; since: string };
+  /**
+   * Zoho Mail. Each salesperson connects their own mailbox by OAuth; the client id and secret
+   * come from one application registered in Zoho's API console. Off unless both are set.
+   * The company's account lives in Zoho's Australian data centre, hence the default addresses.
+   */
+  zoho: { clientId: string; clientSecret: string; accountsUrl: string; mailUrl: string };
 }
 
 let cached: AppConfig | undefined;
@@ -51,6 +57,12 @@ export function getConfig(): AppConfig {
       url: env.BLUVEN_LEADS_URL?.trim() ?? '',
       key: env.BLUVEN_LEADS_KEY?.trim() ?? '',
       since: env.BLUVEN_LEADS_SINCE?.trim() ?? '',
+    },
+    zoho: {
+      clientId: env.ZOHO_CLIENT_ID?.trim() ?? '',
+      clientSecret: env.ZOHO_CLIENT_SECRET?.trim() ?? '',
+      accountsUrl: (env.ZOHO_ACCOUNTS_URL?.trim() || 'https://accounts.zoho.com.au').replace(/\/+$/, ''),
+      mailUrl: (env.ZOHO_MAIL_URL?.trim() || 'https://mail.zoho.com.au').replace(/\/+$/, ''),
     },
   };
   return cached;

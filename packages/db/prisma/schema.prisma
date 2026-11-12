@@ -178,6 +178,8 @@ model User {
   decidedDeposits   Deposit[]        @relation("DepositDecider")
   pushedHandoffs    HandoffPackage[] @relation("HandoffPusher")
   decidedHandoffs   HandoffPackage[] @relation("HandoffDecider")
+  emailAccount      EmailAccount?
+  sentEmails        EmailMessage[]   @relation("EmailSender")
 }
 
 model Session {
@@ -207,11 +209,12 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  emails     CustomerEmail[]
-  phones     CustomerPhone[]
-  properties Property[]
-  orders     Order[]
-  activities Activity[]
+  emails        CustomerEmail[]
+  phones        CustomerPhone[]
+  properties    Property[]
+  orders        Order[]
+  activities    Activity[]
+  emailMessages EmailMessage[]
 }
 
 model CustomerEmail {
@@ -393,6 +396,7 @@ model Order {
   handoffs      HandoffPackage[]
   receipts      LeadReceipt[]
   notifications Notification[]
+  emailMessages EmailMessage[]
 
   @@index([ownerId, sideState, stage])
   @@index([stage, sideState])
@@ -545,9 +549,11 @@ model Document {
   /// proved is rejected or withdrawn. The file stays on record but is no longer a current document.
   supersededAt DateTime?
 
-  quote    Quote?
-  contract Contract?
-  deposit  Deposit?
+  quote            Quote?
+  contract         Contract?
+  deposit          Deposit?
+  /// The e-mail attachment this document was filed from, if any.
+  emailAttachments EmailAttachment[]
 
   @@index([orderId, typeId])
   @@index([propertyId])
@@ -717,4 +723,128 @@ model Setting {
 model Counter {
   key   String @id
   value Int
+}
+
+// ---------------------------------------------------------------------------
+// E-mail (Phase 2)
+// ---------------------------------------------------------------------------
+
+enum EmailDirection {
+  IN
+  OUT
+}
+
+/// A salesperson's own mailbox, connected by OAuth. One per user.
+model EmailAccount {
+  id                   String    @id
+  userId               String    @unique
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider             String    @default("zoho")
+  /// The mailbox's primary address, lower-cased.
+  address              String
+  /// Every address the mailbox answers to (primary and aliases), lower-cased.
+  addresses            String[]
+  displayName          String    @default("")
+  providerAccountId    String
+  /// The refresh token, encrypted. Never leaves the server.
+  refreshTokenEnc      String
+  accessTokenEnc       String?
+  accessTokenExpiresAt DateTime?
+  connectedAt          DateTime  @default(now())
+  /// Nothing older than this is read from the mailbox.
+  syncFrom             DateTime
+  /// The folders that are read: [{ id, name, kind }] with kind "inbox", "sent" or "filed"
+  /// (a folder the owner's own rules move incoming mail into).
+  folders              Json      @default("[]")
+  foldersCheckedAt     DateTime?
+  /// Per folder id, the time of the newest message already dealt with.
+  cursors              Json      @default("{}")
+  /// When the folders other than the inbox and the sent folder were last read.
+  filedFoldersAt       DateTime?
+  lastSyncAt           DateTime?
+  lastOkAt             DateTime?
+  lastError            String?
+  consecutiveFailures  Int       @default(0)
+  /// The mail provider no longer accepts our token: the owner has to connect again.
+  needsReconnect       Boolean   @default(false)
+
+  messages EmailMessage[]
+}
+
+/// One e-mail exchanged with a customer. Only mail to or from known customers is stored.
+model EmailMessage {
+  id                String         @id
+  /// The mailbox it was read from or sent with. Null once that mailbox has been removed.
+  accountId         String?
+  account           EmailAccount?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  customerId        String
+  customer          Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderId           String?
+  order             Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  direction         EmailDirection
+  providerMessageId String?
+  providerThreadId  String?
+  providerFolderId  String?
+  /// The Message-ID header, which is the same in every mailbox the message reached.
+  messageIdHeader   String?        @unique
+  inReplyTo         String?
+  references        String[]
+  fromAddress       String
+  fromName          String         @default("")
+  toAddresses       String[]
+  ccAddresses       String[]
+  subject           String         @default("")
+  bodyText          String         @default("")
+  /// As received. Only ever shown inside a sandbox; the text version is what pages display.
+  bodyHtml          String?
+  sentAt            DateTime
+  /// Set when it was written in the CRM.
+  sentById          String?
+  sentBy            User?          @relation("EmailSender", fields: [sentById], references: [id], onDelete: SetNull)
+  /// A sender whose address is not on the customer's record yet (a reply from another address).
+  unknownSender     String?
+  activityId        String?        @unique
+  createdAt         DateTime       @default(now())
+
+  attachments EmailAttachment[]
+
+  @@unique([accountId, providerMessageId])
+  @@index([customerId, sentAt])
+  @@index([orderId, sentAt])
+  @@index([providerThreadId])
+}
+
+model EmailAttachment {
+  id            String       @id
+  messageId     String
+  message       EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  fileName      String
+  mimeType      String       @default("application/octet-stream")
+  sizeBytes     Int
+  /// Where the file is kept. Null when it was not downloaded (see skippedReason).
+  storageKey    String?
+  sha256        String?
+  skippedReason String?
+  /// The document it was filed as, or, for a message sent from the CRM, the document that was attached.
+  documentId    String?
+  document      Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+
+  @@index([messageId])
+  @@index([documentId])
+}
+
+/// Ready-made texts for e-mails written in the CRM. Managers maintain them.
+model EmailTemplate {
+  id          String   @id
+  name        String
+  subject     String   @default("")
+  body        String   @default("")
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
 }

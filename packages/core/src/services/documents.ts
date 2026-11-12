@@ -158,6 +158,8 @@ export interface UploadDocumentInput {
   /** Upload as a new version of this document. */
   replacesId?: string | null;
   note?: string;
+  /** Where the file came from, when it was not uploaded by hand. */
+  source?: DocSource;
 }
 
 /**
@@ -182,7 +184,7 @@ export async function uploadDocument(ctx: Ctx, input: UploadDocumentInput): Prom
         replaces = await tx.document.findFirst({ where: { id: input.replacesId, orderId: order.id, typeId: type.id, ...CURRENT_DOCUMENT } });
         if (!replaces) throw new ValidationError('The file to replace no longer exists.');
       }
-      const created = await attachStaged(tx, ctx, order, staged, { type, note: input.note, replaces });
+      const created = await attachStaged(tx, ctx, order, staged, { type, note: input.note, replaces, source: input.source });
       await touchStaffActivity(tx, ctx, order);
       return created;
     });
