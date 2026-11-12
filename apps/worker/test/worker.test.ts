@@ -1,9 +1,9 @@
 import http from 'node:http';
 import net from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { notifyUsers, resetConfigCache, systemCtx } from '@bluven/core';
-import { makeUser, resetDb, testDb } from '../../../packages/core/test/helpers';
-import { sendNotificationEmails, setMailSender } from '../src/mailer';
+import { notifyUsers, resetConfigCache, setDailySummary, systemCtx } from '@bluven/core';
+import { as, makeUser, resetDb, testDb } from '../../../packages/core/test/helpers';
+import { sendDailySummaries, sendNotificationEmails, setMailSender } from '../src/mailer';
 import { startScheduler } from '../src/scheduler';
 
 const db = testDb();
@@ -169,6 +169,96 @@ function startSmtpServer(): Promise<{ port: number; deliveries: SmtpDelivery[]; 
     });
   });
 }
+
+describe('the daily summary', () => {
+  const sent: { to: { address: string }; subject: string; text: string; html: string }[] = [];
+  let failNext = 0;
+
+  beforeEach(async () => {
+    await resetDb();
+    sent.length = 0;
+    failNext = 0;
+    process.env.APP_URL = 'https://crm.example.com';
+    process.env.APP_TIMEZONE = 'Australia/Sydney';
+    resetConfigCache();
+    setMailSender(async (mail) => {
+      if (failNext > 0) {
+        failNext--;
+        throw new Error('SMTP connection refused');
+      }
+      sent.push(mail);
+    });
+  });
+  afterEach(() => {
+    setMailSender(undefined);
+    resetConfigCache();
+  });
+
+  // Sydney is eleven hours ahead of UTC in November: noon on the 10th, and the next morning.
+  const noon = new Date('2026-11-10T01:00:00Z');
+  const beforeSeven = new Date('2026-11-10T19:30:00Z');
+  const afterSeven = new Date('2026-11-10T20:05:00Z');
+  const nextMorning = new Date('2026-11-11T20:05:00Z');
+  const at = (when: Date) => systemCtx(db, 'System', () => when);
+
+  it('goes out once a morning with everything still unread, in place of an e-mail for each notification', async () => {
+    const sam = await makeUser(['SALES'], 'Sam Sales');
+    const alex = await makeUser(['SALES'], 'Alex Sales');
+    await setDailySummary(as(sam), true);
+    await notifyUsers(db, at(noon), [sam.id, alex.id], { type: 'order.assigned', title: 'BLV-2026-00001 has been assigned to you', href: '/orders/ord_1' });
+    await notifyUsers(db, at(noon), [sam.id], { type: 'task.due', title: 'Task due: call Jane back' });
+    await notifyUsers(db, at(noon), [sam.id], { type: 'handoff.returned', title: 'Read already', href: '/orders/ord_2' });
+    await db.notification.updateMany({ where: { title: 'Read already' }, data: { readAt: noon } });
+
+    // Alex gets his e-mail as before; Sam's wait for the morning.
+    expect(await sendNotificationEmails(db, new Date(noon.getTime() + 5 * 60_000))).toMatchObject({ sent: 1 });
+    expect(sent.map((m) => m.to.address)).toEqual([alex.email]);
+    expect(await sendDailySummaries(db, beforeSeven)).toEqual({ sent: 0, nothingToSay: 0, failed: 0 });
+
+    expect(await sendDailySummaries(db, afterSeven)).toEqual({ sent: 1, nothingToSay: 0, failed: 0 });
+    const summary = sent[1]!;
+    expect(summary.to.address).toBe(sam.email);
+    expect(summary.subject).toBe('Bluven CRM: 2 notifications waiting for you');
+    expect(summary.text).toContain('Good morning Sam,');
+    expect(summary.text).toContain('Leads & assignments\n- BLV-2026-00001 has been assigned to you');
+    expect(summary.text).toContain('Tasks\n- Task due: call Jane back\n  https://crm.example.com/notifications');
+    expect(summary.text).not.toContain('Read already');
+    expect(summary.html).toContain('<strong>Tasks</strong>');
+    const notes = await db.notification.findMany({ where: { userId: sam.id }, orderBy: { title: 'asc' } });
+    expect(notes.map((n) => [n.title, n.emailStatus, !!n.summarisedAt])).toEqual([
+      ['BLV-2026-00001 has been assigned to you', 'SENT', true],
+      ['Read already', 'SKIPPED', false],
+      ['Task due: call Jane back', 'SENT', true],
+    ]);
+
+    // Once a day: what arrives later the same day waits for the next morning.
+    await notifyUsers(db, at(afterSeven), [sam.id], { type: 'deposit.confirmed', title: 'Deposit confirmed' });
+    expect(await sendDailySummaries(db, new Date(afterSeven.getTime() + 3 * 3_600_000))).toEqual({ sent: 0, nothingToSay: 0, failed: 0 });
+    expect(await sendNotificationEmails(db, new Date(afterSeven.getTime() + 3 * 3_600_000))).toMatchObject({ sent: 0 });
+    expect(await sendDailySummaries(db, nextMorning)).toEqual({ sent: 1, nothingToSay: 0, failed: 0 });
+    expect(sent[2]).toMatchObject({ subject: 'Bluven CRM: 1 notification waiting for you' });
+    expect(sent[2]!.text).toContain('Deposits\n- Deposit confirmed');
+  });
+
+  it('sends nothing when there is nothing unread, and tries again when sending fails', async () => {
+    const sam = await makeUser(['SALES'], 'Sam Sales');
+    await setDailySummary(as(sam), true);
+    expect(await sendDailySummaries(db, afterSeven)).toEqual({ sent: 0, nothingToSay: 1, failed: 0 });
+    expect(await sendDailySummaries(db, afterSeven)).toEqual({ sent: 0, nothingToSay: 0, failed: 0 });
+    expect(sent).toHaveLength(0);
+
+    await notifyUsers(db, at(afterSeven), [sam.id], { type: 'task.due', title: 'Task due: send the quote' });
+    failNext = 1;
+    expect(await sendDailySummaries(db, nextMorning)).toEqual({ sent: 0, nothingToSay: 0, failed: 1 });
+    expect((await db.notification.findFirstOrThrow({ where: { userId: sam.id } })).emailStatus).toBe('PENDING');
+    expect(await sendDailySummaries(db, new Date(nextMorning.getTime() + 10 * 60_000))).toEqual({ sent: 1, nothingToSay: 0, failed: 0 });
+    expect(sent).toHaveLength(1);
+    // People who have left get nothing.
+    await db.user.update({ where: { id: sam.id }, data: { isActive: false } });
+    await notifyUsers(db, at(nextMorning), [sam.id], { type: 'task.due', title: 'Too late' });
+    expect(await sendDailySummaries(db, new Date(nextMorning.getTime() + 2 * 86_400_000))).toEqual({ sent: 0, nothingToSay: 0, failed: 0 });
+  });
+});
 
 describe('notification emails through the website relay', () => {
   const saved = { MAIL_RELAY_URL: process.env.MAIL_RELAY_URL, MAIL_RELAY_KEY: process.env.MAIL_RELAY_KEY, SMTP_URL: process.env.SMTP_URL, APP_URL: process.env.APP_URL };
