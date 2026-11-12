@@ -24,8 +24,25 @@ import {
   voidContract,
   withdrawDeposit,
 } from '@bluven/core';
-import { addSenderToCustomer, archiveContractFromAttachment, assignEmailToOrder, fileEmailAttachment, linkPylonProject, previewPylonProject, refreshFromPylon, sendOrderEmail } from '@bluven/integrations';
+import {
+  addSenderToCustomer,
+  applySummaryHint,
+  archiveContractFromAttachment,
+  assignEmailToOrder,
+  dismissSummaryHint,
+  draftReply,
+  fileEmailAttachment,
+  linkPylonProject,
+  previewPylonProject,
+  readBill,
+  refreshFromPylon,
+  sendOrderEmail,
+  summariseOrder,
+  takeBillValue,
+  writeHandoffBrief,
+} from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
+import { requireAssistant } from '@/lib/assistant';
 import type { ActionResult } from '@/lib/action-types';
 import { dateOnly, dateTime, kilo, list, money, str } from '@/lib/form';
 import { describePylonSync, withPylon } from '@/lib/pylon';
@@ -296,6 +313,59 @@ export async function archiveAttachmentAction(attachmentId: string, formData: Fo
   return runAction(async (ctx) => {
     await archiveContractFromAttachment(ctx, { attachmentId, quoteId: str(formData, 'quoteId') || null, signedOn: dateOnly(formData, 'signedOn') });
     return { message: 'Contract archived.' };
+  });
+}
+
+// ---- the assistant
+
+export async function summariseAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await summariseOrder(ctx, { orderId }, requireAssistant());
+  });
+}
+
+/** A suggested property detail: one form, two buttons, take it over or set it aside. */
+export async function summaryHintAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const hint = { orderId, field: str(formData, 'field'), value: str(formData, 'value') };
+    if (str(formData, 'intent') === 'dismiss') await dismissSummaryHint(ctx, hint);
+    else await applySummaryHint(ctx, hint);
+  });
+}
+
+/** Hands a draft back to the form it was asked from. Nothing is stored and nothing is sent. */
+export async function draftReplyAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(
+    async (ctx) => {
+      const draft = await draftReply(ctx, { orderId, replyToEmailId: str(formData, 'replyTo') || null, instruction: str(formData, 'instruction') }, requireAssistant());
+      return { data: { subject: draft.subject, body: draft.body } };
+    },
+    { refresh: false },
+  );
+}
+
+export async function readBillAction(documentId: string): Promise<ActionResult> {
+  if (!validArgs(documentId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const reading = await readBill(ctx, { documentId, again: true }, requireAssistant());
+    return { message: reading?.isBill ? 'Read.' : 'This does not look like an electricity bill.' };
+  });
+}
+
+export async function billValueAction(readingId: string, field: string): Promise<ActionResult> {
+  if (!validArgs(readingId, field)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await takeBillValue(ctx, { readingId, field: field === 'retailer' ? 'retailer' : 'nmi' });
+  });
+}
+
+export async function writeBriefAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await writeHandoffBrief(ctx, { orderId }, requireAssistant());
   });
 }
 

@@ -41,7 +41,7 @@ import {
   storedBrief,
   summariseOrder,
   updateAssistantSettings,
-  useBillValue,
+  takeBillValue,
   writeHandoffBrief,
   type AiModel,
   type AiRequest,
@@ -562,8 +562,8 @@ describe('an electricity bill', () => {
     const view = (await getOrderBills(sam(), orderId)).readings[0]!;
     expect(view.differs).toEqual({ nmi: true, retailer: false });
 
-    await expect(useBillValue(as(w.alex, w.clock), { readingId: reading.id, field: 'nmi' })).rejects.toThrow('Bill not found.');
-    await useBillValue(sam(), { readingId: reading.id, field: 'nmi' });
+    await expect(takeBillValue(as(w.alex, w.clock), { readingId: reading.id, field: 'nmi' })).rejects.toThrow('Bill not found.');
+    await takeBillValue(sam(), { readingId: reading.id, field: 'nmi' });
     const after = await db.property.findUniqueOrThrow({ where: { id: p.id } });
     expect(after.nmi).toBe('41031234567');
     expect(readFieldSources(after.fieldSources).nmi).toMatchObject({ source: 'bill', documentId });

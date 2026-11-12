@@ -241,7 +241,7 @@ export async function readBill(ctx: Ctx, input: { documentId: string; again?: bo
           orderId: current.id,
           type: 'SYSTEM',
           summary: `Electricity bill read: ${doc.fileName}`,
-          body: [describeReading(fields), filled.length ? `Filled in on the property: ${filled.join(', ')}.` : '', addressMatch === 'no' ? `The supply address on the bill (${fields.supplyAddress}) is not the address of this order.` : ''].filter(Boolean).join('\n'),
+          body: [describeReading(fields), filled.length ? `Filled in on the property: ${filled.map((f) => (f === 'nmi' ? 'NMI' : f)).join(', ')}.` : '', addressMatch === 'no' ? `The supply address on the bill (${fields.supplyAddress}) is not the address of this order.` : ''].filter(Boolean).join('\n'),
           payload: { documentId: doc.id, billReadingId: row.id, filled },
         });
         if (addressMatch === 'no') {
@@ -365,7 +365,7 @@ export async function getOrderBills(ctx: Ctx, orderId: string): Promise<OrderBil
  * Puts the meter number or the retailer printed on a bill into the property in place of what is
  * there, on a person's decision.
  */
-export async function useBillValue(ctx: Ctx, input: { readingId: string; field: 'nmi' | 'retailer' }): Promise<void> {
+export async function takeBillValue(ctx: Ctx, input: { readingId: string; field: 'nmi' | 'retailer' }): Promise<void> {
   const reading = await ctx.db.billReading.findUnique({ where: { id: input.readingId } });
   if (!reading || !reading.isBill) throw new NotFoundError('Bill not found.');
   if (input.field !== 'nmi' && input.field !== 'retailer') throw new ValidationError('This value cannot be taken over.');

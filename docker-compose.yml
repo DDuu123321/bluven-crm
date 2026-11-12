@@ -21,6 +21,8 @@ x-app-env: &app-env
   ZOHO_CLIENT_SECRET: ${ZOHO_CLIENT_SECRET:-}
   ZOHO_ACCOUNTS_URL: ${ZOHO_ACCOUNTS_URL:-https://accounts.zoho.com.au}
   ZOHO_MAIL_URL: ${ZOHO_MAIL_URL:-https://mail.zoho.com.au}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
 
 # Container logs are rotated so they cannot fill the disk.
 x-logging: &logging

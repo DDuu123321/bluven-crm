@@ -35,7 +35,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     ...(can(user, 'admin.leadSources') ? [{ href: '/settings/lead-sources', label: 'Lead sources' }] : []),
     ...(can(user, 'admin.settings') ? [{ href: '/settings/rules', label: 'Rules' }] : []),
     ...(can(user, 'admin.pylon') ? [{ href: '/settings/pylon', label: 'Pylon' }] : []),
-    ...(isManager(user) ? [{ href: '/settings/email', label: 'Email' }] : []),
+    ...(isManager(user) ? [{ href: '/settings/email', label: 'Email' }, { href: '/settings/assistant', label: 'AI assistant' }] : []),
     ...(can(user, 'audit.view') ? [{ href: '/audit', label: 'Audit log' }] : []),
   ];
   if (admin.length > 0) sections.push({ title: 'Administration', items: admin });

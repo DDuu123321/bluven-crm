@@ -32,13 +32,14 @@ export function toActionError(e: unknown): Extract<ActionResult, { ok: false }> 
  * errors, and refreshes the page the user is looking at.
  * Authorisation itself lives in the services; this only establishes who is asking.
  */
-export async function runAction(fn: (ctx: Ctx, user: SessionUser) => Promise<Outcome>): Promise<ActionResult> {
+export async function runAction(fn: (ctx: Ctx, user: SessionUser) => Promise<Outcome>, opts: { refresh?: boolean } = {}): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return { ok: false, error: 'Your session has ended. Please sign in again.', data: { signedOut: true } };
   if (user.mustChangePassword) return { ok: false, error: 'Choose a new password before continuing.' };
   try {
     const out = await fn(await ctxFor(user), user);
-    refresh();
+    // An action that only hands something back to the form (a draft, say) changes nothing on the page.
+    if (opts.refresh !== false) refresh();
     return { ok: true, ...(out ?? {}) };
   } catch (e) {
     return toActionError(e);

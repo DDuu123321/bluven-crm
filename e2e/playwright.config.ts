@@ -1,5 +1,5 @@
 import { defineConfig } from '@playwright/test';
-import { E2E, zohoEnv } from './env';
+import { E2E, modelEnv, zohoEnv } from './env';
 
 export default defineConfig({
   testDir: './tests',
@@ -29,6 +29,15 @@ export default defineConfig({
       stderr: 'pipe',
     },
     {
+      // The language model's service, played by a small local server with fixed answers.
+      command: 'pnpm exec tsx scripts/fake-model.ts',
+      url: `${E2E.modelUrl}/health`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
       // The same standalone production server the container image runs.
       command: 'pnpm --filter @bluven/web build && pnpm --filter @bluven/web start',
       url: `${E2E.baseURL}/api/intake/health`,
@@ -48,6 +57,7 @@ export default defineConfig({
         SMTP_URL: '',
         NEXT_TELEMETRY_DISABLED: '1',
         ...zohoEnv,
+        ...modelEnv,
       },
     },
   ],

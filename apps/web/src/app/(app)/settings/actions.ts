@@ -14,9 +14,28 @@ import {
   updateSettings,
   updateUser,
 } from '@bluven/core';
+import { updateAssistantSettings } from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
 import type { ActionResult } from '@/lib/action-types';
 import { bool, int, list, str } from '@/lib/form';
+
+// ---- the assistant
+
+export async function updateAssistantAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await updateAssistantSettings(ctx, {
+      autoBrief: bool(formData, 'autoBrief'),
+      readAttachments: bool(formData, 'readAttachments'),
+      readBills: bool(formData, 'readBills'),
+      autoSummary: bool(formData, 'autoSummary'),
+      language: str(formData, 'language') === 'zh' ? 'zh' : 'en',
+      // An empty field is not a number: it reaches the service as one it refuses, with the message on the field.
+      dailyAutomaticLimit: int(formData, 'dailyAutomaticLimit') ?? -1,
+    });
+    return { message: 'Saved.' };
+  });
+}
 
 // ---- users
 

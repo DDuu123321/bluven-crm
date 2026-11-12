@@ -22,6 +22,9 @@ export const E2E = {
   zohoClientId: 'e2e-client-id',
   zohoClientSecret: 'e2e-client-secret',
   mailbox: 'sam.mailbox@bluven.example',
+  /** A stand-in for the language model's service. */
+  modelPort: port + 60,
+  modelUrl: `http://127.0.0.1:${port + 60}`,
 };
 
 /** What the application, and the script that reads mailboxes, need to know about the stand-in. */
@@ -30,6 +33,13 @@ export const zohoEnv = {
   ZOHO_CLIENT_SECRET: E2E.zohoClientSecret,
   ZOHO_ACCOUNTS_URL: E2E.zohoUrl,
   ZOHO_MAIL_URL: E2E.zohoUrl,
+};
+
+/** What the application, and the script that does the assistant's background work, need to reach the stand-in model. */
+export const modelEnv = {
+  ANTHROPIC_API_KEY: 'e2e-model-key',
+  ANTHROPIC_BASE_URL: E2E.modelUrl,
+  AI_MODEL: 'claude-opus-5-5',
 };
 
 export interface E2EState {
