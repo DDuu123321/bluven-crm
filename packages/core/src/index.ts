@@ -6,6 +6,7 @@ export * from './context';
 export * from './config';
 export * from './ids';
 export * from './storage';
+export * from './images';
 export * from './body';
 export * from './attempts';
 export * from './secrets';

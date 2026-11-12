@@ -8,6 +8,9 @@ export const DOC_TYPE = {
   quote: 'quote',
 } as const;
 
+/** Key of the folder electricity bills are filed in. Files there are read for the meter number and usage. */
+export const BILL_DOC_TYPE = 'electricity_bill';
+
 /** A document that counts today: not deleted, not replaced by a newer version, not superseded. */
 export const CURRENT_DOCUMENT = { deletedAt: null, supersededAt: null, replacedBy: { is: null } } as const;
 
@@ -33,7 +36,7 @@ const DOC_TYPES: DocTypeSeed[] = [
   { key: DOC_TYPE.signedContract, label: 'Signed contract', description: 'The contract or proposal signed by the customer.', scope: 'ORDER', isRequiredForHandoff: false, isSystem: true, neverAutoDelete: true, sortOrder: 10 },
   { key: DOC_TYPE.depositProof, label: 'Deposit payment proof', description: 'Transfer screenshot, gateway receipt or finance approval.', scope: 'ORDER', isRequiredForHandoff: false, isSystem: true, neverAutoDelete: true, sortOrder: 20 },
   { key: DOC_TYPE.quote, label: 'Quote / proposal', description: 'The quote as sent to the customer.', scope: 'ORDER', isRequiredForHandoff: false, isSystem: true, neverAutoDelete: false, sortOrder: 30 },
-  { key: 'electricity_bill', label: 'Electricity bill', description: 'A recent bill showing the NMI, retailer and usage.', scope: 'ORDER', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 40 },
+  { key: BILL_DOC_TYPE, label: 'Electricity bill', description: 'A recent bill showing the NMI, retailer and usage.', scope: 'ORDER', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 40 },
   { key: 'install_location', label: 'Installation location photos', description: 'Where the panels, inverter and battery will go.', scope: 'PROPERTY', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 50 },
   { key: 'meter_box', label: 'Meter box / switchboard photos', description: 'Clear photos of the meter box and switchboard, door open.', scope: 'PROPERTY', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 60 },
   { key: 'additional_photos', label: 'Additional site photos', description: 'Anything else operations should see.', scope: 'PROPERTY', isRequiredForHandoff: false, isSystem: false, neverAutoDelete: false, sortOrder: 70 },

@@ -65,7 +65,7 @@ export type IdPrefix =
   | 'ema'
   | 'etp'
   | 'air'
-  | 'ais';
+  | 'bil';
 
 /** Prefixed id, e.g. ord_01JCK8Q0V9X3M2N4P5R6S7T8U9. */
 export function newId(prefix: IdPrefix): string {

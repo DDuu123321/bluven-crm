@@ -209,6 +209,14 @@ export interface EmailAttachmentView {
   /** The order document it was filed as, or was sent from. */
   documentId: string | null;
   documentLabel: string | null;
+  /**
+   * What the assistant took a received file for: the key of a document type, "none" for a file
+   * that belongs in no folder, or null when it has not looked or could not tell.
+   */
+  suggestedKind: string | null;
+  suggestedConfidence: string | null;
+  /** One line on what the file shows. */
+  suggestedNote: string | null;
 }
 
 export interface EmailView {
@@ -255,6 +263,9 @@ const toView = (m: EmailRow): EmailView => ({
     skippedReason: a.skippedReason,
     documentId: a.document && !a.document.deletedAt ? a.documentId : null,
     documentLabel: a.document && !a.document.deletedAt ? a.document.type.label : null,
+    suggestedKind: a.aiKind,
+    suggestedConfidence: a.aiConfidence,
+    suggestedNote: a.aiNote,
   })),
 });
 

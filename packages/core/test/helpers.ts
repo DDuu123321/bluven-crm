@@ -90,6 +90,15 @@ export async function png(seed: number): Promise<Buffer> {
     .toBuffer();
 }
 
+/** A picture big enough to be a photograph rather than a logo: 300 by 300 pixels of noise that does not compress away. */
+export async function photo(seed: number): Promise<Buffer> {
+  const raw = Buffer.alloc(300 * 300 * 3);
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 31 + seed * 17 + ((i * i) % 251)) % 256;
+  return sharp(raw, { raw: { width: 300, height: 300, channels: 3 } })
+    .png()
+    .toBuffer();
+}
+
 export function staged(content: Buffer, fileName: string): Promise<StagedFile> {
   return stageUpload(stream(content), fileName);
 }

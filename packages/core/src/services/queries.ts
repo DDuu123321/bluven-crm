@@ -262,7 +262,7 @@ export async function getOrderHeader(ctx: Ctx, orderId: string): Promise<OrderHe
     order = {
       ...order,
       customer: { ...order.customer, phones: [], emails: [], notes: '' },
-      property: { ...order.property, nmi: '', retailer: '', phase: '', roofType: '', storeys: '', notes: '' },
+      property: { ...order.property, nmi: '', retailer: '', phase: '', roofType: '', storeys: '', notes: '', fieldSources: {} },
       leadDetails: {},
       attribution: {},
       handoffNotes: '',

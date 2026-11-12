@@ -30,6 +30,12 @@ export interface AppConfig {
    * The company's account lives in Zoho's Australian data centre, hence the default addresses.
    */
   zoho: { clientId: string; clientSecret: string; accountsUrl: string; mailUrl: string };
+  /**
+   * The assistant: summaries, reply drafts, reading attachments and bills, the brief for
+   * operations. Off unless a key for Anthropic's API is set. `baseUrl` is only for tests and
+   * for a gateway in front of the API.
+   */
+  ai: { apiKey: string; model: string; baseUrl: string };
 }
 
 let cached: AppConfig | undefined;
@@ -63,6 +69,11 @@ export function getConfig(): AppConfig {
       clientSecret: env.ZOHO_CLIENT_SECRET?.trim() ?? '',
       accountsUrl: (env.ZOHO_ACCOUNTS_URL?.trim() || 'https://accounts.zoho.com.au').replace(/\/+$/, ''),
       mailUrl: (env.ZOHO_MAIL_URL?.trim() || 'https://mail.zoho.com.au').replace(/\/+$/, ''),
+    },
+    ai: {
+      apiKey: env.ANTHROPIC_API_KEY?.trim() ?? '',
+      model: env.AI_MODEL?.trim() || 'claude-opus-5-5',
+      baseUrl: (env.ANTHROPIC_BASE_URL?.trim() ?? '').replace(/\/+$/, ''),
     },
   };
   return cached;

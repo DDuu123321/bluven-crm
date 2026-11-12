@@ -2,7 +2,7 @@
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
 import { getConfig, purgeExpiredSessions, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
+import { PylonClient, assistantModel, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
 import { describeMailSetup, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
@@ -101,6 +101,22 @@ if (mail) {
   });
 }
 
+const assistant = assistantModel();
+if (assistant) {
+  jobs.push({
+    // Briefs for orders just pushed, a look at new attachments, new bills, summaries after a customer wrote.
+    name: 'assistant',
+    everyMs: MINUTE,
+    run: async () => {
+      const r = await runAssistantWork(systemCtx(db, 'Assistant'), assistant);
+      if (!r) return undefined;
+      if (r.setupProblem) return `not working, waiting for the key or the account to be fixed: ${r.setupProblem}`;
+      const done = some([[r.briefs, 'briefs for operations'], [r.attachments, 'attachments looked at'], [r.bills, 'bills read'], [r.summaries, 'summaries rewritten'], [r.failed, 'requests failed']]);
+      return [done, r.allowanceUsedUp ? 'the day’s allowance for automatic requests is used up' : ''].filter(Boolean).join('; ') || undefined;
+    },
+  });
+}
+
 const website = config.bluvenLeads;
 if (website.url && website.key) {
   jobs.push({
@@ -115,7 +131,7 @@ if (website.url && website.key) {
 
 console.log(`[${new Date().toISOString()}] worker started (${jobs.map((j) => j.name).join(', ')})`);
 console.log(
-  `  time zone: ${config.timeZone} · notification emails: ${describeMailSetup()} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'} · customer e-mail: ${mail ? `Zoho (${new URL(mail.mailUrl).host})` : 'off (ZOHO_CLIENT_ID and ZOHO_CLIENT_SECRET not set)'} · website leads: ${
+  `  time zone: ${config.timeZone} · notification emails: ${describeMailSetup()} · Pylon API: ${pylon ? 'on' : 'off (PYLON_API_TOKEN not set)'} · customer e-mail: ${mail ? `Zoho (${new URL(mail.mailUrl).host})` : 'off (ZOHO_CLIENT_ID and ZOHO_CLIENT_SECRET not set)'} · assistant: ${assistant ? assistant.name : 'off (ANTHROPIC_API_KEY not set)'} · website leads: ${
     website.url && website.key ? `pulled from ${new URL(website.url).host}` : 'not pulled (BLUVEN_LEADS_URL and BLUVEN_LEADS_KEY not set)'
   }`,
 );
