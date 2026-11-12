@@ -17,6 +17,10 @@ x-app-env: &app-env
   BLUVEN_LEADS_URL: ${BLUVEN_LEADS_URL:-}
   BLUVEN_LEADS_KEY: ${BLUVEN_LEADS_KEY:-}
   BLUVEN_LEADS_SINCE: ${BLUVEN_LEADS_SINCE:-}
+  ZOHO_CLIENT_ID: ${ZOHO_CLIENT_ID:-}
+  ZOHO_CLIENT_SECRET: ${ZOHO_CLIENT_SECRET:-}
+  ZOHO_ACCOUNTS_URL: ${ZOHO_ACCOUNTS_URL:-https://accounts.zoho.com.au}
+  ZOHO_MAIL_URL: ${ZOHO_MAIL_URL:-https://mail.zoho.com.au}
 
 # Container logs are rotated so they cannot fill the disk.
 x-logging: &logging

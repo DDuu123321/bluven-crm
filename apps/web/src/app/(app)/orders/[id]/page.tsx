@@ -29,13 +29,14 @@ import { requireSession } from '@/lib/session';
 import { assignOneAction, cancelOrderAction, dismissDuplicateAction, holdAction, markLostAction, restoreLostAction, resumeAction } from './actions';
 import { DealTab } from './deal';
 import { DocumentsTab } from './documents';
+import { EmailTab } from './email';
 import { HandoffTab } from './handoff';
 import { HistoryTab } from './history';
 import { OverviewTab } from './overview';
 
 export const metadata: Metadata = { title: 'Order' };
 
-const TABS = ['overview', 'documents', 'deal', 'handoff', 'history'] as const;
+const TABS = ['overview', 'email', 'documents', 'deal', 'handoff', 'history'] as const;
 type Tab = (typeof TABS)[number];
 
 export default async function OrderPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -274,6 +275,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
         current={tab}
         tabs={[
           { key: 'overview', label: 'Overview', href: base },
+          { key: 'email', label: 'Email', href: `${base}?tab=email` },
           { key: 'documents', label: 'Documents', href: `${base}?tab=documents` },
           { key: 'deal', label: 'Quote, contract & deposit', href: `${base}?tab=deal` },
           { key: 'handoff', label: 'Handoff', href: `${base}?tab=handoff` },
@@ -282,6 +284,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
       />
 
       {tab === 'overview' && <OverviewTab ctx={ctx} header={header} editable={editable} staff={staff} />}
+      {tab === 'email' && <EmailTab ctx={ctx} header={header} staff={staff} editable={editable} />}
       {tab === 'documents' && <DocumentsTab ctx={ctx} header={header} editable={editable} />}
       {tab === 'deal' && <DealTab ctx={ctx} header={header} editable={editable} staff={staff} manager={manager} />}
       {tab === 'handoff' && <HandoffTab ctx={ctx} header={header} editable={editable} staff={staff} />}

@@ -340,7 +340,7 @@ test('another salesperson cannot reach the order or its files', async ({ browser
 
 test('the manager sees the whole story in the dashboard and the audit log', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'manager');
-  await expect(page.getByText('New leads')).toBeVisible();
+  await expect(page.getByText('New leads', { exact: true })).toBeVisible();
   await expect(page.getByRole('cell', { name: 'Bluven website' })).toBeVisible();
   await shot(page, '10-dashboard');
 

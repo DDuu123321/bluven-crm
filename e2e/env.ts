@@ -16,6 +16,20 @@ export const E2E = {
   screenshotDir: path.join(here, 'screenshots'),
   password: 'Test-password-1',
   pylonWebhookSecret: 'whsec_e2e_0123456789',
+  /** A stand-in for Zoho (sign-in and mail), started next to the application. */
+  zohoPort: port + 50,
+  zohoUrl: `http://127.0.0.1:${port + 50}`,
+  zohoClientId: 'e2e-client-id',
+  zohoClientSecret: 'e2e-client-secret',
+  mailbox: 'sam.mailbox@bluven.example',
+};
+
+/** What the application, and the script that reads mailboxes, need to know about the stand-in. */
+export const zohoEnv = {
+  ZOHO_CLIENT_ID: E2E.zohoClientId,
+  ZOHO_CLIENT_SECRET: E2E.zohoClientSecret,
+  ZOHO_ACCOUNTS_URL: E2E.zohoUrl,
+  ZOHO_MAIL_URL: E2E.zohoUrl,
 };
 
 export interface E2EState {
