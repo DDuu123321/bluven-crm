@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Form from 'next/form';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, getSettings, isManager, localDateString, parseDateOnly, type OrderStage } from '@bluven/core';
+import { ORDER_STAGES, STAGE_LABEL, can, getConfig, getDashboard, isManager, localDateString, parseDateOnly, type OrderStage } from '@bluven/core';
 import { Card, CardBody, CardHeader, EmptyState, Input, PageHeader, Stat, Table, Td, buttonClass, cx } from '@/components/ui';
 import { one, withParams } from '@/lib/params';
 import { requireSession } from '@/lib/session';
@@ -35,9 +35,12 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const daysAgo = (n: number) => localDateString(new Date(now.getTime() - n * 86_400_000), tz);
   const from = parseDateOnly(one(sp.from) ?? '') ? one(sp.from)! : daysAgo(29);
   const to = parseDateOnly(one(sp.to) ?? '') ? one(sp.to)! : today;
-  const [d, settings] = await Promise.all([getDashboard(ctx, from <= to ? { from, to } : { from: to, to: from }), getSettings(ctx.db)]);
+  const d = await getDashboard(ctx, from <= to ? { from, to } : { from: to, to: from });
   const maxSource = Math.max(1, ...d.bySource.map((s) => s.leads));
   const maxWeek = Math.max(1, ...d.weekly.map((w) => Math.max(w.leads, w.signed)));
+  const maxMonth = Math.max(1, ...d.monthly.map((m) => Math.max(m.leads, m.signed)));
+  const days = (n: number | null) => (n === null ? null : Number.isInteger(n) || n >= 10 ? String(Math.round(n)) : n.toFixed(1));
+  const monthName = (month: string) => new Intl.DateTimeFormat('en-AU', { month: 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${month}-01T00:00:00Z`));
   const maxLost = Math.max(1, ...d.lostReasons.map((l) => l.count));
   const activeStages = ORDER_STAGES.filter((s) => s !== 'HANDED_OVER');
 
@@ -64,12 +67,16 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               Apply
             </button>
             <span className="flex gap-2 pb-2 text-xs">
-              {[7, 30, 90].map((n) => (
+              {[7, 30, 90, 365].map((n) => (
                 <Link key={n} href={withParams('/dashboard', { from: daysAgo(n - 1), to: today })} className="text-slate-500 hover:text-slate-800">
-                  {n} days
+                  {n === 365 ? '12 months' : `${n} days`}
                 </Link>
               ))}
             </span>
+            {/* A plain link: the browser downloads the file. */}
+            <a href={withParams('/api/reports/orders', { from: d.range.from, to: d.range.to })} className={buttonClass('secondary')} title="One row per order whose enquiry was received in the period, with the date it reached each stage">
+              Export orders (CSV)
+            </a>
           </Form>
         }
       />
@@ -77,26 +84,32 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       <div className="mb-2 text-xs font-semibold tracking-wide text-slate-400 uppercase">In the selected period</div>
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="New leads" value={d.totals.leads} />
-        <Stat label="Contracts signed" value={d.totals.signed} hint={`${pct(d.totals.signed, d.totals.leads)} of new leads`} />
+        <Stat
+          label="Contracts signed"
+          value={d.totals.signed}
+          hint={`${pct(d.totals.signed, d.totals.leads)} of new leads${d.totals.avgDaysToSign === null ? '' : ` · ${days(d.totals.avgDaysToSign)} days from enquiry to signature on average`}`}
+        />
         <Stat label="Handed over to operations" value={d.totals.handedOver} />
         <Stat label="Lost" value={d.totals.lost} />
       </div>
       <div className="mb-2 text-xs font-semibold tracking-wide text-slate-400 uppercase">Right now</div>
-      <div className={cx('mb-6 grid grid-cols-2 gap-3', manager ? 'lg:grid-cols-5' : 'lg:grid-cols-4')}>
+      <div className={cx('mb-6 grid grid-cols-2 gap-3', manager ? 'lg:grid-cols-6' : 'lg:grid-cols-5')}>
         {manager && <Stat label="Unassigned leads" value={d.totals.unassigned} href="/orders/unassigned" tone={d.totals.unassigned > 0 ? 'warn' : undefined} />}
         <Stat label="Deposits waiting for finance" value={d.totals.pendingDeposits} href="/orders?stage=DEPOSIT_PENDING" />
         <Stat label="Returned by operations" value={d.totals.returned} href="/orders?stage=RETURNED" tone={d.totals.returned > 0 ? 'bad' : undefined} />
-        <Stat label={`Idle ${settings.idle.remindOwnerDays}+ days`} value={d.totals.idle5} href="/orders?idle=1" tone={d.totals.idle5 > 0 ? 'warn' : undefined} />
-        <Stat label={`Idle ${settings.idle.remindManagerDays}+ days`} value={d.totals.idle10} href="/orders?idle=1" tone={d.totals.idle10 > 0 ? 'bad' : undefined} />
+        {/* Three tiers of one count: each includes the ones to its right, and each opens exactly the orders it counts. */}
+        <Stat label={`Idle ${d.idleDays[0]}+ days`} value={d.totals.idle[0]} href="/orders?idle=1" tone={d.totals.idle[0] > 0 ? 'warn' : undefined} hint="The salesperson is reminded" />
+        <Stat label={`Idle ${d.idleDays[1]}+ days`} value={d.totals.idle[1]} href="/orders?idle=2" tone={d.totals.idle[1] > 0 ? 'bad' : undefined} hint="The managers are told" />
+        <Stat label={`Idle ${d.idleDays[2]}+ days`} value={d.totals.idle[2]} href="/orders?idle=3" tone={d.totals.idle[2] > 0 ? 'bad' : undefined} hint="Unsigned ones go back to the pool" />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader title="Leads by source" description="Of the leads received in the period: how far they have got so far." />
+        <Card className="xl:col-span-2">
+          <CardHeader title="Leads by source" description="Of the leads received in the period: how far they have got so far, and how many days the ones that signed took from enquiry to signature." />
           {d.bySource.length === 0 ? (
             <EmptyState title="No leads in this period" />
           ) : (
-            <Table head={['Source', 'Leads', '', 'Contacted', 'Quoted', 'Signed', 'Lost']}>
+            <Table head={['Source', 'Leads', '', 'Contacted', 'Quoted', 'Signed', 'Lost', 'Days to sign']}>
               {d.bySource.map((s) => (
                 <tr key={s.sourceId}>
                   <Td className="font-medium text-slate-900">{s.name}</Td>
@@ -114,6 +127,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                     {s.signed} <span className="text-xs font-normal text-slate-400">{pct(s.signed, s.leads)}</span>
                   </Td>
                   <Td className="tabular-nums text-slate-600">{s.lost}</Td>
+                  <Td className="tabular-nums text-slate-600" title="Average days from the enquiry to the signature, for the leads of this period that have signed">
+                    {days(s.avgDaysToSign) ?? <span className="text-slate-300">—</span>}
+                  </Td>
                 </tr>
               ))}
             </Table>
@@ -160,6 +176,49 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </CardBody>
         </Card>
 
+        <Card>
+          <CardHeader title="Why orders were lost" description="Orders marked as lost in the period." />
+          {d.lostReasons.length === 0 ? (
+            <EmptyState title="Nothing was lost in this period" />
+          ) : (
+            <CardBody>
+              <ul className="space-y-2">
+                {d.lostReasons.map((l) => (
+                  <li key={l.label} className="grid grid-cols-[minmax(0,1fr)_2rem_40%] items-center gap-3 text-sm">
+                    <span className="truncate text-slate-700">{l.label}</span>
+                    <span className="text-right tabular-nums text-slate-900">{l.count}</span>
+                    <Bar value={l.count} max={maxLost} tone="bg-red-400" />
+                  </li>
+                ))}
+              </ul>
+            </CardBody>
+          )}
+        </Card>
+        <Card className="xl:col-span-2">
+          <CardHeader title="Last twelve months" description="Per calendar month: enquiries received, contracts signed, orders handed over to operations and orders lost. Not affected by the period chosen above." />
+          <Table head={['Month', 'Leads', '', 'Signed', '', 'Signed of leads', 'Handed over', 'Lost']}>
+            {d.monthly.map((m) => (
+              <tr key={m.month}>
+                <Td className="whitespace-nowrap text-slate-600">{monthName(m.month)}</Td>
+                <Td className="w-12 tabular-nums text-slate-900">{m.leads}</Td>
+                <Td className="w-1/4">
+                  <Bar value={m.leads} max={maxMonth} />
+                </Td>
+                <Td className="w-12 tabular-nums text-slate-900">{m.signed}</Td>
+                <Td className="w-1/4">
+                  <Bar value={m.signed} max={maxMonth} tone="bg-emerald-500" />
+                </Td>
+                <Td className="tabular-nums text-slate-600">{pct(m.signed, m.leads)}</Td>
+                <Td className="tabular-nums text-slate-600">{m.handedOver}</Td>
+                <Td className="tabular-nums text-slate-600">{m.lost}</Td>
+              </tr>
+            ))}
+          </Table>
+          <CardBody className="border-t border-slate-100 py-2 text-xs text-slate-500">
+            “Signed of leads” compares the contracts signed in a month with the enquiries received in the same month. A contract usually belongs to an enquiry from an earlier month, so read it as a trend, not as a conversion rate.
+          </CardBody>
+        </Card>
+
         <Card className="xl:col-span-2">
           <CardHeader title={manager ? 'By salesperson' : 'Your pipeline'} description="Orders in progress by stage, contracts signed in the period, and how quickly new assignments got a first call or message." />
           {d.bySalesperson.length === 0 ? (
@@ -183,31 +242,16 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                   <Td className="tabular-nums text-slate-600">
                     {p.avgFirstResponseHours === null ? <span className="text-slate-300">—</span> : p.avgFirstResponseHours < 1 ? `${Math.round(p.avgFirstResponseHours * 60)} min` : `${p.avgFirstResponseHours.toFixed(1)} h`}
                   </Td>
-                  <Td className={cx('tabular-nums', p.idle > 0 ? 'font-medium text-amber-700' : 'text-slate-300')}>{p.idle}</Td>
+                  <Td className={cx('tabular-nums', p.idle > 0 ? 'font-medium text-amber-700' : 'text-slate-300')} title={`Idle ${d.idleDays[0]} days or more${p.idleLong > 0 ? `; ${p.idleLong} of them ${d.idleDays[1]} days or more` : ''}`}>
+                    {p.idle}
+                    {p.idleLong > 0 && <span className="ml-1 text-xs font-normal text-red-600">({p.idleLong} long)</span>}
+                  </Td>
                 </tr>
               ))}
             </Table>
           )}
         </Card>
 
-        <Card>
-          <CardHeader title="Why orders were lost" description="Orders marked as lost in the period." />
-          {d.lostReasons.length === 0 ? (
-            <EmptyState title="Nothing was lost in this period" />
-          ) : (
-            <CardBody>
-              <ul className="space-y-2">
-                {d.lostReasons.map((l) => (
-                  <li key={l.label} className="grid grid-cols-[minmax(0,1fr)_2rem_40%] items-center gap-3 text-sm">
-                    <span className="truncate text-slate-700">{l.label}</span>
-                    <span className="text-right tabular-nums text-slate-900">{l.count}</span>
-                    <Bar value={l.count} max={maxLost} tone="bg-red-400" />
-                  </li>
-                ))}
-              </ul>
-            </CardBody>
-          )}
-        </Card>
       </div>
     </>
   );

@@ -8,6 +8,8 @@ import {
   STAGE_LABEL,
   formatAddress,
   fullName,
+  getSettings,
+  idleTier,
   isManager,
   listPipelineOrders,
   listSalespeople,
@@ -41,17 +43,21 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   const owner = manager ? (one(sp.owner) ?? null) : null;
   const sourceId = one(sp.source) ?? null;
   const q = one(sp.q) ?? '';
-  const idleOnly = one(sp.idle) === '1';
+  // 1: past the day the salesperson is reminded. 2: past the day the managers are told. 3: past the day an unsigned order goes back to the pool.
+  const idle = (['1', '2', '3'].includes(one(sp.idle) ?? '') ? Number(one(sp.idle)) : null) as 1 | 2 | 3 | null;
+  const idleOnly = idle !== null;
   const page = Number(one(sp.page) ?? '1') || 1;
 
-  const [result, counts, salespeople, sources] = await Promise.all([
-    listPipelineOrders(ctx, { view, stage, owner, sourceId, q, idleOnly, page }),
+  const [result, counts, salespeople, sources, settings] = await Promise.all([
+    listPipelineOrders(ctx, { view, stage, owner, sourceId, q, idle, page }),
     pipelineStageCounts(ctx, owner),
     manager ? listSalespeople(ctx.db) : Promise.resolve([]),
     ctx.db.leadSource.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+    getSettings(ctx.db),
   ]);
-  const base = { view: view === 'active' ? undefined : view, stage: stage ?? undefined, owner: owner ?? undefined, source: sourceId ?? undefined, q: q || undefined, idle: idleOnly ? '1' : undefined };
+  const base = { view: view === 'active' ? undefined : view, stage: stage ?? undefined, owner: owner ?? undefined, source: sourceId ?? undefined, q: q || undefined, idle: idle ? String(idle) : undefined };
   const now = new Date();
+  const idleFrom = [settings.idle.remindOwnerDays, settings.idle.remindManagerDays, settings.idle.returnToPoolDays] as const;
 
   return (
     <>
@@ -133,9 +139,14 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                 {STAGE_LABEL[s]}
               </Chip>
             ))}
-            <Chip href={withParams('/orders', { ...base, stage: undefined, idle: '1', page: undefined })} active={idleOnly} warn>
-              Idle
+            <Chip href={withParams('/orders', { ...base, stage: undefined, idle: '1', page: undefined })} active={idle === 1} warn>
+              Idle {idleFrom[0]}+ days
             </Chip>
+            {idle !== null && idle > 1 && (
+              <Chip href={withParams('/orders', { ...base, stage: undefined, idle: String(idle), page: undefined })} active warn>
+                Idle {idleFrom[idle - 1]}+ days
+              </Chip>
+            )}
           </div>
         )}
       </Card>
@@ -170,9 +181,9 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <Td className="text-slate-600">{o.source.name}</Td>
                   <Td className="text-slate-600">
                     <span title={fmtDateTime(o.lastStaffActivityAt)}>{relativeTime(o.lastStaffActivityAt, now)}</span>
-                    {o.idleLevel > 0 && (
+                    {idleTier(o, now, settings.idle) > 0 && (
                       <div className="mt-1">
-                        <Badge tone={o.idleLevel > 1 ? 'red' : 'amber'}>Idle</Badge>
+                        <Badge tone={idleTier(o, now, settings.idle) > 1 ? 'red' : 'amber'}>Idle</Badge>
                       </div>
                     )}
                   </Td>

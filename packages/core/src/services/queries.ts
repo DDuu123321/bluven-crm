@@ -9,12 +9,16 @@ import {
   ORDER_STAGES,
   can,
   endOfLocalDay,
+  formatAddress,
+  fullName,
   hasRole,
+  idleTierDays,
   isIdleTrackedStage,
   isManager,
   normalizePhone,
   notificationKind,
   zonedTimeToUtc,
+  type IdleThresholds,
   type NotificationKind,
   type OrderView,
 } from '../domain';
@@ -47,6 +51,17 @@ function pipelineWhere(actor: UserActor): Prisma.OrderWhereInput {
   return { id: '__nothing__' };
 }
 
+/**
+ * Orders that are idle at the given tier or beyond: 1 from the day the salesperson is reminded,
+ * 2 from the day the managers are told, 3 from the day an unsigned order goes back to the pool.
+ * The database form of idleTier(), and the only definition lists and figures use, so that a
+ * number on the dashboard and the list behind it always agree.
+ */
+export function idleOrdersWhere(tier: 1 | 2 | 3, thresholds: IdleThresholds, now: Date): Prisma.OrderWhereInput {
+  const days = idleTierDays(thresholds)[tier - 1]!;
+  return { ownerId: { not: null }, sideState: 'NONE', stage: { in: ORDER_STAGES.filter(isIdleTrackedStage) }, lastStaffActivityAt: { lte: new Date(now.getTime() - days * 86_400_000) } };
+}
+
 // ---------------------------------------------------------------------------
 // Order lists
 // ---------------------------------------------------------------------------
@@ -61,8 +76,8 @@ export interface OrderListFilters {
   owner?: string | null;
   sourceId?: string | null;
   q?: string | null;
-  /** Only orders that have triggered an idle reminder. */
-  idleOnly?: boolean;
+  /** Only orders that are idle at this tier or beyond (see idleOrdersWhere). */
+  idle?: 1 | 2 | 3 | null;
   page?: number;
   pageSize?: number;
 }
@@ -179,7 +194,7 @@ export async function listPipelineOrders(ctx: Ctx, filters: OrderListFilters): P
   const and: Prisma.OrderWhereInput[] = [pipelineWhere(actor), viewWhere(filters.view ?? 'active')];
   if (filters.stage) and.push({ stage: filters.stage });
   if (filters.sourceId) and.push({ sourceId: filters.sourceId });
-  if (filters.idleOnly) and.push({ idleLevel: { gt: 0 } });
+  if (filters.idle) and.push(idleOrdersWhere(filters.idle, (await getSettings(ctx.db)).idle, nowOf(ctx)));
   if (isManager(actor)) {
     if (filters.owner === 'unassigned') and.push({ ownerId: null });
     else if (filters.owner) and.push({ ownerId: filters.owner });
@@ -594,11 +609,27 @@ export interface DashboardRange {
 
 export interface Dashboard {
   range: DashboardRange;
-  totals: { leads: number; signed: number; handedOver: number; lost: number; unassigned: number; pendingDeposits: number; returned: number; idle5: number; idle10: number };
-  bySource: { sourceId: string; name: string; leads: number; contacted: number; quoted: number; signed: number; lost: number }[];
-  bySalesperson: { userId: string; name: string; open: number; stages: Partial<Record<OrderStage, number>>; signedInRange: number; avgFirstResponseHours: number | null; idle: number }[];
+  totals: {
+    leads: number;
+    signed: number;
+    handedOver: number;
+    lost: number;
+    unassigned: number;
+    pendingDeposits: number;
+    returned: number;
+    /** Orders idle at tier 1, 2 and 3 or beyond. Each number includes the ones after it. */
+    idle: [number, number, number];
+    /** For the contracts signed in the period: days from the enquiry to the signature, on average. */
+    avgDaysToSign: number | null;
+  };
+  /** The idle days at which each tier starts, for labelling the figures. */
+  idleDays: [number, number, number];
+  bySource: { sourceId: string; name: string; leads: number; contacted: number; quoted: number; signed: number; lost: number; avgDaysToSign: number | null }[];
+  bySalesperson: { userId: string; name: string; open: number; stages: Partial<Record<OrderStage, number>>; signedInRange: number; avgFirstResponseHours: number | null; idle: number; idleLong: number }[];
   lostReasons: { label: string; count: number }[];
   weekly: { weekStart: string; leads: number; signed: number }[];
+  /** The last twelve calendar months, oldest first. */
+  monthly: { month: string; leads: number; signed: number; handedOver: number; lost: number }[];
 }
 
 /**
@@ -620,12 +651,9 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   const db = ctx.db;
   const now = nowOf(ctx);
   const thresholds = (await getSettings(db)).idle;
-  const idleStages = ORDER_STAGES.filter(isIdleTrackedStage);
-  const idleWhere = (days: number): Prisma.OrderWhereInput => ({
-    AND: [scope, { ownerId: { not: null }, sideState: 'NONE', stage: { in: idleStages }, lastStaffActivityAt: { lte: new Date(now.getTime() - days * 86_400_000) } }],
-  });
+  const idleWhere = (tier: 1 | 2 | 3): Prisma.OrderWhereInput => ({ AND: [scope, idleOrdersWhere(tier, thresholds, now)] });
 
-  const [leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle5, idle10] = await Promise.all([
+  const [leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle1, idle2, idle3] = await Promise.all([
     db.order.count({ where: { AND: [scope, { leadCreatedAt: { gte: start, lt: end } }] } }),
     db.order.count({ where: { AND: [scope, { signedAt: { gte: signedFrom, lte: signedTo } }] } }),
     db.order.count({ where: { AND: [scope, { handedOverAt: { gte: start, lt: end } }] } }),
@@ -633,9 +661,14 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     isManager(actor) ? unassignedCount(db) : Promise.resolve(0),
     db.order.count({ where: { AND: [scope, { stage: 'DEPOSIT_PENDING', sideState: { in: ['NONE', 'ON_HOLD'] } }] } }),
     db.order.count({ where: { AND: [scope, { stage: 'RETURNED', sideState: 'NONE' }] } }),
-    db.order.count({ where: idleWhere(thresholds.remindOwnerDays) }),
-    db.order.count({ where: idleWhere(thresholds.remindManagerDays) }),
+    db.order.count({ where: idleWhere(1) }),
+    db.order.count({ where: idleWhere(2) }),
+    db.order.count({ where: idleWhere(3) }),
   ]);
+  // Both dates as calendar days in the business time zone; a signature dated before the enquiry was typed in counts as the same day.
+  const daysToSign = Prisma.sql`GREATEST(0, o."signedAt"::date - (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})::date)`;
+  const [{ days: avgDaysToSign }] = await db.$queryRaw<[{ days: number | null }]>(Prisma.sql`
+    SELECT AVG(${daysToSign})::float AS "days" FROM "Order" o WHERE o."signedAt" >= ${signedFrom} AND o."signedAt" <= ${signedTo} AND ${mine}`);
 
   const bySource = await db.$queryRaw<Dashboard['bySource']>(Prisma.sql`
     SELECT s."id" AS "sourceId", s."name",
@@ -644,7 +677,8 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
            COUNT(*) FILTER (WHERE o."firstContactedAt" IS NOT NULL OR o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "contacted",
            COUNT(*) FILTER (WHERE o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "quoted",
            COUNT(*) FILTER (WHERE o."signedAt" IS NOT NULL)::int AS "signed",
-           COUNT(*) FILTER (WHERE o."sideState" = 'LOST')::int AS "lost"
+           COUNT(*) FILTER (WHERE o."sideState" = 'LOST')::int AS "lost",
+           (AVG(${daysToSign}) FILTER (WHERE o."signedAt" IS NOT NULL))::float AS "avgDaysToSign"
     FROM "Order" o JOIN "LeadSource" s ON s."id" = o."sourceId"
     WHERE o."leadCreatedAt" >= ${start} AND o."leadCreatedAt" < ${end} AND ${mine}
     GROUP BY s."id", s."name"
@@ -654,7 +688,7 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     ? await db.user.findMany({ where: { OR: [{ isActive: true, roles: { has: 'SALES' } }, { ownedOrders: { some: { sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } } } }] }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
     : [{ id: actor.id, name: actor.name }];
   const ids = people.map((p) => p.id);
-  const [stageGroups, signedGroups, responseRows, idleGroups] = await Promise.all([
+  const [stageGroups, signedGroups, responseRows, idleGroups, idleLongGroups] = await Promise.all([
     db.order.groupBy({ by: ['ownerId', 'stage'], where: { ownerId: { in: ids }, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } }, _count: { _all: true } }),
     db.order.groupBy({ by: ['ownerId'], where: { ownerId: { in: ids }, signedAt: { gte: signedFrom, lte: signedTo } }, _count: { _all: true } }),
     ids.length
@@ -665,7 +699,8 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
             AND o."firstContactedAt" IS NOT NULL AND o."firstContactedAt" >= o."assignedAt"
           GROUP BY o."ownerId"`)
       : Promise.resolve([]),
-    db.order.groupBy({ by: ['ownerId'], where: { ownerId: { in: ids }, idleLevel: { gt: 0 }, sideState: 'NONE' }, _count: { _all: true } }),
+    db.order.groupBy({ by: ['ownerId'], where: { AND: [{ ownerId: { in: ids } }, idleOrdersWhere(1, thresholds, now)] }, _count: { _all: true } }),
+    db.order.groupBy({ by: ['ownerId'], where: { AND: [{ ownerId: { in: ids } }, idleOrdersWhere(2, thresholds, now)] }, _count: { _all: true } }),
   ]);
   const bySalesperson = people.map((p) => {
     const stages: Partial<Record<OrderStage, number>> = {};
@@ -683,6 +718,7 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
       signedInRange: signedGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
       avgFirstResponseHours: responseRows.find((r) => r.ownerId === p.id)?.hours ?? null,
       idle: idleGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
+      idleLong: idleLongGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
     };
   });
 
@@ -704,7 +740,90 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
            (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."signedAt" IS NOT NULL AND date_trunc('week', o."signedAt") = weeks.w) AS "signed"
     FROM weeks ORDER BY weeks.w`);
 
-  return { range, totals: { leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle5, idle10 }, bySource, bySalesperson, lostReasons, weekly };
+  const monthly = await db.$queryRaw<Dashboard['monthly']>(Prisma.sql`
+    WITH months AS (
+      SELECT generate_series(date_trunc('month', (${nowIso}::timestamptz AT TIME ZONE ${tz})) - interval '11 months', date_trunc('month', (${nowIso}::timestamptz AT TIME ZONE ${tz})), interval '1 month') AS m
+    )
+    SELECT to_char(months.m, 'YYYY-MM') AS "month",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('month', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "leads",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."signedAt" IS NOT NULL AND date_trunc('month', o."signedAt") = months.m) AS "signed",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."handedOverAt" IS NOT NULL AND date_trunc('month', (o."handedOverAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "handedOver",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."sideState" = 'LOST' AND o."lostAt" IS NOT NULL AND date_trunc('month', (o."lostAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "lost"
+    FROM months ORDER BY months.m`);
+
+  return {
+    range,
+    totals: { leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle: [idle1, idle2, idle3], avgDaysToSign },
+    idleDays: idleTierDays(thresholds),
+    bySource,
+    bySalesperson,
+    lostReasons,
+    weekly,
+    monthly,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The orders behind the figures, for a spreadsheet
+// ---------------------------------------------------------------------------
+
+const reportSelect = {
+  id: true,
+  orderNo: true,
+  stage: true,
+  sideState: true,
+  leadCreatedAt: true,
+  assignedAt: true,
+  firstContactedAt: true,
+  quotedAt: true,
+  signedAt: true,
+  firstPushedAt: true,
+  handedOverAt: true,
+  lostAt: true,
+  cancelledAt: true,
+  returnCount: true,
+  lastStaffActivityAt: true,
+  customer: { select: { firstName: true, lastName: true } },
+  property: { select: { addressLine1: true, addressLine2: true, suburb: true, state: true, postcode: true } },
+  source: { select: { name: true } },
+  owner: { select: { name: true } },
+  lostReason: { select: { label: true } },
+  quotes: { where: { isAccepted: true }, take: 1, select: { dcWatts: true, storageWh: true, totalCents: true } },
+  deposits: { where: { status: 'CONFIRMED' as const }, take: 1, select: { receivedAmountCents: true, amountCents: true, receivedOn: true } },
+} satisfies Prisma.OrderSelect;
+
+export type ReportOrder = Prisma.OrderGetPayload<{ select: typeof reportSelect }> & { customerName: string; address: string };
+
+function reportWhere(ctx: Ctx, range: DashboardRange): Prisma.OrderWhereInput {
+  const actor = user(ctx);
+  if (!can(actor, 'orders.work')) throw new ForbiddenError();
+  const tz = getConfig().timeZone;
+  const start = zonedTimeToUtc(range.from, tz);
+  const end = endOfLocalDay(range.to, tz);
+  if (!start || !end) throw new NotFoundError('Invalid date range.');
+  return { AND: [pipelineWhere(actor), { leadCreatedAt: { gte: start, lt: end } }] };
+}
+
+/** How many orders the export of a period holds: those whose enquiry was received in it. */
+export async function countReportOrders(ctx: Ctx, range: DashboardRange): Promise<number> {
+  return ctx.db.order.count({ where: reportWhere(ctx, range) });
+}
+
+/**
+ * The orders whose enquiry was received in the period, oldest first, a page at a time: every
+ * order for a manager, their own for a salesperson. One row per order with the dates it passed
+ * each stage, for working the figures out again in a spreadsheet.
+ */
+export async function* iterateReportOrders(ctx: Ctx, range: DashboardRange, pageSize = 500): AsyncGenerator<ReportOrder[]> {
+  const where = reportWhere(ctx, range);
+  let cursor: string | undefined;
+  for (;;) {
+    const rows = await ctx.db.order.findMany({ where, select: reportSelect, orderBy: [{ leadCreatedAt: 'asc' }, { id: 'asc' }], take: pageSize, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) });
+    if (rows.length === 0) return;
+    yield rows.map((o) => ({ ...o, customerName: fullName(o.customer), address: formatAddress(o.property) }));
+    if (rows.length < pageSize) return;
+    cursor = rows[rows.length - 1]!.id;
+  }
 }
 
 // ---------------------------------------------------------------------------
