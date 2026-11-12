@@ -8,6 +8,7 @@ import { audit } from './audit';
 import { setOrderOwner } from './assignment';
 import { managerIds, notifyUsers } from './notify';
 import { lockOrder, loadOrderState, orderHref } from './orders';
+import { processRetention, purgeDeletedDocuments } from './retention';
 import { getSettings } from './settings';
 import { resumeOrderInTx } from './sidestate';
 
@@ -205,4 +206,35 @@ export async function runTaskReminders(base: Ctx | Db): Promise<{ reminded: numb
     return true;
   });
   return { reminded };
+}
+
+export interface RetentionRunResult {
+  /** Orders whose salesperson and managers were told that a retention period is about to end. */
+  reminders: number;
+  /** Orders the managers were reminded about again, a week or more after the last time. */
+  repeatReminders: number;
+  /** Documents deleted because nobody decided and automatic deletion is switched on. */
+  deleted: number;
+  /** Deleted documents whose record was closed, and how many files actually left storage. */
+  purged: number;
+  filesRemoved: number;
+}
+
+/**
+ * Document retention, start to finish: the reminder before a period ends, the weekly reminder to
+ * managers when nobody decides, automatic deletion when an admin has switched it on, and the
+ * removal of files 30 days after their documents were deleted. Hourly is plenty.
+ */
+export async function runDocumentRetention(base: Ctx | Db): Promise<RetentionRunResult> {
+  const ctx: Ctx = 'actor' in base ? base : systemCtx(base);
+  const result: RetentionRunResult = { reminders: 0, repeatReminders: 0, deleted: 0, purged: 0, filesRemoved: 0 };
+  await withJobLock(ctx.db, 760104, async () => {
+    // The two halves do not depend on each other: trouble in one must not keep the other from running.
+    const failures: unknown[] = [];
+    await processRetention(ctx).then((r) => Object.assign(result, r), (e: unknown) => failures.push(e));
+    await purgeDeletedDocuments(ctx).then((r) => Object.assign(result, r), (e: unknown) => failures.push(e));
+    if (failures.length > 0) throw failures[0];
+    return true;
+  });
+  return result;
 }

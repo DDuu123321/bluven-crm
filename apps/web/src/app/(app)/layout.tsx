@@ -22,7 +22,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         ...(can(user, 'orders.assign') ? [{ href: '/orders/unassigned', label: 'Unassigned leads', countKey: 'unassigned', urgent: true }] : []),
         { href: '/tasks', label: 'Tasks', countKey: 'tasks', urgent: true },
         ...(can(user, 'leads.import') ? [{ href: '/leads/import', label: 'Import leads' }] : []),
-        ...(can(user, 'orders.assign') ? [{ href: '/team', label: 'Team' }] : []),
+        ...(can(user, 'orders.assign') ? [{ href: '/team', label: 'Team' }, { href: '/retention', label: 'Documents to review', countKey: 'retention' }] : []),
       ],
     });
   }

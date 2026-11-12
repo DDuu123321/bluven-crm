@@ -39,7 +39,8 @@ function TypeFields({ t }: { t?: DocumentType }) {
           <Label htmlFor={`ret-${id}`} optional>
             Keep for (years)
           </Label>
-          <Input id={`ret-${id}`} name="retentionYears" inputMode="numeric" defaultValue={t?.retentionYears ?? 2} />
+          <Input id={`ret-${id}`} name="retentionYears" inputMode="numeric" defaultValue={t?.retentionYears ?? ''} placeholder="Standard" />
+          <p className="mt-1 text-xs text-slate-500">Empty: the standard period set under Rules.</p>
           <FieldError name="retentionYears" />
         </div>
         <div>
@@ -94,7 +95,7 @@ export default async function ChecklistPage() {
               </Td>
               <Td className="text-slate-600">{t.scope === 'PROPERTY' ? 'Property' : 'Order'}</Td>
               <Td>{t.isSystem ? <span className="text-xs text-slate-500">built in</span> : t.isRequiredForHandoff ? <Badge tone="amber">Required</Badge> : <span className="text-slate-400">Optional</span>}</Td>
-              <Td className="text-slate-600">{t.neverAutoDelete ? 'Never deleted' : t.retentionYears ? `${t.retentionYears} year${t.retentionYears === 1 ? '' : 's'}` : 'Not set'}</Td>
+              <Td className="text-slate-600">{t.neverAutoDelete ? 'Never deleted' : t.retentionYears ? `${t.retentionYears} year${t.retentionYears === 1 ? '' : 's'}` : 'Standard period'}</Td>
               <Td className="tabular-nums text-slate-600">{t._count.documents}</Td>
               <Td className="text-right">
                 <Modal trigger="Edit" title={`Edit ${t.label}`} size="sm">

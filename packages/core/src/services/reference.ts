@@ -68,7 +68,9 @@ const SOURCES: [key: string, name: string, kind: LeadSourceKind][] = [
  */
 export async function ensureReferenceData(db: Db): Promise<void> {
   for (const t of DOC_TYPES) {
-    await db.documentType.upsert({ where: { key: t.key }, update: {}, create: { id: newId('dty'), ...t } });
+    // No retention period of their own: the built-in types follow the period in the settings,
+    // until an admin gives one of them a different one.
+    await db.documentType.upsert({ where: { key: t.key }, update: {}, create: { id: newId('dty'), ...t, retentionYears: null } });
   }
   for (const [i, [key, label]] of LOST_REASONS.entries()) {
     await db.lostReason.upsert({ where: { key }, update: {}, create: { id: newId('lrs'), key, label, sortOrder: (i + 1) * 10 } });

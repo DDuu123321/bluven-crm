@@ -219,3 +219,24 @@ export function evaluateIdle(o: IdleInput, now: Date, t: IdleThresholds): IdleAc
   if (days >= t.remindOwnerDays && o.idleLevel < 1) return 'REMIND_OWNER';
   return 'NONE';
 }
+
+/**
+ * How idle an order is, for every list and figure that shows it: 0 not idle, 1 past the day the
+ * salesperson is reminded, 2 past the day the managers are told, 3 past the day an unsigned order
+ * goes back to the pool. Counted from the last staff activity, whether or not a reminder has
+ * gone out yet, so a figure never depends on when the reminder job last ran.
+ */
+export type IdleTier = 0 | 1 | 2 | 3;
+
+export function idleTier(o: Pick<IdleInput, 'stage' | 'sideState' | 'ownerId' | 'lastStaffActivityAt'>, now: Date, t: IdleThresholds): IdleTier {
+  if (!o.ownerId || o.sideState !== 'NONE' || !isIdleTrackedStage(o.stage)) return 0;
+  const days = idleDays(o.lastStaffActivityAt, now);
+  if (days >= t.returnToPoolDays) return 3;
+  if (days >= t.remindManagerDays) return 2;
+  return days >= t.remindOwnerDays ? 1 : 0;
+}
+
+/** The number of idle days at which each tier starts. */
+export function idleTierDays(t: IdleThresholds): [owner: number, manager: number, pool: number] {
+  return [t.remindOwnerDays, t.remindManagerDays, t.returnToPoolDays];
+}

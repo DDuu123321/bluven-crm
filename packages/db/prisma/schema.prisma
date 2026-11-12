@@ -180,6 +180,12 @@ model User {
   decidedHandoffs   HandoffPackage[] @relation("HandoffDecider")
   emailAccount      EmailAccount?
   sentEmails        EmailMessage[]   @relation("EmailSender")
+
+  // ---- e-mail preferences
+  /// One summary e-mail each morning instead of an e-mail for every notification.
+  dailySummary   Boolean   @default(false)
+  /// The business day whose summary has been dealt with: sent, or found to have nothing in it.
+  dailySummaryOn DateTime? @db.Date
 }
 
 model Session {
@@ -404,6 +410,16 @@ model Order {
   summary       OrderSummary?
   billReadings  BillReading[]
 
+  // ---- document retention (counted from the day the order ended)
+  /// Set by "Keep for another year": none of this order's documents expires before this moment.
+  retentionKeepUntil   DateTime?
+  /// The end of the retention period the last reminder was about, and when that reminder went out.
+  /// A different end date (an extension, an order that was restored and closed again) gets a reminder of its own.
+  retentionRemindedFor DateTime?
+  retentionRemindedAt  DateTime?
+  /// When the managers were last reminded again after the period ended without a decision.
+  retentionNudgedAt    DateTime?
+
   @@index([ownerId, sideState, stage])
   @@index([stage, sideState])
   @@index([customerId])
@@ -562,9 +578,16 @@ model Document {
   emailAttachments EmailAttachment[]
   billReading      BillReading?
 
+  /// Set when the file left storage, 30 days after the document was deleted. The row stays as the
+  /// record. The bytes themselves stay for as long as another document that is not purged uses the
+  /// same storage key (site photos reused on a later order).
+  purgedAt DateTime?
+
   @@index([orderId, typeId])
   @@index([propertyId])
   @@index([sha256])
+  @@index([storageKey])
+  @@index([purgedAt, deletedAt])
 }
 
 // ----------------------------------------------------------------------------
@@ -634,6 +657,9 @@ model Notification {
   /// When the last attempt to send the email was made; the next one waits longer each time.
   emailLastAttemptAt DateTime?
   createdAt          DateTime    @default(now())
+
+  /// Set when the notification went out as part of a daily summary instead of an e-mail of its own.
+  summarisedAt DateTime?
 
   @@index([userId, readAt, createdAt])
   @@index([emailStatus, createdAt])

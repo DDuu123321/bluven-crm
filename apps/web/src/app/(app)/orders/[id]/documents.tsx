@@ -1,19 +1,22 @@
 import Link from 'next/link';
-import { DOC_TYPE, formatBytes, getHandoffChecklist, getOrderDocuments, listReusableDocuments, type Ctx, type OrderHeader } from '@bluven/core';
+import { DOC_TYPE, formatBytes, getHandoffChecklist, getOrderDocuments, getOrderRetention, listReusableDocuments, type Ctx, type OrderHeader } from '@bluven/core';
 import { ActionButton, ActionForm, CancelButton, FormMessage, Modal, SubmitButton } from '@/components/client';
 import { DocTile } from '@/components/doc-tile';
 import { Uploader } from '@/components/uploader';
 import { Alert, Badge, Card, CardBody, CardHeader, Checkbox, Label, Select } from '@/components/ui';
 import { fmtDate } from '@/lib/fmt';
-import { changeDocumentTypeAction, deleteDocumentAction, reuseDocumentsAction } from './actions';
+import { changeDocumentTypeAction, deleteDocumentAction, deleteExpiringAction, keepDocumentsAction, reuseDocumentsAction } from './actions';
 
-export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header: OrderHeader; editable: boolean }) {
+export async function DocumentsTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
   const { order } = header;
-  const [{ types, documents, superseded }, reusable, checklist] = await Promise.all([
+  const [{ types, documents, superseded }, reusable, checklist, retention] = await Promise.all([
     getOrderDocuments(ctx, order.id),
     editable ? listReusableDocuments(ctx, order.id) : Promise.resolve([]),
     getHandoffChecklist(ctx.db, order.id),
+    getOrderRetention(ctx, order.id),
   ]);
+  const due = retention && (retention.status === 'DUE' || retention.status === 'PAST') ? retention : null;
+  const many = (due?.expiring.length ?? 0) !== 1;
   const missing = new Set(checklist.items.filter((i) => !i.ok && i.typeId).map((i) => i.typeId));
   const movable = types.filter((t) => !t.isSystem);
   const base = `/orders/${order.id}`;
@@ -23,6 +26,52 @@ export async function DocumentsTab({ ctx, header, editable }: { ctx: Ctx; header
       <p className="text-sm text-slate-500">
         Files can be added at any stage. Items marked <Badge tone="amber">Required</Badge> must be here before the order can go to operations. Photos of the site belong to the property, so a later order at the same address can reuse them.
       </p>
+
+      {due && (
+        <Card id="retention">
+          <CardHeader
+            title={
+              due.status === 'PAST'
+                ? `The retention period of ${due.expiring.length} document${many ? 's' : ''} ended on ${fmtDate(due.deadline)}`
+                : `${due.expiring.length} document${many ? 's reach' : ' reaches'} the end of ${many ? 'their' : 'its'} retention period on ${fmtDate(due.deadline)}`
+            }
+            description={`This order ended on ${fmtDate(due.endedAt)}. ${due.autoDeleteAt ? `If nobody decides, ${many ? 'they are' : 'it is'} deleted automatically on ${fmtDate(due.autoDeleteAt)}.` : 'Nothing is deleted until someone decides.'}`}
+            actions={due.status === 'PAST' ? <Badge tone="red">Past</Badge> : <Badge tone="amber">Soon</Badge>}
+          />
+          <CardBody className="space-y-3">
+            <ul className="divide-y divide-slate-100 rounded-md border border-slate-200 text-sm">
+              {due.expiring.map((d) => (
+                <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                  <span className="min-w-0 truncate text-slate-900">{d.fileName}</span>
+                  <span className="text-xs text-slate-500">
+                    {d.typeLabel} · {formatBytes(d.sizeBytes)} · period ends {fmtDate(d.deadline)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {staff ? (
+              <div className="flex flex-wrap items-start gap-3">
+                <ActionButton action={keepDocumentsAction.bind(null, order.id)} variant="primary">
+                  Keep for another year
+                </ActionButton>
+                <ActionButton
+                  action={deleteExpiringAction.bind(null, order.id)}
+                  variant="danger"
+                  confirm={`Delete ${due.expiring.length} document${many ? 's' : ''} of ${order.orderNo}? ${many ? 'They disappear' : 'It disappears'} from the order now and the file${many ? 's are' : ' is'} removed from the server in 30 days.`}
+                >
+                  Delete now
+                </ActionButton>
+              </div>
+            ) : null}
+            <p className="text-xs text-slate-500">The signed contract and the deposit proof are never part of this: they are kept for good.</p>
+          </CardBody>
+        </Card>
+      )}
+      {retention?.status === 'KEPT' && retention.deadline && (
+        <p className="text-sm text-slate-500">
+          This order ended on {fmtDate(retention.endedAt)}. Its documents are kept until at least {fmtDate(retention.deadline)}; you will be reminded {retention.reminderDays} days before.
+        </p>
+      )}
 
       {reusable.length > 0 && (
         <Card>

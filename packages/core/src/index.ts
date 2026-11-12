@@ -30,3 +30,4 @@ export * from './services/customers';
 export * from './services/admin';
 export * from './services/jobs';
 export * from './services/queries';
+export * from './services/retention';

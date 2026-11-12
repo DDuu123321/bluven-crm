@@ -285,7 +285,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
 
       {tab === 'overview' && <OverviewTab ctx={ctx} header={header} editable={editable} staff={staff} />}
       {tab === 'email' && <EmailTab ctx={ctx} header={header} staff={staff} editable={editable} />}
-      {tab === 'documents' && <DocumentsTab ctx={ctx} header={header} editable={editable} />}
+      {tab === 'documents' && <DocumentsTab ctx={ctx} header={header} editable={editable} staff={staff} />}
       {tab === 'deal' && <DealTab ctx={ctx} header={header} editable={editable} staff={staff} manager={manager} />}
       {tab === 'handoff' && <HandoffTab ctx={ctx} header={header} editable={editable} staff={staff} />}
       {tab === 'history' && showHistory && <HistoryTab ctx={ctx} orderId={order.id} />}
