@@ -8,21 +8,38 @@ import {
   formatAddress,
   getOrderTasks,
   getOrderTimeline,
+  readFieldSources,
   type Ctx,
   type LeadDetails,
   type OrderHeader,
 } from '@bluven/core';
+import { assistantConfigured, getOrderBills, getOrderSummary } from '@bluven/integrations';
+import { BillsCard, SummaryCard } from '@/components/assistant';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
 import { Timeline } from '@/components/timeline';
 import { Card, CardBody, CardHeader, Dl, Input, Label, Select, StageBadge, Textarea, cx } from '@/components/ui';
 import { fmtDateTime, inputDateTime } from '@/lib/fmt';
 import { completeTaskAction, createTaskAction } from '../../tasks/actions';
-import { logActivityAction, movePropertyAction, updateCustomerAction, updatePropertyAction } from './actions';
+import { logActivityAction, movePropertyAction, readBillAction, summariseAction, summaryHintAction, updateCustomerAction, updatePropertyAction, billValueAction } from './actions';
 import { ActivityFields } from './activity-fields';
 
 export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
   const { order } = header;
-  const [timeline, tasks] = await Promise.all([getOrderTimeline(ctx, order.id), getOrderTasks(ctx, order.id)]);
+  const [timeline, tasks, summary, bills] = await Promise.all([getOrderTimeline(ctx, order.id), getOrderTasks(ctx, order.id), getOrderSummary(ctx, order.id), getOrderBills(ctx, order.id)]);
+  const assistant = assistantConfigured();
+  const sources = readFieldSources(order.property.fieldSources);
+  /** A property value with a mark saying it was not typed by a person, when that is the case. */
+  const sourced = (field: string, value: string) =>
+    value && sources[field] ? (
+      <span key={field}>
+        {value}{' '}
+        <span className="text-xs text-violet-700" title={sources[field].source === 'bill' ? 'Read from the electricity bill by the assistant' : 'Suggested by the assistant from the correspondence and taken over by a colleague'}>
+          · {sources[field].source === 'bill' ? 'from the bill' : 'from the summary'}
+        </span>
+      </span>
+    ) : (
+      value
+    );
   const now = new Date();
   const details = order.leadDetails as LeadDetails;
   const attribution = order.attribution as Record<string, string>;
@@ -36,6 +53,7 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <div className="space-y-4">
+        <SummaryCard summary={summary} available={assistant} write={staff ? summariseAction.bind(null, order.id) : undefined} hintAction={editable ? summaryHintAction.bind(null, order.id) : undefined} />
         {staff && (
           <Card>
             <CardHeader title="Log activity" description="Calls and messages are not captured automatically. Record them here so the timeline tells the whole story." />
@@ -209,12 +227,12 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
             <Dl
               rows={[
                 ['Address', formatAddress(p)],
-                ['Type', p.propertyType],
-                ['NMI', p.nmi],
-                ['Retailer', p.retailer],
-                ['Supply', p.phase],
-                ['Roof', p.roofType],
-                ['Storeys', p.storeys],
+                ['Type', sourced('propertyType', p.propertyType)],
+                ['NMI', sourced('nmi', p.nmi)],
+                ['Retailer', sourced('retailer', p.retailer)],
+                ['Supply', sourced('phase', p.phase)],
+                ['Roof', sourced('roofType', p.roofType)],
+                ['Storeys', sourced('storeys', p.storeys)],
                 ['Notes', p.notes ? <span className="whitespace-pre-wrap">{p.notes}</span> : null],
               ]}
             />
@@ -240,6 +258,13 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
             )}
           </CardBody>
         </Card>
+
+        <BillsCard
+          bills={bills}
+          available={assistant}
+          read={staff ? (documentId) => readBillAction.bind(null, documentId) : undefined}
+          takeValue={editable ? (readingId, field) => billValueAction.bind(null, readingId, field) : undefined}
+        />
 
         <Card>
           <CardHeader title="Enquiry" />

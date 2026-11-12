@@ -1,10 +1,11 @@
 import Link from 'next/link';
 import { CURRENT_DOCUMENT, fullName, replySubject, type Ctx, type OrderHeader } from '@bluven/core';
-import { getOrderMail, getOwnMailbox, zohoSettings, type EmailView } from '@bluven/integrations';
+import { NO_FOLDER, assistantConfigured, getOrderMail, getOwnMailbox, zohoSettings, type EmailAttachmentView, type EmailView } from '@bluven/integrations';
+import { AiDraft } from '@/components/ai-draft';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
 import { Alert, Badge, Card, CardBody, CardHeader, EmptyState, Input, Label, Select, Textarea, buttonClass } from '@/components/ui';
 import { fmtDateTime, inputDate } from '@/lib/fmt';
-import { addSenderAction, archiveAttachmentAction, fileAttachmentAction, placeEmailAction, sendEmailAction } from './actions';
+import { addSenderAction, archiveAttachmentAction, draftReplyAction, fileAttachmentAction, placeEmailAction, sendEmailAction } from './actions';
 
 const size = (bytes: number): string => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`);
 
@@ -12,6 +13,29 @@ interface ComposeData {
   orderId: string;
   to: string;
   documents: { id: string; fileName: string; label: string; sizeBytes: number }[];
+  /** Whether a draft can be asked for. */
+  assistant: boolean;
+}
+
+interface Filing {
+  types: { id: string; key: string; label: string }[];
+  quotes: { id: string; label: string }[];
+  today: string;
+  canArchive: boolean;
+}
+
+/**
+ * What the assistant took a received file for, put into words, and the folder to offer first.
+ * A guess it was not sure of is mentioned but not pre-selected.
+ */
+function suggestionFor(a: EmailAttachmentView, labels: Map<string, string>, filing: Filing | null): { text: string; typeId: string | null; contract: boolean } | null {
+  if (!a.suggestedKind) return null;
+  if (a.suggestedKind === NO_FOLDER) return { text: 'Does not look like a document for the order', typeId: null, contract: false };
+  const label = labels.get(a.suggestedKind);
+  if (!label) return null;
+  const sure = a.suggestedConfidence !== 'low';
+  const folder = filing?.types.find((t) => t.key === a.suggestedKind);
+  return { text: `${sure ? 'Looks like' : 'Might be'}: ${label}`, typeId: sure && folder ? folder.id : null, contract: a.suggestedKind === 'signed_contract' };
 }
 
 /** The form for writing to the customer. Used for a new message and, with a subject and a message to answer, for a reply. */
@@ -38,6 +62,7 @@ function Compose({ data, idPrefix, subject = '', replyTo }: { data: ComposeData;
         <Input id={`${idPrefix}-subject`} name="subject" defaultValue={subject} maxLength={300} />
         <FieldError name="subject" />
       </div>
+      {data.assistant && <AiDraft action={draftReplyAction.bind(null, data.orderId)} replyTo={replyTo} subjectId={`${idPrefix}-subject`} bodyId={`${idPrefix}-body`} needsWords={!replyTo} />}
       <div>
         <Label htmlFor={`${idPrefix}-body`}>Message</Label>
         <Textarea id={`${idPrefix}-body`} name="body" rows={10} />
@@ -70,7 +95,7 @@ function Compose({ data, idPrefix, subject = '', replyTo }: { data: ComposeData;
   );
 }
 
-function Message({ email, compose, filing }: { email: EmailView; compose: ComposeData | null; filing: { types: { id: string; label: string }[]; quotes: { id: string; label: string }[]; today: string; canArchive: boolean } | null }) {
+function Message({ email, compose, filing, labels }: { email: EmailView; compose: ComposeData | null; filing: Filing | null; labels: Map<string, string> }) {
   const incoming = email.direction === 'IN';
   const lines = email.bodyText.split('\n');
   const long = lines.length > 14 || email.bodyText.length > 1200;
@@ -114,7 +139,9 @@ function Message({ email, compose, filing }: { email: EmailView; compose: Compos
 
       {email.attachments.length > 0 && (
         <ul className="mt-3 space-y-2">
-          {email.attachments.map((a) => (
+          {email.attachments.map((a) => {
+            const suggestion = incoming && !a.documentId ? suggestionFor(a, labels, filing) : null;
+            return (
             <li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-slate-200 px-3 py-2 text-sm">
               {a.available ? (
                 <a href={`/api/mail/attachments/${a.id}`} target="_blank" rel="noreferrer" className="font-medium text-brand-700 hover:underline">
@@ -130,10 +157,17 @@ function Message({ email, compose, filing }: { email: EmailView; compose: Compos
               <span className="text-xs text-slate-400">{size(a.sizeBytes)}</span>
               {a.skippedReason && <span className="text-xs text-amber-700">{a.skippedReason}</span>}
               {a.documentLabel && <Badge tone="green">{incoming ? `Filed as ${a.documentLabel}` : a.documentLabel}</Badge>}
+              {suggestion && (
+                <span className="text-xs text-violet-700" title="What the assistant made of this file. It can be wrong.">
+                  AI: {suggestion.text}
+                  {a.suggestedNote ? ` · ${a.suggestedNote}` : ''}
+                </span>
+              )}
               {incoming && a.available && !a.documentId && filing && (
                 <span className="ml-auto flex flex-wrap items-center gap-2">
-                  <ActionForm action={fileAttachmentAction.bind(null, a.id)} className="flex items-center gap-2">
-                    <Select name="typeId" aria-label={`Folder for ${a.fileName}`} defaultValue="" className="h-8 py-0 text-sm">
+                  {/* The key makes the folder choice follow a suggestion that arrives after the page was first shown. */}
+                  <ActionForm key={suggestion?.typeId ?? 'none'} action={fileAttachmentAction.bind(null, a.id)} className="flex items-center gap-2">
+                    <Select name="typeId" aria-label={`Folder for ${a.fileName}`} defaultValue={suggestion?.typeId ?? ''} className="h-8 py-0 text-sm">
                       <option value="" disabled>
                         File under…
                       </option>
@@ -149,7 +183,7 @@ function Message({ email, compose, filing }: { email: EmailView; compose: Compos
                     <FormMessage className="py-1 text-xs" />
                   </ActionForm>
                   {filing.canArchive && (
-                    <Modal trigger="Signed contract…" title="Archive as the signed contract" size="sm" description={`“${a.fileName}” becomes the contract of this order.`}>
+                    <Modal trigger="Signed contract…" title="Archive as the signed contract" size="sm" variant={suggestion?.contract ? 'primary' : 'secondary'} description={`“${a.fileName}” becomes the contract of this order.`}>
                       <ActionForm action={archiveAttachmentAction.bind(null, a.id)} className="space-y-4">
                         <div>
                           <Label htmlFor={`sc-quote-${a.id}`}>Quote version the customer signed</Label>
@@ -179,7 +213,8 @@ function Message({ email, compose, filing }: { email: EmailView; compose: Compos
                 </span>
               )}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 
@@ -206,15 +241,18 @@ export async function EmailTab({ ctx, header, staff, editable }: { ctx: Ctx; hea
     getOrderMail(ctx, order.id),
     staff && configured ? getOwnMailbox(ctx) : Promise.resolve(null),
     staff ? ctx.db.document.findMany({ where: { orderId: order.id, ...CURRENT_DOCUMENT }, include: { type: { select: { label: true } } }, orderBy: { createdAt: 'desc' }, take: 100 }) : Promise.resolve([]),
-    editable ? ctx.db.documentType.findMany({ where: { isActive: true, isSystem: false }, orderBy: { sortOrder: 'asc' }, select: { id: true, label: true } }) : Promise.resolve([]),
+    ctx.db.documentType.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' }, select: { id: true, key: true, label: true, isSystem: true } }),
     editable ? ctx.db.quote.findMany({ where: { orderId: order.id }, orderBy: { version: 'desc' }, select: { id: true, version: true, title: true } }) : Promise.resolve([]),
     editable ? ctx.db.contract.findFirst({ where: { orderId: order.id, voidedAt: null }, select: { id: true } }) : Promise.resolve(null),
   ]);
   const canSend = staff && !!mailbox && !mailbox.needsReconnect;
   const compose: ComposeData | null = canSend
-    ? { orderId: order.id, to: order.customer.emails[0]?.email ?? '', documents: documents.map((d) => ({ id: d.id, fileName: d.fileName, label: d.type.label, sizeBytes: d.sizeBytes })) }
+    ? { orderId: order.id, to: order.customer.emails[0]?.email ?? '', documents: documents.map((d) => ({ id: d.id, fileName: d.fileName, label: d.type.label, sizeBytes: d.sizeBytes })), assistant: assistantConfigured() }
     : null;
-  const filing = editable ? { types, quotes: quotes.map((q) => ({ id: q.id, label: `v${q.version}${q.title ? `: ${q.title}` : ''}` })), today: inputDate(new Date()), canArchive: !contract } : null;
+  const labels = new Map(types.map((t) => [t.key, t.label]));
+  const filing: Filing | null = editable
+    ? { types: types.filter((t) => !t.isSystem), quotes: quotes.map((q) => ({ id: q.id, label: `v${q.version}${q.title ? `: ${q.title}` : ''}` })), today: inputDate(new Date()), canArchive: !contract }
+    : null;
 
   return (
     <div className="space-y-4">
@@ -278,7 +316,7 @@ export async function EmailTab({ ctx, header, staff, editable }: { ctx: Ctx; hea
         ) : (
           <ul className="divide-y divide-slate-100">
             {mail.emails.map((m) => (
-              <Message key={m.id} email={m} compose={compose} filing={filing} />
+              <Message key={m.id} email={m} compose={compose} filing={filing} labels={labels} />
             ))}
           </ul>
         )}

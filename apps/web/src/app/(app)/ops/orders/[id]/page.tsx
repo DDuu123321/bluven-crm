@@ -19,13 +19,15 @@ import {
   type OrderHeader,
 } from '@bluven/core';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
-import { getOrderMail } from '@bluven/integrations';
+import { assistantConfigured, getAssistantSettings, getOrderBills, getOrderMail, getOrderSummary, storedBrief } from '@bluven/integrations';
+import { BillsCard, BriefCard, SummaryCard } from '@/components/assistant';
 import { DocTile } from '@/components/doc-tile';
 import { EmailList } from '@/components/email-list';
 import { Timeline } from '@/components/timeline';
 import { Alert, Badge, Card, CardBody, CardHeader, Checkbox, Dl, Label, PageHeader, StageBadge, Textarea } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
 import { requireSession } from '@/lib/session';
+import { writeBriefAction } from '../../../orders/[id]/actions';
 import { acceptHandoffAction, returnHandoffAction } from '../../actions';
 
 export const metadata: Metadata = { title: 'Order handoff' };
@@ -42,7 +44,14 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
     throw e;
   }
   const { order } = header;
-  const [{ packages }, { documents, types }, timeline, mail] = await Promise.all([getOrderHandoff(ctx, id), getOrderDocuments(ctx, id), getOrderTimeline(ctx, id), getOrderMail(ctx, id)]);
+  const [{ packages }, { documents, types }, timeline, mail, summary, bills] = await Promise.all([
+    getOrderHandoff(ctx, id),
+    getOrderDocuments(ctx, id),
+    getOrderTimeline(ctx, id),
+    getOrderMail(ctx, id),
+    getOrderSummary(ctx, id),
+    getOrderBills(ctx, id),
+  ]);
   const latest = packages.find((p) => p.decision !== 'WITHDRAWN') ?? packages[0];
   if (!latest) notFound();
   const snap = latest.snapshot as unknown as HandoffSnapshot;
@@ -50,6 +59,10 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
   const lead = snap.order.leadDetails as LeadDetails;
   const earlierReturns = packages.filter((p) => p.decision === 'RETURNED' && p.id !== latest.id);
   const labelFor = new Map(snap.checklist.map((i) => [i.key, i.label]));
+  const assistant = assistantConfigured();
+  // Shortly after a push the brief is on its way; later, a missing one has to be asked for.
+  const now = new Date();
+  const briefOnItsWay = assistant && latest.decision === 'PENDING' && now.getTime() - latest.pushedAt.getTime() < 10 * 60_000 && (await getAssistantSettings(ctx.db)).autoBrief;
 
   return (
     <>
@@ -123,6 +136,7 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <div className="space-y-4">
+          <BriefCard brief={storedBrief(latest.brief)} writtenAt={latest.briefAt} available={assistant} automatic={briefOnItsWay} write={writeBriefAction.bind(null, order.id)} />
           {snap.order.notes && (
             <Card>
               <CardHeader title="Notes from sales" />
@@ -162,6 +176,7 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
               />
             </CardBody>
           </Card>
+          <BillsCard bills={bills} available={false} />
           <Card>
             <CardHeader title="What was sold" />
             <CardBody>
@@ -206,6 +221,7 @@ export default async function OpsOrderPage({ params }: { params: Promise<{ id: s
         </div>
 
         <div className="space-y-4">
+          <SummaryCard summary={summary} available={false} />
           <Card>
             <CardHeader title="Documents" description="These are the files as they are now. If sales adds or replaces a file after a return, you see the new one." />
             <CardBody className="space-y-4">

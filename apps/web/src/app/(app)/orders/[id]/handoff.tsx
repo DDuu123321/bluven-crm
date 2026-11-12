@@ -1,9 +1,11 @@
 import Link from 'next/link';
 import { getOrderHandoff, type Ctx, type OrderHeader } from '@bluven/core';
+import { assistantConfigured, getAssistantSettings, storedBrief } from '@bluven/integrations';
+import { BriefCard } from '@/components/assistant';
 import { ActionForm, FormMessage, SubmitButton } from '@/components/client';
 import { Alert, Badge, Card, CardBody, CardHeader, Label, Textarea, cx } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
-import { handoffAction } from './actions';
+import { handoffAction, writeBriefAction } from './actions';
 
 export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
   const { order } = header;
@@ -12,6 +14,11 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
   const withOps = order.stage === 'PUSHED' || order.stage === 'HANDED_OVER';
   const canPush = staff && editable && checklist.complete && order.sideState === 'NONE' && (order.stage === 'DEPOSIT_CONFIRMED' || order.stage === 'RETURNED');
   const labelFor = new Map(checklist.items.map((i) => [i.key, i.label]));
+  const latest = packages[0];
+  const assistant = assistantConfigured();
+  // Shortly after a push the brief is on its way; later, a missing one has to be asked for.
+  const now = new Date();
+  const briefOnItsWay = !!latest && assistant && latest.decision === 'PENDING' && now.getTime() - latest.pushedAt.getTime() < 10 * 60_000 && (await getAssistantSettings(ctx.db)).autoBrief;
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -89,6 +96,8 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
             )}
           </CardBody>
         </Card>
+
+        {latest && <BriefCard brief={storedBrief(latest.brief)} writtenAt={latest.briefAt} available={assistant} automatic={briefOnItsWay} write={staff ? writeBriefAction.bind(null, order.id) : undefined} />}
 
         {packages.length > 0 && (
           <Card>
