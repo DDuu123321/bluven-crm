@@ -1,12 +1,12 @@
 // Editing the customer and the property behind an order.
-import type { Tx } from '@bluven/db';
+import type { Prisma, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, normalizeEmail, normalizePhone } from '../domain';
 import { FieldErrors } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
-import { lockOrderForEdit } from './orders';
+import { lockOrderForEdit, type OrderState } from './orders';
 
 export interface UpdateCustomerInput {
   orderId: string;
@@ -165,9 +165,12 @@ export async function updateProperty(ctx: Ctx, input: { orderId: string } & Prop
     const property = await tx.property.findUniqueOrThrow({ where: { id: order.propertyId } });
     const change = diff(property as unknown as Record<string, unknown>, f as unknown as Record<string, unknown>);
     if (!change) return;
+    // A value somebody has now typed is theirs: it no longer counts as read from a bill.
+    const sources = readFieldSources(property.fieldSources);
+    for (const field of Object.keys(change.after)) delete sources[field];
     await tx.property.update({
       where: { id: property.id },
-      data: { ...f, addressKey: addressKey({ line1: f.addressLine1, suburb: f.suburb, postcode: f.postcode }) },
+      data: { ...f, addressKey: addressKey({ line1: f.addressLine1, suburb: f.suburb, postcode: f.postcode }), fieldSources: sources as unknown as Prisma.InputJsonValue },
     });
     await audit(tx, ctx, {
       action: 'property.update',
@@ -179,6 +182,104 @@ export async function updateProperty(ctx: Ctx, input: { orderId: string } & Prop
       ...change,
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Values nobody typed: read from a bill, or taken over from a suggestion
+// ---------------------------------------------------------------------------
+
+/** Property fields that can be filled from what the assistant read. */
+export const SOURCED_PROPERTY_FIELDS = ['nmi', 'retailer', 'phase', 'propertyType', 'roofType', 'storeys'] as const;
+export type SourcedPropertyField = (typeof SOURCED_PROPERTY_FIELDS)[number];
+
+export interface PropertyFieldSource {
+  /** "bill": read from an electricity bill. "summary": suggested from the correspondence and accepted by a person. */
+  source: 'bill' | 'summary';
+  documentId?: string;
+  at: string;
+}
+
+/** The recorded origin of each property value that was not typed by hand. */
+export function readFieldSources(value: unknown): Record<string, PropertyFieldSource> {
+  const out: Record<string, PropertyFieldSource> = {};
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return out;
+  for (const [field, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const r = raw as Record<string, unknown>;
+    if ((r.source === 'bill' || r.source === 'summary') && typeof r.at === 'string') {
+      out[field] = { source: r.source, at: r.at, ...(typeof r.documentId === 'string' ? { documentId: r.documentId } : {}) };
+    }
+  }
+  return out;
+}
+
+/** The value as the property stores it, or null when it is not acceptable for that field. */
+export function cleanSourcedValue(field: SourcedPropertyField, raw: string): string | null {
+  const value = raw.trim();
+  if (!value) return null;
+  switch (field) {
+    case 'nmi': {
+      const nmi = value.replace(/[\s-]+/g, '').toUpperCase();
+      return /^[A-Z0-9]{10,11}$/.test(nmi) ? nmi : null;
+    }
+    case 'phase':
+      return (PHASES as readonly string[]).find((p) => p.toLowerCase() === value.toLowerCase()) ?? null;
+    case 'propertyType':
+      return (PROPERTY_TYPES as readonly string[]).find((p) => p.toLowerCase() === value.toLowerCase()) ?? null;
+    case 'retailer':
+    case 'roofType':
+      return value.slice(0, 100);
+    case 'storeys':
+      return value.slice(0, 50);
+  }
+}
+
+const SOURCE_PHRASE: Record<PropertyFieldSource['source'], string> = {
+  bill: 'filled in from the electricity bill',
+  summary: 'taken over from the assistant’s suggestion',
+};
+
+/**
+ * Writes values nobody typed into the property and records where each came from. With
+ * `onlyEmpty`, a field that already holds something is left alone. Runs inside a transaction
+ * that holds the order lock; the caller decides whether the order may be changed at all.
+ * Returns the fields that changed.
+ */
+export async function setSourcedPropertyFields(
+  tx: Tx,
+  ctx: Ctx,
+  order: Pick<OrderState, 'id' | 'orderNo' | 'customerId' | 'propertyId'>,
+  values: Partial<Record<SourcedPropertyField, string>>,
+  origin: { source: PropertyFieldSource['source']; documentId?: string },
+  opts: { onlyEmpty: boolean },
+): Promise<SourcedPropertyField[]> {
+  const property = await tx.property.findUniqueOrThrow({ where: { id: order.propertyId } });
+  const sources = readFieldSources(property.fieldSources);
+  const data: Partial<Record<SourcedPropertyField, string>> = {};
+  for (const field of SOURCED_PROPERTY_FIELDS) {
+    const raw = values[field];
+    if (raw === undefined) continue;
+    const value = cleanSourcedValue(field, raw);
+    if (value === null || value === property[field]) continue;
+    if (opts.onlyEmpty && property[field]) continue;
+    data[field] = value;
+    sources[field] = { source: origin.source, at: nowOf(ctx).toISOString(), ...(origin.documentId ? { documentId: origin.documentId } : {}) };
+  }
+  const fields = Object.keys(data) as SourcedPropertyField[];
+  if (fields.length === 0) return [];
+  await tx.property.update({ where: { id: property.id }, data: { ...data, fieldSources: sources as unknown as Prisma.InputJsonValue } });
+  await audit(tx, ctx, {
+    action: 'property.update',
+    entityType: 'Property',
+    entityId: property.id,
+    orderId: order.id,
+    customerId: order.customerId,
+    summary: `${order.orderNo}: property details ${SOURCE_PHRASE[origin.source]} (${fields.join(', ')})`,
+    before: Object.fromEntries(fields.map((f) => [f, property[f]])),
+    after: data,
+    meta: { source: 'assistant', via: origin.source, documentId: origin.documentId ?? null },
+  });
+  return fields;
 }
 
 /**

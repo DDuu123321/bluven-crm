@@ -264,11 +264,15 @@ model Property {
   roofType     String   @default("")
   storeys      String   @default("")
   notes        String   @default("")
+  /// For values a person did not type: { field: { source, documentId?, at } }. A field leaves
+  /// this map as soon as somebody edits it by hand.
+  fieldSources Json     @default("{}")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  orders    Order[]
-  documents Document[]
+  orders       Order[]
+  documents    Document[]
+  billReadings BillReading[]
 
   @@index([customerId])
   @@index([addressKey])
@@ -397,6 +401,8 @@ model Order {
   receipts      LeadReceipt[]
   notifications Notification[]
   emailMessages EmailMessage[]
+  summary       OrderSummary?
+  billReadings  BillReading[]
 
   @@index([ownerId, sideState, stage])
   @@index([stage, sideState])
@@ -554,6 +560,7 @@ model Document {
   deposit          Deposit?
   /// The e-mail attachment this document was filed from, if any.
   emailAttachments EmailAttachment[]
+  billReading      BillReading?
 
   @@index([orderId, typeId])
   @@index([propertyId])
@@ -654,6 +661,10 @@ model HandoffPackage {
   returnReason  String          @default("")
   /// Checklist item keys operations flagged as missing or unusable.
   returnMissing String[]
+  /// The brief for operations, written by the assistant from the order as it was pushed.
+  brief         Json?
+  briefAt       DateTime?
+  briefModel    String?
 
   @@unique([orderId, version])
   @@index([decision, pushedAt])
@@ -828,6 +839,13 @@ model EmailAttachment {
   /// The document it was filed as, or, for a message sent from the CRM, the document that was attached.
   documentId    String?
   document      Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  /// What the assistant took the file for: the key of a document type, or "none".
+  aiKind        String?
+  aiConfidence  String?
+  /// One line on what the file shows.
+  aiNote        String?
+  /// Set once the file has been looked at, or decided not worth looking at.
+  aiReadAt      DateTime?
   createdAt     DateTime     @default(now())
 
   @@index([messageId])
@@ -847,4 +865,90 @@ model EmailTemplate {
   updatedAt   DateTime @updatedAt
 
   @@index([isActive, sortOrder])
+}
+
+// ---------------------------------------------------------------------------
+// The assistant (Phase 3)
+// ---------------------------------------------------------------------------
+
+enum AiRunStatus {
+  OK
+  REFUSED
+  FAILED
+}
+
+/// One request to the language model: what it was for, what it used and how it ended.
+model AiRun {
+  id               String      @id
+  /// "summary", "reply", "attachment", "bill" or "brief".
+  kind             String
+  orderId          String?
+  /// The attachment, document or handoff package the request was about.
+  subjectId        String?
+  /// Who asked. Null when the background process did.
+  userId           String?
+  model            String
+  status           AiRunStatus
+  inputTokens      Int         @default(0)
+  outputTokens     Int         @default(0)
+  cacheReadTokens  Int         @default(0)
+  cacheWriteTokens Int         @default(0)
+  durationMs       Int         @default(0)
+  /// Why it did not succeed: "refused", "unavailable", "rejected", "unreadable" or "setup".
+  failure          String?
+  error            String?
+  createdAt        DateTime    @default(now())
+
+  @@index([createdAt])
+  @@index([kind, subjectId, createdAt])
+  @@index([orderId, createdAt])
+}
+
+/// The summary of an order as the assistant last wrote it. One per order, replaced when rewritten.
+model OrderSummary {
+  orderId       String   @id
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  content       Json
+  language      String   @default("en")
+  model         String
+  /// Everything recorded on the order up to this moment was read.
+  coversUntil   DateTime
+  generatedAt   DateTime
+  generatedById String?
+  /// Suggestions for the property that were used or dismissed, as "field=value".
+  handledHints  String[]
+}
+
+/// What the assistant read from an electricity bill among the order's documents.
+model BillReading {
+  id            String    @id
+  documentId    String    @unique
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  orderId       String
+  order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  propertyId    String
+  property      Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  /// False when the file is not an electricity bill after all.
+  isBill        Boolean
+  retailer      String    @default("")
+  nmi           String    @default("")
+  accountHolder String    @default("")
+  supplyAddress String    @default("")
+  periodFrom    DateTime? @db.Date
+  periodTo      DateTime? @db.Date
+  usageKwh      Float?
+  dailyKwh      Float?
+  amountCents   Int?
+  tariff        String    @default("")
+  exportKwh     Float?
+  notes         String    @default("")
+  /// Whether the address on the bill is the address of the order: "yes", "no" or "unknown".
+  addressMatch  String    @default("unknown")
+  /// Property fields that were empty and were filled from this bill.
+  filled        String[]
+  model         String
+  createdAt     DateTime  @default(now())
+
+  @@index([orderId])
+  @@index([propertyId])
 }
