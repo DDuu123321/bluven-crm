@@ -47,7 +47,7 @@ export async function ordersNeedingSummary(db: Db, now: Date, limit: number): Pr
     .map((o) => o.id);
 }
 
-const LOCK_KEY = 760302;
+const LOCK_KEY = 760501;
 
 /**
  * One round of background work. Safe to run every minute: each item is done once, an item that

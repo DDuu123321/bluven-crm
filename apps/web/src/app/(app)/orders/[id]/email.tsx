@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import { CURRENT_DOCUMENT, fullName, replySubject, type Ctx, type OrderHeader } from '@bluven/core';
-import { NO_FOLDER, assistantConfigured, getOrderMail, getOwnMailbox, zohoSettings, type EmailAttachmentView, type EmailView } from '@bluven/integrations';
+import { NO_FOLDER, assistantConfigured, getOrderMail, getOwnMailbox, templatesForOrder, zohoSettings, type EmailAttachmentView, type EmailView, type FilledTemplate } from '@bluven/integrations';
 import { AiDraft } from '@/components/ai-draft';
 import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
+import { TemplatePicker } from '@/components/template-picker';
 import { Alert, Badge, Card, CardBody, CardHeader, EmptyState, Input, Label, Select, Textarea, buttonClass } from '@/components/ui';
 import { fmtDateTime, inputDate } from '@/lib/fmt';
 import { addSenderAction, archiveAttachmentAction, draftReplyAction, fileAttachmentAction, placeEmailAction, sendEmailAction } from './actions';
@@ -15,6 +16,8 @@ interface ComposeData {
   documents: { id: string; fileName: string; label: string; sizeBytes: number }[];
   /** Whether a draft can be asked for. */
   assistant: boolean;
+  /** Ready-made texts, with this order's details filled in. */
+  templates: FilledTemplate[];
 }
 
 interface Filing {
@@ -62,6 +65,7 @@ function Compose({ data, idPrefix, subject = '', replyTo }: { data: ComposeData;
         <Input id={`${idPrefix}-subject`} name="subject" defaultValue={subject} maxLength={300} />
         <FieldError name="subject" />
       </div>
+      <TemplatePicker templates={data.templates} subjectId={`${idPrefix}-subject`} bodyId={`${idPrefix}-body`} keepSubject={!!replyTo} />
       {data.assistant && <AiDraft action={draftReplyAction.bind(null, data.orderId)} replyTo={replyTo} subjectId={`${idPrefix}-subject`} bodyId={`${idPrefix}-body`} needsWords={!replyTo} />}
       <div>
         <Label htmlFor={`${idPrefix}-body`}>Message</Label>
@@ -237,17 +241,18 @@ function Message({ email, compose, filing, labels }: { email: EmailView; compose
 export async function EmailTab({ ctx, header, staff, editable }: { ctx: Ctx; header: OrderHeader; staff: boolean; editable: boolean }) {
   const { order } = header;
   const configured = !!zohoSettings();
-  const [mail, mailbox, documents, types, quotes, contract] = await Promise.all([
+  const [mail, mailbox, documents, types, quotes, contract, templates] = await Promise.all([
     getOrderMail(ctx, order.id),
     staff && configured ? getOwnMailbox(ctx) : Promise.resolve(null),
     staff ? ctx.db.document.findMany({ where: { orderId: order.id, ...CURRENT_DOCUMENT }, include: { type: { select: { label: true } } }, orderBy: { createdAt: 'desc' }, take: 100 }) : Promise.resolve([]),
     ctx.db.documentType.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' }, select: { id: true, key: true, label: true, isSystem: true } }),
     editable ? ctx.db.quote.findMany({ where: { orderId: order.id }, orderBy: { version: 'desc' }, select: { id: true, version: true, title: true } }) : Promise.resolve([]),
     editable ? ctx.db.contract.findFirst({ where: { orderId: order.id, voidedAt: null }, select: { id: true } }) : Promise.resolve(null),
+    staff && configured ? templatesForOrder(ctx, order.id) : Promise.resolve([]),
   ]);
   const canSend = staff && !!mailbox && !mailbox.needsReconnect;
   const compose: ComposeData | null = canSend
-    ? { orderId: order.id, to: order.customer.emails[0]?.email ?? '', documents: documents.map((d) => ({ id: d.id, fileName: d.fileName, label: d.type.label, sizeBytes: d.sizeBytes })), assistant: assistantConfigured() }
+    ? { orderId: order.id, to: order.customer.emails[0]?.email ?? '', documents: documents.map((d) => ({ id: d.id, fileName: d.fileName, label: d.type.label, sizeBytes: d.sizeBytes })), assistant: assistantConfigured(), templates }
     : null;
   const labels = new Map(types.map((t) => [t.key, t.label]));
   const filing: Filing | null = editable

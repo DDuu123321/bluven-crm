@@ -62,6 +62,71 @@ const SOURCES: [key: string, name: string, kind: LeadSourceKind][] = [
   [SOURCE_KEY.bluven, 'Bluven website', 'BLUVEN'],
 ];
 
+/** Texts to start from. Managers change, add and remove them under Administration. */
+const STARTER_TEMPLATES: { name: string; subject: string; body: string }[] = [
+  {
+    name: 'First contact',
+    subject: 'Your solar enquiry with Bluven',
+    body: `Hi {{first_name}},
+
+Thanks for getting in touch with Bluven about solar for {{address}}.
+
+I would like to understand what you are after, so that I can put the right system together for you. When is a good time for a quick call? If it is easier, just reply to this e-mail.
+
+It also helps a lot if you can send me a recent electricity bill. A photo is fine.
+
+Regards,
+{{my_first_name}}
+Bluven`,
+  },
+  {
+    name: 'Ask for the bill and photos',
+    subject: 'A few things I need for your quote',
+    body: `Hi {{first_name}},
+
+To finish your quote I need a few things from you. Photos taken on a phone are fine:
+
+- a recent electricity bill, all pages
+- the meter box with the door open
+- the switchboard
+- the roof, from the street and from the back if you can
+
+You can simply reply to this e-mail and attach them.
+
+Regards,
+{{my_first_name}}
+Bluven`,
+  },
+  {
+    name: 'Follow up on a quote',
+    subject: 'Your Bluven quote',
+    body: `Hi {{first_name}},
+
+I wanted to check that the quote I sent for {{address}} has reached you, and whether you have any questions about it.
+
+I am happy to go through it on the phone, or to adjust the system if something does not fit.
+
+Regards,
+{{my_first_name}}
+Bluven`,
+  },
+  {
+    name: 'After signing: deposit and next steps',
+    subject: 'Next steps for your installation',
+    body: `Hi {{first_name}},
+
+Thank you for signing. The next step is the deposit. Once it has arrived, our operations team will contact you to book the installation.
+
+If anything changes on your side in the meantime, please let me know.
+
+Regards,
+{{my_first_name}}
+Bluven`,
+  },
+];
+
+const TEMPLATES_SEEDED = 'emailTemplatesSeeded';
+
 /**
  * Creates the reference rows the application relies on. Existing rows are left as they are, so
  * anything an admin has renamed or reconfigured survives a re-run.
@@ -77,5 +142,12 @@ export async function ensureReferenceData(db: Db): Promise<void> {
   }
   for (const [key, name, kind] of SOURCES) {
     await db.leadSource.upsert({ where: { key }, update: {}, create: { id: newId('src'), key, name, kind } });
+  }
+  // The starter texts are put in once. A manager who removed them does not get them back at the next deployment.
+  if (!(await db.setting.findUnique({ where: { key: TEMPLATES_SEEDED } }))) {
+    if ((await db.emailTemplate.count()) === 0) {
+      for (const [i, t] of STARTER_TEMPLATES.entries()) await db.emailTemplate.create({ data: { id: newId('etp'), ...t, sortOrder: (i + 1) * 10 } });
+    }
+    await db.setting.create({ data: { key: TEMPLATES_SEEDED, value: true } });
   }
 }
