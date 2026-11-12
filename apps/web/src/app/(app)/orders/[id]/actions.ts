@@ -5,9 +5,11 @@ import {
   cancelOrder,
   changeDocumentType,
   deleteDocument,
+  deleteExpiringDocuments,
   deleteQuote,
   dismissDuplicateFlag,
   holdOrder,
+  keepDocumentsAnotherYear,
   logActivity,
   markLost,
   moveOrderToNewProperty,
@@ -313,6 +315,24 @@ export async function archiveAttachmentAction(attachmentId: string, formData: Fo
   return runAction(async (ctx) => {
     await archiveContractFromAttachment(ctx, { attachmentId, quoteId: str(formData, 'quoteId') || null, signedOn: dateOnly(formData, 'signedOn') });
     return { message: 'Contract archived.' };
+  });
+}
+
+// ---- document retention
+
+export async function keepDocumentsAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const { documents } = await keepDocumentsAnotherYear(ctx, { orderId });
+    return { message: `${documents} document${documents === 1 ? '' : 's'} kept for another year.` };
+  });
+}
+
+export async function deleteExpiringAction(orderId: string): Promise<ActionResult> {
+  if (!validArgs(orderId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const { deleted } = await deleteExpiringDocuments(ctx, { orderId });
+    return { message: `${deleted} document${deleted === 1 ? '' : 's'} deleted.` };
   });
 }
 

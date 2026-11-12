@@ -40,6 +40,13 @@ export class ConflictError extends AppError {
   }
 }
 
+/** The thing existed and is gone for good, for example a file that has been removed from storage. */
+export class GoneError extends AppError {
+  constructor(message: string) {
+    super(message, 'gone', 410);
+  }
+}
+
 /** Collects field errors and throws a single ValidationError. */
 export class FieldErrors {
   private readonly errors: Record<string, string> = {};

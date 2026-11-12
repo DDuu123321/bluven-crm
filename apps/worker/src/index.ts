@@ -1,6 +1,6 @@
 // The background process. It owns everything that happens without a person clicking:
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
-import { getConfig, purgeExpiredSessions, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
+import { getConfig, purgeExpiredSessions, runDocumentRetention, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { PylonClient, assistantModel, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
 import { describeMailSetup, sendNotificationEmails } from './mailer';
@@ -53,6 +53,16 @@ const jobs: Job[] = [
     name: 'hold-expiry',
     everyMs: 10 * MINUTE,
     run: async () => some([[(await runHoldExpiry(db)).resumed, 'orders taken off hold']]),
+  },
+  {
+    // Reminders before a retention period ends, the weekly reminder when nobody decides, automatic
+    // deletion where an admin switched it on, and the removal of files 30 days after a deletion.
+    name: 'document-retention',
+    everyMs: HOUR,
+    run: async () => {
+      const r = await runDocumentRetention(db);
+      return some([[r.reminders, 'retention reminders'], [r.repeatReminders, 'repeat reminders to managers'], [r.deleted, 'documents deleted at the end of retention'], [r.filesRemoved, 'files removed from storage']]);
+    },
   },
   {
     name: 'session-cleanup',

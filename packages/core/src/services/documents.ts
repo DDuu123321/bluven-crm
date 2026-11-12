@@ -5,7 +5,7 @@ import type { DocSource, Document, DocumentType, Tx } from '@bluven/db';
 import { actorId, inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
 import { FINANCE_VISIBLE_DOC_TYPES, zonedTimeToUtc } from '../domain';
-import { ConflictError, NotFoundError, ValidationError } from '../errors';
+import { ConflictError, GoneError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { INLINE_SAFE_TYPES, THUMBNAIL_TYPES, cleanFileName, detectContentType, getStorage, safeExtension, type TempFile } from '../storage';
 import { addActivity } from './activity';
@@ -404,11 +404,14 @@ const ACCESS_AUDIT_WINDOW_MS = 5 * 60_000;
  */
 export async function openDocument(ctx: Ctx, input: { documentId: string; purpose: 'download' | 'view' | 'thumbnail' | 'head' }): Promise<OpenedDocument> {
   const doc = await ctx.db.document.findUnique({ where: { id: input.documentId }, include: { type: { select: { key: true, label: true } } } });
-  if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
+  // A deleted document is reported as missing, except that once its file has been purged the
+  // people who could have opened it are told so. Who that is gets settled first.
+  if (!doc || (doc.deletedAt && !doc.purgedAt)) throw new NotFoundError('Document not found.');
   const { order, view } = await requireOrderView(ctx.db, ctx, doc.orderId).catch(() => {
     throw new NotFoundError('Document not found.');
   });
   if (view === 'FINANCE' && !FINANCE_VISIBLE_DOC_TYPES.includes(doc.type.key)) throw new NotFoundError('Document not found.');
+  if (doc.purgedAt) throw new GoneError(`“${doc.fileName}” was deleted and its file has since been removed from storage. Only the record of it remains.`);
   if (input.purpose === 'download' || input.purpose === 'view') {
     // A browser fetches one file several times while showing it (byte ranges, re-renders), so the
     // same person, file and kind of access is recorded once every few minutes. The decision is

@@ -149,6 +149,11 @@ export async function updateRulesAction(formData: FormData): Promise<ActionResul
         returnToPoolDays: int(formData, 'returnToPoolDays') ?? NaN,
       },
       defaultDepositPercent: Number(str(formData, 'defaultDepositPercent') || 'NaN'),
+      retention: {
+        years: int(formData, 'retentionYears') ?? NaN,
+        reminderDays: int(formData, 'retentionReminderDays') ?? NaN,
+        autoDelete: bool(formData, 'retentionAutoDelete'),
+      },
     });
     return { message: 'Rules saved.' };
   });
