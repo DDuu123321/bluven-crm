@@ -7,7 +7,7 @@
 //   SMTP_URL                          talk to the mail server directly.
 import nodemailer, { type Transporter } from 'nodemailer';
 import type { Db } from '@bluven/db';
-import { getConfig, withJobLock } from '@bluven/core';
+import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getConfig, localDateTimeInput, notificationKind, parseDateOnly, withJobLock, type NotificationKind } from '@bluven/core';
 
 /** Give the person a moment to see it in the app before an email goes out. */
 const GRACE_MS = 2 * 60_000;
@@ -98,7 +98,8 @@ export async function sendNotificationEmails(db: Db, now: Date = new Date()): Pr
     }
     const config = getConfig();
     const candidates = await db.notification.findMany({
-      where: { emailStatus: 'PENDING', createdAt: { lte: new Date(now.getTime() - GRACE_MS) } },
+      // People who chose a daily summary get theirs in one e-mail each morning instead.
+      where: { emailStatus: 'PENDING', createdAt: { lte: new Date(now.getTime() - GRACE_MS) }, user: { dailySummary: false } },
       include: { user: { select: { email: true, name: true, isActive: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: 200,
@@ -127,6 +128,81 @@ export async function sendNotificationEmails(db: Db, now: Date = new Date()): Pr
           where: { id: n.id },
           data: { emailAttempts: attempts, emailLastAttemptAt: now, emailError: (e instanceof Error ? e.message : String(e)).slice(0, 500), emailStatus: attempts >= MAX_ATTEMPTS ? 'FAILED' : 'PENDING' },
         });
+        result.failed++;
+      }
+    }
+    return true;
+  });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// The daily summary
+// ---------------------------------------------------------------------------
+
+/** From this hour of the business day the day's summary goes out. */
+const SUMMARY_HOUR = 7;
+
+export interface SummaryRunResult {
+  /** People who were sent their summary. */
+  sent: number;
+  /** People with nothing unread to tell them about: no e-mail, and the day counts as dealt with. */
+  nothingToSay: number;
+  failed: number;
+}
+
+/**
+ * Sends each person who chose a daily summary one e-mail with everything that is still unread,
+ * once per business day and not before seven in the morning. A summary that could not be sent is
+ * tried again at the next run; nothing is marked as sent until it has gone out.
+ */
+export async function sendDailySummaries(db: Db, now: Date = new Date()): Promise<SummaryRunResult> {
+  const result: SummaryRunResult = { sent: 0, nothingToSay: 0, failed: 0 };
+  await withJobLock(db, 760302, async () => {
+    const send = getSender();
+    if (!send) return true;
+    const config = getConfig();
+    const local = localDateTimeInput(now, config.timeZone);
+    if (Number(local.slice(11, 13)) < SUMMARY_HOUR) return true;
+    const today = parseDateOnly(local.slice(0, 10))!;
+    const people = await db.user.findMany({
+      where: { isActive: true, dailySummary: true, OR: [{ dailySummaryOn: null }, { dailySummaryOn: { lt: today } }] },
+      select: { id: true, name: true, email: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const person of people) {
+      const waiting = await db.notification.findMany({ where: { userId: person.id, emailStatus: 'PENDING', createdAt: { lte: now } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 500 });
+      const unread = waiting.filter((n) => !n.readAt);
+      const read = waiting.filter((n) => n.readAt).map((n) => n.id);
+      if (unread.length === 0) {
+        await db.$transaction([db.notification.updateMany({ where: { id: { in: read } }, data: { emailStatus: 'SKIPPED' } }), db.user.update({ where: { id: person.id }, data: { dailySummaryOn: today } })]);
+        result.nothingToSay++;
+        continue;
+      }
+      const groups = new Map<NotificationKind, typeof unread>();
+      for (const n of unread) groups.set(notificationKind(n.type), [...(groups.get(notificationKind(n.type)) ?? []), n]);
+      const kinds = NOTIFICATION_KINDS.filter((k) => groups.has(k));
+      const link = (n: (typeof unread)[number]) => (n.href ? `${config.appUrl}/notifications/${n.id}` : `${config.appUrl}/notifications`);
+      const count = `${unread.length} notification${unread.length === 1 ? ' is' : 's are'} waiting for you in Bluven CRM`;
+      const firstName = person.name.split(/\s+/)[0] ?? person.name;
+      const footer = 'You get this once a day because you chose a daily summary. You can change that on the Notifications page.';
+      try {
+        await send({
+          to: { name: person.name, address: person.email },
+          subject: `Bluven CRM: ${unread.length} notification${unread.length === 1 ? '' : 's'} waiting for you`,
+          text: `Good morning ${firstName},\n\n${count}.\n\n${kinds.map((k) => `${NOTIFICATION_KIND_LABEL[k]}\n${groups.get(k)!.map((n) => `- ${n.title}\n  ${link(n)}`).join('\n')}`).join('\n\n')}\n\nAll of them: ${config.appUrl}/notifications\n\n${footer}\n`,
+          html: `<p>Good morning ${escapeHtml(firstName)},</p><p>${escapeHtml(count)}.</p>${kinds
+            .map((k) => `<p style="margin-bottom:4px"><strong>${escapeHtml(NOTIFICATION_KIND_LABEL[k])}</strong></p><ul style="margin-top:0">${groups.get(k)!.map((n) => `<li><a href="${escapeHtml(link(n))}">${escapeHtml(n.title)}</a></li>`).join('')}</ul>`)
+            .join('')}<p><a href="${escapeHtml(`${config.appUrl}/notifications`)}">Open all of them in Bluven CRM</a></p><p style="color:#64748b;font-size:12px">${escapeHtml(footer)}</p>`,
+        });
+        await db.$transaction([
+          db.notification.updateMany({ where: { id: { in: unread.map((n) => n.id) } }, data: { emailStatus: 'SENT', summarisedAt: now, emailLastAttemptAt: now } }),
+          db.notification.updateMany({ where: { id: { in: read } }, data: { emailStatus: 'SKIPPED' } }),
+          db.user.update({ where: { id: person.id }, data: { dailySummaryOn: today } }),
+        ]);
+        result.sent++;
+      } catch (e) {
+        console.error(`[${now.toISOString()}] daily summary for ${person.id} could not be sent`, e instanceof Error ? e.message : e);
         result.failed++;
       }
     }

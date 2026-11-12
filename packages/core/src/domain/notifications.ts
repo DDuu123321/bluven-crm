@@ -1,12 +1,13 @@
 // Notification kinds: the many machine-readable notification types, grouped into a few plain
 // categories people can filter by. Pure, safe for browser code.
 
-export const NOTIFICATION_KINDS = ['leads', 'idle', 'deposits', 'handoff', 'tasks', 'documents', 'pylon', 'other'] as const;
+export const NOTIFICATION_KINDS = ['leads', 'idle', 'email', 'deposits', 'handoff', 'tasks', 'documents', 'pylon', 'other'] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 export const NOTIFICATION_KIND_LABEL: Record<NotificationKind, string> = {
   leads: 'Leads & assignments',
   idle: 'Idle reminders',
+  email: 'Customer e-mail',
   deposits: 'Deposits',
   handoff: 'Handoff',
   tasks: 'Tasks',
@@ -27,12 +28,13 @@ export interface NotificationKindRule {
  * matches nothing is "other", so a type nobody has classified yet never drops out of view.
  */
 export const NOTIFICATION_KIND_RULES: Record<Exclude<NotificationKind, 'other'>, NotificationKindRule> = {
-  leads: { types: ['order.assigned', 'order.unassigned', 'order.possible_duplicate'], prefixes: ['pool.', 'lead.', 'intake.'] },
+  leads: { types: ['order.assigned', 'order.unassigned', 'order.possible_duplicate', 'order.restored'], prefixes: ['pool.', 'lead.', 'intake.'] },
   idle: { types: ['order.idle_owner', 'order.idle_manager', 'order.idle_returned'], prefixes: [] },
-  deposits: { types: [], prefixes: ['deposit.', 'refund.'] },
+  email: { types: [], prefixes: ['mail.'] },
+  deposits: { types: ['order.cancelled'], prefixes: ['deposit.', 'refund.'] },
   handoff: { types: [], prefixes: ['handoff.'] },
   tasks: { types: ['order.hold_ended'], prefixes: ['task.'] },
-  documents: { types: [], prefixes: ['retention.'] },
+  documents: { types: [], prefixes: ['retention.', 'bill.'] },
   pylon: { types: [], prefixes: ['pylon.'] },
 };
 

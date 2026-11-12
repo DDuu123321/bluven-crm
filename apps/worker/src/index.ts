@@ -3,7 +3,7 @@
 import { getConfig, purgeExpiredSessions, runDocumentRetention, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
 import { PylonClient, assistantModel, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
-import { describeMailSetup, sendNotificationEmails } from './mailer';
+import { describeMailSetup, sendDailySummaries, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
 const SECOND = 1_000;
@@ -39,6 +39,15 @@ const jobs: Job[] = [
     run: async () => {
       const r = await sendNotificationEmails(db);
       return some([[r.sent, 'emails sent'], [r.failed, 'emails failed']]);
+    },
+  },
+  {
+    // One e-mail each morning for the people who chose that over an e-mail per notification.
+    name: 'daily-summaries',
+    everyMs: 10 * MINUTE,
+    run: async () => {
+      const r = await sendDailySummaries(db);
+      return some([[r.sent, 'daily summaries sent'], [r.failed, 'daily summaries failed']]);
     },
   },
   {

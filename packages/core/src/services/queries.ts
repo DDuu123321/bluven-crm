@@ -1,9 +1,11 @@
 // Read models for the pages. Every query here applies the caller's visibility rules.
 import { Prisma, type Db, type OrderStage, type SideState } from '@bluven/db';
-import { nowOf, type Ctx, type UserActor } from '../context';
+import { inTx, nowOf, type Ctx, type UserActor } from '../context';
 import { getConfig } from '../config';
 import {
   FINANCE_VISIBLE_DOC_TYPES,
+  NOTIFICATION_KINDS,
+  NOTIFICATION_KIND_RULES,
   ORDER_STAGES,
   can,
   endOfLocalDay,
@@ -11,10 +13,13 @@ import {
   isIdleTrackedStage,
   isManager,
   normalizePhone,
+  notificationKind,
   zonedTimeToUtc,
+  type NotificationKind,
   type OrderView,
 } from '../domain';
 import { ForbiddenError, NotFoundError } from '../errors';
+import { audit } from './audit';
 import { requireOrderView } from './orders';
 import { getHandoffChecklist, type Checklist } from './handoff';
 import { CURRENT_DOCUMENT } from './reference';
@@ -412,12 +417,64 @@ export async function openTaskCount(ctx: Ctx): Promise<{ open: number; overdue: 
   return { open, overdue };
 }
 
-export async function listNotifications(ctx: Ctx, opts: { unreadOnly?: boolean; take?: number } = {}) {
+/** The database form of notificationKind(): which notification types make up one kind. */
+export function notificationKindWhere(kind: NotificationKind): Prisma.NotificationWhereInput {
+  const rules = Object.entries(NOTIFICATION_KIND_RULES) as [Exclude<NotificationKind, 'other'>, (typeof NOTIFICATION_KIND_RULES)[Exclude<NotificationKind, 'other'>]][];
+  const named = rules.flatMap(([, r]) => [...r.types]);
+  if (kind === 'other') {
+    return { NOT: { OR: [{ type: { in: named } }, ...rules.flatMap(([, r]) => r.prefixes.map((prefix) => ({ type: { startsWith: prefix } })))] } };
+  }
+  const rule = NOTIFICATION_KIND_RULES[kind];
+  // A type that another kind lists by name is that kind's, whatever its prefix says.
+  const elsewhere = named.filter((type) => !rule.types.includes(type));
+  return { OR: [{ type: { in: [...rule.types] } }, ...rule.prefixes.map((prefix) => ({ AND: [{ type: { startsWith: prefix } }, { type: { notIn: elsewhere } }] }))] };
+}
+
+export async function listNotifications(ctx: Ctx, opts: { unreadOnly?: boolean; take?: number; kind?: NotificationKind | null } = {}) {
   const actor = user(ctx);
   return ctx.db.notification.findMany({
-    where: { userId: actor.id, ...(opts.unreadOnly ? { readAt: null } : {}) },
+    where: { userId: actor.id, ...(opts.unreadOnly ? { readAt: null } : {}), ...(opts.kind ? notificationKindWhere(opts.kind) : {}) },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: opts.take ?? 100,
+  });
+}
+
+/** How many notifications the actor has of each kind, and how many of those are unread. Kinds without any are left out. */
+export async function notificationKindCounts(ctx: Ctx): Promise<{ kind: NotificationKind; total: number; unread: number }[]> {
+  const actor = user(ctx);
+  const [all, unread] = await Promise.all([
+    ctx.db.notification.groupBy({ by: ['type'], where: { userId: actor.id }, _count: { _all: true } }),
+    ctx.db.notification.groupBy({ by: ['type'], where: { userId: actor.id, readAt: null }, _count: { _all: true } }),
+  ]);
+  const counts = new Map<NotificationKind, { total: number; unread: number }>();
+  const bump = (type: string, field: 'total' | 'unread', n: number) => {
+    const kind = notificationKind(type);
+    const row = counts.get(kind) ?? { total: 0, unread: 0 };
+    row[field] += n;
+    counts.set(kind, row);
+  };
+  for (const g of all) bump(g.type, 'total', g._count._all);
+  for (const g of unread) bump(g.type, 'unread', g._count._all);
+  return NOTIFICATION_KINDS.filter((kind) => counts.has(kind)).map((kind) => ({ kind, ...counts.get(kind)! }));
+}
+
+/** Whether the actor gets one summary e-mail a day instead of an e-mail for every notification. */
+export async function getDailySummary(ctx: Ctx): Promise<boolean> {
+  return (await ctx.db.user.findUniqueOrThrow({ where: { id: user(ctx).id }, select: { dailySummary: true } })).dailySummary;
+}
+
+/**
+ * Switches the actor's own daily summary on or off. Switching it off does not release a day's
+ * worth of e-mails at once: what was waiting for the next summary stays in the CRM only.
+ */
+export async function setDailySummary(ctx: Ctx, on: boolean): Promise<void> {
+  const actor = user(ctx);
+  await inTx(ctx.db, async (tx) => {
+    const before = await tx.user.findUniqueOrThrow({ where: { id: actor.id }, select: { dailySummary: true } });
+    if (before.dailySummary === on) return;
+    await tx.user.update({ where: { id: actor.id }, data: { dailySummary: on } });
+    if (!on) await tx.notification.updateMany({ where: { userId: actor.id, emailStatus: 'PENDING' }, data: { emailStatus: 'SKIPPED' } });
+    await audit(tx, ctx, { action: 'user.preference', entityType: 'User', entityId: actor.id, summary: `${actor.name} switched the daily summary e-mail ${on ? 'on' : 'off'}`, before: { dailySummary: before.dailySummary }, after: { dailySummary: on } });
   });
 }
 
