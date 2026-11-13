@@ -177,7 +177,10 @@ export async function getOrderSummary(ctx: Ctx, orderId: string): Promise<OrderS
 
 async function findHint(ctx: Ctx, orderId: string, field: string, value: string) {
   // First of all: someone who may not see the order learns nothing about its summary.
-  await requireOrderView(ctx.db, ctx, orderId);
+  const { order } = await requireOrderView(ctx.db, ctx, orderId);
+  // Nor does someone who sees the order but is not one of its people. They get the answer a
+  // suggestion that was never made gets, so that asking cannot tell them what was suggested.
+  if (ctx.actor.kind === 'user' && !isOrderStaff(ctx.actor, order)) throw new NotFoundError('Suggestion not found.');
   if (!(SOURCED_PROPERTY_FIELDS as readonly string[]).includes(field)) throw new NotFoundError('Suggestion not found.');
   const row = await ctx.db.orderSummary.findUnique({ where: { orderId } });
   const hint = row ? storedContent(row.content).hints.find((h) => h.field === field && h.value === value) : undefined;

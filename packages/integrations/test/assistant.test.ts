@@ -385,6 +385,21 @@ describe('the summary of an order', () => {
     expect(readFieldSources((await db.property.findUniqueOrThrow({ where: { id: p.id } })).fieldSources)).toEqual({});
   });
 
+  it('does not let someone outside the order find out what it suggested', async () => {
+    // Finance sees an order once a deposit is on record, but not its summary.
+    const { orderId } = await orderAt(w, 'DEPOSIT_PENDING');
+    model.answers.summary = { ...SUMMARY, hints: [{ field: 'roofType', value: 'Tile', source: 'e-mail of 9 Nov' }] };
+    await summariseOrder(sam(), { orderId }, model);
+    const fin = as(w.fin, w.clock);
+    expect(await getOrderSummary(fin, orderId)).toBeNull();
+    // A value that was suggested and one that was not get the same answer.
+    for (const act of [applySummaryHint, dismissSummaryHint]) {
+      await expect(act(fin, { orderId, field: 'roofType', value: 'Tile' })).rejects.toThrow('Suggestion not found.');
+      await expect(act(fin, { orderId, field: 'roofType', value: 'Slate' })).rejects.toThrow('Suggestion not found.');
+    }
+    expect((await getOrderSummary(sam(), orderId))!.hints).toEqual([{ field: 'roofType', value: 'Tile', source: 'e-mail of 9 Nov' }]);
+  });
+
   it('is written in the language the administrator chose', async () => {
     const admin = await makeUser(['ADMIN'], 'Ada Admin');
     await expect(updateAssistantSettings(as(w.manager, w.clock), { ...(await getAssistantSettings(db)), language: 'zh' })).rejects.toThrow('not allowed');
