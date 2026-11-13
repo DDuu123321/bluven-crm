@@ -18,9 +18,11 @@ import {
   getOrderRetention,
   getSettings,
   getStorage,
+  inTx,
   keepDocumentsAnotherYear,
   listRetentionOrders,
   listReusableDocuments,
+  lockOrder,
   markLost,
   markQuoteSent,
   moveOrderToNewProperty,
@@ -422,6 +424,101 @@ describe('when nobody decides', () => {
     expect(await job()).toEqual({ ...NOTHING, deleted: 1 });
     expect((await db.document.findUniqueOrThrow({ where: { id: ignored.billId } })).deletedAt).not.toBeNull();
     expect((await db.document.findUniqueOrThrow({ where: { id: kept.billId } })).deletedAt).toBeNull();
+  });
+
+  it('deletes only what a reminder announced: a document whose own period ended later is told about first', async () => {
+    // Bills go after two years, warranty papers after three.
+    await db.documentType.update({ where: { key: 'other' }, data: { retentionYears: 3 } });
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const bill = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
+    const paper = await upload(orderId, 'other', 'warranty.pdf', pdf('warranty'));
+    const lostAt = await lose(orderId);
+    const deleted = async (id: string) => (await db.document.findUniqueOrThrow({ where: { id } })).deletedAt !== null;
+
+    at(daysBefore(addYears(lostAt, 2), 30));
+    expect(await job()).toEqual({ ...NOTHING, reminders: 1 });
+    expect((await notes(w.sam.id, 'retention.reminder'))[0]!.title).toContain('1 document reaches the end of its retention period');
+
+    // Nobody decides. A year on the warranty paper's period has ended as well, and only then does
+    // an admin switch automatic deletion on.
+    at(daysAfter(addYears(lostAt, 3), 3));
+    expect(await job()).toEqual({ ...NOTHING, repeatReminders: 1 });
+    await setRetention({ autoDelete: true });
+    expect(await job()).toEqual({ ...NOTHING, deleted: 1 });
+    expect([await deleted(bill.id), await deleted(paper.id)]).toEqual([true, false]);
+
+    // The warranty paper now gets the reminder it never had, and a full lead time after it.
+    expect(await job()).toEqual({ ...NOTHING, reminders: 1 });
+    const [, second] = await notes(w.sam.id, 'retention.reminder');
+    expect(second!.title).toContain(`the retention period of 1 document ended on ${day(addYears(lostAt, 3))}`);
+    expect(second!.body).toContain(`deleted automatically on ${day(daysAfter(w.clock.current, 30))}`);
+    w.clock.advanceDays(29.5);
+    expect(await job()).toMatchObject({ reminders: 0, deleted: 0 });
+    expect(await deleted(paper.id)).toBe(false);
+    w.clock.advanceDays(1);
+    expect(await job()).toMatchObject({ deleted: 1 });
+    expect(await deleted(paper.id)).toBe(true);
+  });
+
+  it('does not count a reminder that reached nobody, and deletes nothing on the strength of it', async () => {
+    await setRetention({ autoDelete: true });
+    const { orderId, billId, deadline } = await lostOrderWithBill();
+    // The salesperson has left and there is no manager: nobody a reminder could go to.
+    await db.user.updateMany({ where: { id: { in: [w.sam.id, w.manager.id] } }, data: { isActive: false } });
+
+    at(daysBefore(deadline, 30));
+    expect(await job()).toEqual(NOTHING);
+    expect(await order(orderId)).toMatchObject({ retentionRemindedFor: null, retentionRemindedAt: null });
+    expect(await db.notification.count({ where: { type: 'retention.reminder' } })).toBe(0);
+    expect(await db.auditLog.count({ where: { orderId, action: 'retention.reminder' } })).toBe(0);
+    // Long after the end of the period the file is still there: nobody was ever warned.
+    at(daysAfter(deadline, 60));
+    expect(await job()).toEqual(NOTHING);
+    expect((await db.document.findUniqueOrThrow({ where: { id: billId } })).deletedAt).toBeNull();
+
+    // A manager is back. The reminder goes out now, and the lead time starts with it.
+    await db.user.update({ where: { id: w.manager.id }, data: { isActive: true } });
+    expect(await job()).toEqual({ ...NOTHING, reminders: 1 });
+    expect(await notes(w.manager.id, 'retention.reminder')).toHaveLength(1);
+    expect(await notes(w.sam.id, 'retention.reminder')).toEqual([]);
+    w.clock.advanceDays(29);
+    expect(await job()).toEqual(NOTHING);
+    w.clock.advanceDays(1.5);
+    expect(await job()).toEqual({ ...NOTHING, deleted: 1 });
+  });
+
+  it('stops deleting as soon as automatic deletion is switched off, also in the middle of a run', async () => {
+    await setRetention({ autoDelete: true });
+    const first = await lostOrderWithBill();
+    w.clock.advanceDays(1);
+    const second = await lostOrderWithBill({ phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    at(daysBefore(first.deadline, 30));
+    expect(await job()).toMatchObject({ reminders: 1 });
+    at(daysBefore(second.deadline, 30));
+    expect(await job()).toMatchObject({ reminders: 1 });
+    at(daysAfter(second.deadline, 1));
+
+    // The run deals with the first order and then has to wait for the second, which is held here.
+    let letGo!: () => void;
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    const holder = inTx(db, async (tx) => {
+      await lockOrder(tx, second.orderId);
+      holding();
+      await new Promise<void>((resolve) => (letGo = resolve));
+    });
+    await held;
+    const run = job();
+    for (let i = 0; i < 200 && !(await db.document.findUniqueOrThrow({ where: { id: first.billId } })).deletedAt; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    // While it waits, the admin switches automatic deletion off.
+    await setRetention({ autoDelete: false });
+    letGo();
+    await holder;
+
+    // The second order is no longer deleted from; with the switch off its managers are reminded instead.
+    expect(await run).toEqual({ ...NOTHING, deleted: 1, repeatReminders: 1 });
+    expect((await db.document.findUniqueOrThrow({ where: { id: first.billId } })).deletedAt).not.toBeNull();
+    expect((await db.document.findUniqueOrThrow({ where: { id: second.billId } })).deletedAt).toBeNull();
   });
 });
 
