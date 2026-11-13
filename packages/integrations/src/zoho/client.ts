@@ -3,7 +3,7 @@
 // It has not been exercised against a live Zoho account yet, so every field is read defensively.
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeWebStream } from 'node:stream/web';
-import { parseAddressList, type Mailbox } from '@bluven/core';
+import { decodeEntities, parseAddressList, parseMessageIds, type Mailbox } from '@bluven/core';
 
 export interface ZohoSettings {
   clientId: string;
@@ -20,17 +20,45 @@ export interface ZohoSettings {
 export const ZOHO_SCOPES = ['ZohoMail.accounts.READ', 'ZohoMail.folders.READ', 'ZohoMail.messages.READ', 'ZohoMail.messages.CREATE'] as const;
 
 export class MailApiError extends Error {
+  /** The provider says we are asking too often. Everything waits a while; no mailbox is at fault. */
+  readonly throttled: boolean;
+  /** The provider does not accept this server's own settings (client id, secret, address). Nothing a mailbox owner can fix. */
+  readonly setupFailed: boolean;
+
   constructor(
     message: string,
     readonly status: number | null,
     /** Worth trying again later: network trouble, rate limiting, server errors. */
     readonly retryable: boolean,
-    /** The provider no longer accepts our credentials. */
+    /** The provider no longer accepts the permission this mailbox's owner gave. */
     readonly authFailed = false,
+    kind: { throttled?: boolean; setupFailed?: boolean } = {},
   ) {
     super(message);
     this.name = 'MailApiError';
+    this.throttled = !!kind.throttled;
+    this.setupFailed = !!kind.setupFailed;
   }
+}
+
+/** How Zoho words a refusal for asking too often. Its reference documents no status or code for it. */
+const THROTTLE_WORDS = /too many requests|rate.?limit|throttl|exceeded.{0,40}(limit|quota)|temporarily (blocked|locked)/i;
+
+/**
+ * Spaces requests evenly: at most `perMinute` a minute and never in a burst. Zoho blocks an
+ * application that passes 30 requests a minute for a time it does not disclose, and does not say
+ * whether that is counted per mailbox or for everyone, so one pacer serves every mailbox read
+ * in this process.
+ */
+export function createPacer(perMinute: number, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)), now: () => number = Date.now): () => Promise<void> {
+  const gap = 60_000 / Math.max(1, perMinute);
+  let next = 0;
+  return async () => {
+    const t = now();
+    const at = Math.max(t, next);
+    next = at + gap;
+    if (at > t) await sleep(at - t);
+  };
 }
 
 type Json = Record<string, unknown>;
@@ -88,11 +116,20 @@ async function tokenRequest(settings: ZohoSettings, params: Record<string, strin
   const error = text(body.error);
   const accessToken = text(body.access_token);
   if (!res.ok || error || !accessToken) {
-    const refused = error === 'invalid_code' || error === 'invalid_client' || error === 'invalid_grant' || error === 'access_denied' || res.status === 400 || res.status === 401;
-    throw new MailApiError(`Zoho refused the request${error ? ` (${error})` : ` (status ${res.status})`}.`, res.status, !refused && (res.status >= 500 || res.status === 429), refused);
+    const said = `Zoho refused the request${error ? ` (${error})` : ` (status ${res.status})`}.`;
+    // Ten tokens in ten minutes is the limit; the refusal reads "Access Denied" with a sentence about too many requests.
+    if (res.status === 429 || THROTTLE_WORDS.test(JSON.stringify(body))) throw new MailApiError(said, res.status, true, false, { throttled: true });
+    // Only this one says the person's permission is gone: the code or the refresh token is not, or no longer, valid.
+    if (error === 'invalid_code' || error === 'invalid_grant') throw new MailApiError(said, res.status, false, true);
+    // These are about the server's own settings: the client id, the secret, or the accounts address for the data centre.
+    if (error === 'invalid_client' || error === 'invalid_client_secret' || error === 'invalid_redirect_uri' || error === 'unauthorized_client') {
+      throw new MailApiError(`${said} Check ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET and ZOHO_ACCOUNTS_URL on the server.`, res.status, false, false, { setupFailed: true });
+    }
+    throw new MailApiError(said, res.status, res.status >= 500);
   }
-  const expires = Number(body.expires_in);
-  return { accessToken, refreshToken: text(body.refresh_token), expiresInSeconds: Number.isFinite(expires) && expires > 0 ? expires : 3600 };
+  // In seconds, and an hour at most: some of Zoho's products report milliseconds under the same name.
+  const expires = Number(body.expires_in_sec ?? body.expires_in);
+  return { accessToken, refreshToken: text(body.refresh_token), expiresInSeconds: Number.isFinite(expires) && expires > 0 ? Math.min(3600, Math.max(60, expires)) : 3600 };
 }
 
 /** Turns the code Zoho passes back after consent into tokens. The code is valid for two minutes. */
@@ -104,14 +141,35 @@ export function refreshZohoToken(settings: ZohoSettings, refreshToken: string, f
   return tokenRequest(settings, { grant_type: 'refresh_token', refresh_token: refreshToken }, fetchImpl);
 }
 
-/** Tells Zoho to forget the grant. Best effort: a failure here must not stop a disconnect. */
+/**
+ * Tells Zoho to forget the grant, and says whether Zoho confirmed it. A failure must not stop a
+ * disconnect, so nothing is thrown. Zoho documents two forms of this call; the newer one is
+ * tried first and the older one after it.
+ */
 export async function revokeZohoToken(settings: ZohoSettings, refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  try {
-    const res = await fetchImpl(`${settings.accountsUrl}/oauth/v2/token/revoke?token=${encodeURIComponent(refreshToken)}`, { method: 'POST', signal: AbortSignal.timeout(15_000), redirect: 'error' });
-    return res.ok;
-  } catch {
-    return false;
+  const attempts: (() => Promise<Response>)[] = [
+    () =>
+      fetchImpl(`${settings.accountsUrl}/oauth/v2/revoke/token`, {
+        method: 'POST',
+        headers: { Authorization: `Basic ${Buffer.from(`${settings.clientId}:${settings.clientSecret}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: new URLSearchParams({ token: refreshToken, token_type: 'refresh_token' }).toString(),
+        signal: AbortSignal.timeout(15_000),
+        redirect: 'error',
+      }),
+    () => fetchImpl(`${settings.accountsUrl}/oauth/v2/token/revoke?token=${encodeURIComponent(refreshToken)}`, { method: 'POST', signal: AbortSignal.timeout(15_000), redirect: 'error' }),
+  ];
+  for (const attempt of attempts) {
+    try {
+      const res = await attempt();
+      if (!res.ok) continue;
+      // A refusal can come with status 200 and an "error" field, like everything else on this server.
+      const body = obj(await res.json().catch(() => ({})));
+      if (!text(body.error)) return true;
+    } catch {
+      /* the next form, or give up */
+    }
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +206,13 @@ export interface MailListItem {
   summary: string;
 }
 
+/** One page of a folder's list. */
+export interface MailPage {
+  items: MailListItem[];
+  /** How many entries the provider sent, readable or not. Fewer than were asked for means the folder ends here. */
+  received: number;
+}
+
 export interface MailAttachmentInfo {
   attachmentId: string;
   name: string;
@@ -175,15 +240,15 @@ export interface MailApi {
   listAccounts(): Promise<MailAccountInfo[]>;
   listFolders(accountId: string): Promise<MailFolder[]>;
   /** Newest first. `start` counts from 1. */
-  listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailListItem[]>;
+  listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailPage>;
   getContent(accountId: string, folderId: string, messageId: string): Promise<string>;
   /** Header names in lower case. */
   getHeaders(accountId: string, folderId: string, messageId: string): Promise<Record<string, string[]>>;
   listAttachments(accountId: string, folderId: string, messageId: string): Promise<MailAttachmentInfo[]>;
   downloadAttachment(accountId: string, folderId: string, messageId: string, attachmentId: string): Promise<Readable>;
   uploadAttachment(accountId: string, fileName: string, body: Readable): Promise<UploadedAttachment>;
-  /** Returns the provider's id of the sent message when it tells us. */
-  send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null }>;
+  /** Returns the provider's id of the sent message, and its Message-ID header, when it tells us. */
+  send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null; messageIdHeader?: string | null }>;
 }
 
 export function parseAccount(data: unknown): MailAccountInfo | null {
@@ -200,25 +265,39 @@ export function parseAccount(data: unknown): MailAccountInfo | null {
   return { accountId, primaryAddress: primary, addresses: [...new Set([primary, ...listed])], displayName: text(a.displayName) ?? '' };
 }
 
+/**
+ * When a message arrived, in milliseconds. `receivedTime` is the real moment. Zoho's ids begin
+ * with the same thirteen digits, which serves when the field is missing. `sentDateInGMT` is the
+ * last resort only: in Zoho's own samples it is off by the mailbox's distance from UTC.
+ */
+function arrivalTime(m: Json, messageId: string | null): number {
+  const received = Number(text(m.receivedTime));
+  if (Number.isFinite(received) && received > 0) return received;
+  const fromId = Number((messageId ?? '').slice(0, 13));
+  if (/^\d{16,}$/.test(messageId ?? '') && fromId > Date.UTC(2015, 0, 1) && fromId < Date.now() + 86_400_000) return fromId;
+  return Number(text(m.sentDateInGMT));
+}
+
 export function parseListItem(data: unknown): MailListItem | null {
   const m = obj(data);
   const messageId = text(m.messageId);
   const folderId = text(m.folderId);
-  const ms = Number(text(m.receivedTime) ?? text(m.sentDateInGMT));
+  const ms = arrivalTime(m, messageId);
   if (!messageId || !folderId || !Number.isFinite(ms) || ms <= 0) return null;
   const from = parseAddressList(text(m.fromAddress))[0] ?? null;
-  const sender = text(m.sender);
+  // Zoho writes text fields of the list HTML-encoded ("&lt;", "&amp;"), as it does the addresses.
+  const sender = decodeEntities(text(m.sender) ?? '').trim();
   return {
     messageId,
     folderId,
     threadId: text(m.threadId),
-    subject: text(m.subject) ?? '',
+    subject: decodeEntities(text(m.subject) ?? ''),
     from: from ? { address: from.address, name: from.name || (sender && !sender.includes('@') ? sender : '') } : null,
     to: parseAddressList(text(m.toAddress)),
     cc: parseAddressList(text(m.ccAddress)),
     time: new Date(ms),
     hasAttachment: m.hasAttachment === '1' || m.hasAttachment === 1 || m.hasAttachment === true || m.hasAttachment === 'true',
-    summary: text(m.summary) ?? '',
+    summary: decodeEntities(text(m.summary) ?? ''),
   };
 }
 
@@ -228,6 +307,8 @@ export interface ZohoMailClientOptions {
   accessToken: (forceRefresh?: boolean) => Promise<string>;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Waited on before every request. The background reading passes a pacer; a person sending a message does not wait. */
+  pace?: () => Promise<void>;
 }
 
 export class ZohoMailClient implements MailApi {
@@ -244,6 +325,7 @@ export class ZohoMailClient implements MailApi {
   private async request(path: string, init: { method?: string; body?: string | ArrayBuffer; headers?: Record<string, string>; accept?: string } = {}): Promise<Response> {
     const call = async (force: boolean): Promise<Response> => {
       const token = await this.opts.accessToken(force);
+      await this.opts.pace?.();
       try {
         return await this.fetchImpl(`${this.base}${path}`, {
           method: init.method ?? 'GET',
@@ -257,22 +339,29 @@ export class ZohoMailClient implements MailApi {
         throw new MailApiError(`Could not reach Zoho Mail: ${e instanceof Error ? e.message : 'network error'}`, null, true);
       }
     };
-    let res = await call(false);
-    // An access token lives for an hour; one that has just run out is replaced once.
-    if (res.status === 401) {
-      await res.body?.cancel().catch(() => undefined);
-      res = await call(true);
-    }
-    if (!res.ok) {
-      let detail = '';
+    /** What a refusal says, read from its body once. */
+    const refusal = async (res: Response): Promise<{ detail: string; all: string }> => {
       try {
         const body = obj(await res.json());
-        detail = text(obj(body.data).errorCode) ?? text(obj(body.data).moreInfo) ?? text(obj(body.status).description) ?? '';
+        const parts = [text(obj(body.data).errorCode), text(obj(body.data).moreInfo), text(obj(body.status).description)].filter((v): v is string => !!v);
+        return { detail: parts[0] ?? '', all: parts.join(' ') };
       } catch {
-        /* no readable body */
+        return { detail: '', all: '' };
       }
-      const authFailed = res.status === 401 || /INVALID_OAUTHTOKEN|INVALID_TICKET|OAUTH_SCOPE_MISMATCH/i.test(detail);
-      throw new MailApiError(`Zoho Mail answered ${res.status}${detail ? ` (${detail})` : ''} for ${path.split('?')[0]}`, res.status, !authFailed && (res.status === 429 || res.status >= 500 || res.status === 408), authFailed);
+    };
+    let res = await call(false);
+    let said = res.ok ? null : await refusal(res);
+    // An access token lives for an hour; one that has just run out is replaced once. Zoho does
+    // not always answer 401 for it, so the code in the body counts as well.
+    if (said && (res.status === 401 || /INVALID_OAUTHTOKEN|INVALID_TICKET/i.test(said.all))) {
+      res = await call(true);
+      said = res.ok ? null : await refusal(res);
+    }
+    if (said) {
+      const where = `Zoho Mail answered ${res.status}${said.detail ? ` (${said.detail})` : ''} for ${path.split('?')[0]}`;
+      if (res.status === 429 || THROTTLE_WORDS.test(said.all)) throw new MailApiError(where, res.status, true, false, { throttled: true });
+      const authFailed = res.status === 401 || /INVALID_OAUTHTOKEN|INVALID_TICKET|OAUTH_SCOPE_MISMATCH/i.test(said.all);
+      throw new MailApiError(where, res.status, !authFailed && (res.status >= 500 || res.status === 408), authFailed);
     }
     return res;
   }
@@ -302,11 +391,11 @@ export class ZohoMailClient implements MailApi {
     return out;
   }
 
-  async listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailListItem[]> {
-    const params = new URLSearchParams({ folderId, start: String(opts.start), limit: String(Math.min(200, Math.max(1, opts.limit))), sortBy: 'date', sortorder: 'false', includeto: 'true' });
-    return arr(await this.data(`/accounts/${encodeURIComponent(accountId)}/messages/view?${params.toString()}`))
-      .map(parseListItem)
-      .filter((m): m is MailListItem => m !== null);
+  async listMessages(accountId: string, folderId: string, opts: { start: number; limit: number }): Promise<MailPage> {
+    // Archived mail stays in its folder but is left out of the list unless asked for.
+    const params = new URLSearchParams({ folderId, start: String(opts.start), limit: String(Math.min(200, Math.max(1, opts.limit))), sortBy: 'date', sortorder: 'false', includeto: 'true', includearchive: 'true' });
+    const entries = arr(await this.data(`/accounts/${encodeURIComponent(accountId)}/messages/view?${params.toString()}`));
+    return { items: entries.map(parseListItem).filter((m): m is MailListItem => m !== null), received: entries.length };
   }
 
   private messagePath(accountId: string, folderId: string, messageId: string): string {
@@ -373,7 +462,7 @@ export class ZohoMailClient implements MailApi {
     return { storeName, attachmentPath, attachmentName: text(d.attachmentName) ?? fileName };
   }
 
-  async send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null }> {
+  async send(accountId: string, mail: OutgoingMail): Promise<{ messageId: string | null; messageIdHeader: string | null }> {
     const body: Json = {
       fromAddress: mail.from,
       toAddress: mail.to.join(','),
@@ -387,6 +476,8 @@ export class ZohoMailClient implements MailApi {
     const path = mail.replyToMessageId ? `/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(mail.replyToMessageId)}` : `/accounts/${encodeURIComponent(accountId)}/messages`;
     if (mail.replyToMessageId) body.action = 'reply';
     const d = obj(await this.data(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
-    return { messageId: text(d.messageId) ?? text(d.mailId) };
+    // "mailId" is the Message-ID header of what was sent, which lets the copy in the sent folder be recognised for certain.
+    const mailId = text(d.mailId);
+    return { messageId: text(d.messageId), messageIdHeader: parseMessageIds(mailId)[0] ?? (mailId && /^[^<>\s]+@[^<>\s]+$/.test(mailId) ? mailId : null) };
   }
 }

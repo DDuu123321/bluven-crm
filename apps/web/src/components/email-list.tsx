@@ -15,12 +15,14 @@ export function EmailList({ emails }: { emails: EmailView[] }) {
           <li key={email.id} className="px-4 py-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <div className="min-w-0">
-                <Badge tone={incoming ? 'blue' : 'slate'}>{incoming ? 'From the customer' : 'From sales'}</Badge>
+                <Badge tone={!incoming ? 'slate' : email.unknownSender ? 'amber' : 'blue'}>{!incoming ? 'From sales' : email.unknownSender ? 'From an address not confirmed as the customer’s' : 'From the customer'}</Badge>
                 <span className="ml-2 font-medium text-slate-900">{email.subject || '(no subject)'}</span>
               </div>
               <span className="text-xs whitespace-nowrap text-slate-500">{fmtDateTime(email.sentAt)}</span>
             </div>
-            <p className="mt-1 text-xs text-slate-500">{incoming ? `${email.fromName || email.fromAddress}` : `${email.sentByName ?? email.fromName ?? email.fromAddress} to ${email.to.join(', ')}`}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {incoming ? (email.fromName ? `${email.fromName} <${email.fromAddress}>` : email.fromAddress) : `${email.sentByName ?? email.fromName ?? email.fromAddress} to ${email.to.join(', ')}`}
+            </p>
             {long ? (
               <details className="mt-2">
                 <summary className="cursor-pointer text-sm text-slate-800">

@@ -165,6 +165,7 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `SMTP_URL`, `MAIL_FROM` | Send notification emails by SMTP | off |
 | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET` | Customer e-mail: the Zoho application through which each salesperson connects their own mailbox (redirect address `<APP_URL>/api/zoho/callback`). The secret also protects the stored mailbox tokens | off |
 | `ZOHO_ACCOUNTS_URL`, `ZOHO_MAIL_URL` | Zoho's sign-in and mail addresses, for an account outside the Australian data centre | `accounts.zoho.com.au`, `mail.zoho.com.au` |
+| `ZOHO_REQUESTS_PER_MINUTE` | The most requests the worker sends Zoho in a minute while reading mailboxes, all mailboxes together. Zoho blocks an application that passes 30 | `24` |
 | `ANTHROPIC_API_KEY` | The AI assistant: order summaries, drafts for e-mails, recognising attachments, reading electricity bills, the brief for operations. A key for Anthropic's API | off |
 | `AI_MODEL` | The model the assistant uses | `claude-opus-5-5` |
 | `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quotes and contracts are entered by hand | off |

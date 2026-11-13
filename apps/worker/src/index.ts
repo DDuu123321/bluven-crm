@@ -2,7 +2,7 @@
 // idle reminders, holds that end, task reminders, notification emails and Pylon events.
 import { getConfig, purgeExpiredSessions, runDocumentRetention, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, assistantModel, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
+import { PylonClient, assistantModel, createPacer, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
 import { describeMailSetup, sendDailySummaries, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
@@ -109,13 +109,17 @@ if (pylon) {
 
 const mail = zohoSettings();
 if (mail) {
+  // Zoho blocks an application that asks more than 30 times a minute, for a time it does not
+  // disclose. One pacer for every mailbox keeps the reading well under that, evenly spread.
+  const pace = createPacer(config.zoho.requestsPerMinute);
   jobs.push({
-    // Each connected mailbox is read once a minute; only mail with known customers is kept.
+    // Connected mailboxes are read in turn, round after round; only mail with known customers is kept.
     name: 'mail-sync',
     everyMs: MINUTE,
     run: async () => {
-      const r = await syncAllMailboxes(systemCtx(db, 'Mail'), mailApiFactory(db));
-      return some([[r.stored, 'e-mails added to timelines'], [r.failed, 'mailboxes could not be read']]);
+      const r = await syncAllMailboxes(systemCtx(db, 'Mail'), mailApiFactory(db, { pace }));
+      const done = some([[r.stored, 'e-mails added to timelines'], [r.failed, 'mailboxes could not be read'], [r.removed, 'mailboxes disconnected because their owner may no longer have one']]);
+      return [done, r.pausedUntil && r.failed ? `reading is paused until ${r.pausedUntil.toISOString()}` : ''].filter(Boolean).join('; ') || undefined;
     },
   });
 }

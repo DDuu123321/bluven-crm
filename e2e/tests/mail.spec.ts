@@ -197,3 +197,46 @@ test('the correspondence is for the people on the order, and a manager sees who 
   await expect(row.getByText('Working')).toBeVisible();
   await manager.context.close();
 });
+
+test('the owner decides how much of a mailbox is kept, and an address from the website form waits for a person', async ({ browser }) => {
+  const { context, page } = await signIn(browser, 'sam');
+  await page.goto('/account/email');
+  await expect(page.getByText('Now: Customers I work with.')).toBeVisible();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Keep e-mail with every customer' }).click();
+  await expect(page.getByText('Now: Every customer in the CRM.')).toBeVisible();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Keep only e-mail with my own customers' }).click();
+  await expect(page.getByText('Now: Customers I work with.')).toBeVisible();
+
+  // Someone fills in the website form with Mia's phone number and an address of their own.
+  const res = await fetch(`${E2E.baseURL}/api/intake/leads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state().intakeToken}` },
+    body: JSON.stringify({ leads: [{ ...lead, externalId: 'mail-2', email: 'not.mia@example.net' }] }),
+  });
+  expect((await res.json()).results[0]).toMatchObject({ status: 'duplicate' });
+
+  // The address is on the record, marked, and the order's mail cannot go to it.
+  await page.goto(orderUrl);
+  const marked = page.getByText('came with a website enquiry, not confirmed');
+  await expect(marked).toBeVisible();
+  await openTab(page, 'Email');
+  await page.getByRole('button', { name: 'Write an email' }).click();
+  const compose = page.getByRole('dialog');
+  await compose.getByLabel('To', { exact: true }).fill('not.mia@example.net');
+  await compose.getByLabel('Subject', { exact: true }).fill('Your contract');
+  await compose.getByLabel('Message', { exact: true }).fill('Attached.');
+  await compose.getByRole('button', { name: 'Send' }).click();
+  await expect(compose.getByText(/nobody has confirmed that it is the customer’s/)).toBeVisible();
+  expect((await sentByCrm()).some((m) => m.to.includes('not.mia@example.net'))).toBe(false);
+  await page.keyboard.press('Escape');
+
+  // A person who knows it is hers confirms it.
+  await openTab(page, 'Overview');
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(marked).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'not.mia@example.net' })).toBeVisible();
+  await context.close();
+});

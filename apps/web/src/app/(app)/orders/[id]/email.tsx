@@ -120,10 +120,14 @@ function Message({ email, compose, filing, labels }: { email: EmailView; compose
 
       {email.unknownSender && (
         <div className="mt-2 flex flex-wrap items-center gap-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200 ring-inset">
-          <span>This came from {email.unknownSender}, which is not on the customer’s record.</span>
+          <span>
+            {email.senderAwaitsConfirmation
+              ? `This came from ${email.unknownSender}. That address reached the customer’s record through a website enquiry and nobody has confirmed that it is theirs. Check before you answer or send anything to it.`
+              : `This came from ${email.unknownSender}, which is not on the customer’s record. It may not be from the customer.`}
+          </span>
           {filing && (
-            <ActionButton action={addSenderAction.bind(null, email.id)} size="sm">
-              Add this address to the customer
+            <ActionButton action={addSenderAction.bind(null, email.id)} size="sm" confirm={`Is ${email.unknownSender} really this customer’s address? From then on mail from it is shown as the customer’s, and quotes and contracts can be sent to it.`}>
+              {email.senderAwaitsConfirmation ? 'It is the customer’s address' : 'Add this address to the customer'}
             </ActionButton>
           )}
         </div>
