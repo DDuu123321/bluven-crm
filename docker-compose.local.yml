@@ -1,0 +1,87 @@
+# The CRM on your own computer, for a look around and for trying things out:
+#
+#   docker compose -f docker-compose.local.yml up --build
+#
+# Then open http://localhost:3000 and sign in with one of the demo accounts (see the README).
+# It comes with sample accounts and orders. Nothing in it reaches an outside service.
+#
+# Not for real use: plain HTTP, a fixed database password, and accounts whose password is public.
+# To throw everything away and start again:
+#
+#   docker compose -f docker-compose.local.yml down -v
+
+# A name of its own, so this never shares containers or volumes with docker-compose.yml.
+name: bluven-crm-local
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://bluven:bluven-local@db:5432/bluven
+  APP_URL: http://localhost:${CRM_PORT:-3000}
+  APP_TIMEZONE: ${APP_TIMEZONE:-Australia/Sydney}
+  STORAGE_DIR: /data/storage
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bluven
+      POSTGRES_PASSWORD: bluven-local
+      POSTGRES_DB: bluven
+      TZ: UTC
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bluven -d bluven"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Brings the schema up to date and puts in the demo accounts and orders, then exits.
+  # On a later start the database is already in use and the demo data is left as it is.
+  setup:
+    build:
+      context: .
+      target: tools
+    command:
+      - sh
+      - -c
+      - cd /repo/packages/db && node_modules/.bin/prisma migrate deploy && cd /repo/packages/core && node --import tsx src/demo.ts
+    restart: "no"
+    environment:
+      <<: *app-env
+      DEMO_DATA: "1"
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    environment:
+      <<: *app-env
+    ports:
+      # Reachable from this computer only.
+      - "127.0.0.1:${CRM_PORT:-3000}:3000"
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      target: tools
+    environment:
+      <<: *app-env
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
+  storage:
