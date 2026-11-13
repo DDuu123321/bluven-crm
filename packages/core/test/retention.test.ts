@@ -1,11 +1,14 @@
 // Document retention: two years from the day an order ended, a reminder before the end, a human
 // decision (or, only when an admin says so, automatic deletion), and the purge of deleted files.
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   acceptHandoff,
   addYears,
   cancelOrder,
+  createDocumentType,
   createQuote,
   deleteDocument,
   deleteExpiringDocuments,
@@ -29,6 +32,7 @@ import {
   reuseDocuments,
   runDocumentRetention,
   systemCtx,
+  updateDocumentType,
   updateSettings,
   uploadDocument,
   type RetentionSettings,
@@ -593,6 +597,63 @@ describe('retention settings', () => {
     expect(await job()).toEqual({ ...NOTHING, reminders: 1 });
     const [, second] = await notes(w.sam.id, 'retention.reminder');
     expect(second!.title).toContain(`the retention period of 1 document ended on ${day(deadline)}`);
+  });
+});
+
+describe('a database that was seeded before the built-in types followed the settings', () => {
+  const migration = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../db/prisma/migrations/20261113091000_document_type_retention_default/migration.sql');
+  const BUILT_IN = ['signed_contract', 'deposit_proof', 'quote', 'electricity_bill', 'install_location', 'meter_box', 'additional_photos', 'other'];
+
+  /** Runs the migration the way a deployment does: its statements, one after the other. */
+  async function migrate(): Promise<void> {
+    const sql = readFileSync(migration, 'utf8').replace(/^--.*$/gm, '');
+    for (const statement of sql.split(';').map((s) => s.trim()).filter(Boolean)) await db.$executeRawUnsafe(statement);
+  }
+  const years = async (): Promise<Record<string, number | null>> => Object.fromEntries((await db.documentType.findMany({ orderBy: { sortOrder: 'asc' } })).map((t) => [t.key, t.retentionYears]));
+  const columnDefault = async () => (await db.$queryRaw<{ column_default: string | null }[]>`SELECT column_default FROM information_schema.columns WHERE table_name = 'DocumentType' AND column_name = 'retentionYears'`)[0]!.column_default;
+
+  it('hands its built-in types to the standard period, and keeps a period an admin chose', async () => {
+    // What the first version left behind: a column that defaults to 2 years, and a seed that relied on it.
+    await db.$executeRawUnsafe('ALTER TABLE "DocumentType" ALTER COLUMN "retentionYears" SET DEFAULT 2');
+    try {
+      await db.documentType.updateMany({ where: { key: { in: BUILT_IN } }, data: { retentionYears: 2 } });
+      const form = async (key: string, retentionYears: number | null) => {
+        const t = await docType(key);
+        return { typeId: t.id, label: t.label, description: t.description, scope: t.scope, isRequiredForHandoff: t.isRequiredForHandoff, retentionYears, neverAutoDelete: t.neverAutoDelete, sortOrder: t.sortOrder, isActive: true };
+      };
+      // Since then an admin gave two types a period by hand, one of them 2 years on purpose, and added a type of their own.
+      await updateDocumentType(as(w.manager), await form('other', 5));
+      await updateDocumentType(as(w.manager), await form('meter_box', 3));
+      await updateDocumentType(as(w.manager), await form('meter_box', 2));
+      await createDocumentType(as(w.manager), { label: 'Roof photos', description: '', scope: 'PROPERTY', isRequiredForHandoff: false, retentionYears: 2, neverAutoDelete: false, sortOrder: 55, isActive: true });
+
+      const { orderId, deadline } = await lostOrderWithBill();
+      const lostAt = addYears(deadline, -2);
+      await setRetention({ years: 3 });
+      // The defect: the bill keeps its two years, whatever the settings say.
+      expect((await getOrderRetention(as(w.sam, w.clock), orderId))!.deadline).toEqual(addYears(lostAt, 2));
+
+      await migrate();
+      expect((await getOrderRetention(as(w.sam, w.clock), orderId))!.deadline).toEqual(addYears(lostAt, 3));
+      expect(await years()).toEqual({ signed_contract: null, deposit_proof: null, quote: null, electricity_bill: null, install_location: null, roof_photos: 2, meter_box: 2, additional_photos: null, other: 5 });
+      expect(await columnDefault()).toBeNull();
+      // Run a second time, as it would be on a database that never had the problem, it changes nothing.
+      await migrate();
+      expect((await years()).meter_box).toBe(2);
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE "DocumentType" ALTER COLUMN "retentionYears" DROP DEFAULT');
+    }
+  });
+
+  it('stores what the admin entered for a new type: nothing for the standard period, or a number of years', async () => {
+    expect(await columnDefault()).toBeNull();
+    const standard = await createDocumentType(as(w.manager), { label: 'Council approval', description: '', scope: 'ORDER', isRequiredForHandoff: false, retentionYears: null, neverAutoDelete: false, sortOrder: 85, isActive: true });
+    const seven = await createDocumentType(as(w.manager), { label: 'Warranty papers', description: '', scope: 'ORDER', isRequiredForHandoff: false, retentionYears: 7, neverAutoDelete: false, sortOrder: 86, isActive: true });
+    expect((await db.documentType.findUniqueOrThrow({ where: { id: standard.id } })).retentionYears).toBeNull();
+    expect((await db.documentType.findUniqueOrThrow({ where: { id: seven.id } })).retentionYears).toBe(7);
+    // A type that reaches the table without a period, whichever way, has none.
+    await db.$executeRaw`INSERT INTO "DocumentType" ("id", "key", "label", "scope") VALUES ('dty_plain', 'plain', 'Plain', 'ORDER')`;
+    expect((await docType('plain')).retentionYears).toBeNull();
   });
 });
 

@@ -532,7 +532,8 @@ model DocumentType {
   description          String   @default("")
   scope                DocScope
   isRequiredForHandoff Boolean  @default(false)
-  retentionYears       Int?     @default(2)
+  /// Years its files are kept after their order ended. Null: the standard period in the settings.
+  retentionYears       Int?
   neverAutoDelete      Boolean  @default(false)
   /// System types back built-in features (quote, contract, deposit proof) and cannot be removed.
   isSystem             Boolean  @default(false)
