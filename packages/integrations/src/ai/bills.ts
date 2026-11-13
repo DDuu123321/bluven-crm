@@ -230,9 +230,13 @@ export async function readBill(ctx: Ctx, input: { documentId: string; again?: bo
       const current = (await loadOrderState(tx, order.id))!;
       const property = await tx.property.findUniqueOrThrow({ where: { id: current.propertyId } });
       const addressMatch = fields.isBill && fields.supplyAddress ? compareAddresses(fields.supplyAddress, property) : 'unknown';
-      // Nothing is taken from a bill for another address, and nothing is written to an order that is closed to changes.
+      // This is the one place where something the model read is written down without a person
+      // looking at it first. So the bill has to be for this address beyond doubt: one for another
+      // address fills nothing, and neither does one whose address could not be compared. Nothing
+      // is written to an order that is closed to changes either. What was not filled in is offered
+      // on the order's page, where a person takes it over with a click.
       const filled =
-        fields.isBill && addressMatch !== 'no' && !editBlockReason(current)
+        fields.isBill && addressMatch === 'yes' && !editBlockReason(current)
           ? await setSourcedPropertyFields(tx, assistant, current, { nmi: fields.nmi || undefined, retailer: fields.retailer || undefined }, { source: 'bill', documentId: doc.id }, { onlyEmpty: true })
           : [];
       // Reading a bill a second time finds the fields already filled: what the first reading filled stays on record.
@@ -316,6 +320,8 @@ export interface BillReadingView {
   readAt: Date;
   /** The bill's meter number or retailer differs from what the property holds. */
   differs: { nmi: boolean; retailer: boolean };
+  /** The bill shows a meter number or retailer and the property has none yet. */
+  missing: { nmi: boolean; retailer: boolean };
 }
 
 export interface OrderBills {
@@ -359,6 +365,7 @@ export async function getOrderBills(ctx: Ctx, orderId: string): Promise<OrderBil
           filled: r.filled,
           readAt: r.createdAt,
           differs: { nmi: !!r.nmi && !!property.nmi && r.nmi !== property.nmi, retailer: !!r.retailer && !!property.retailer && !same(r.retailer, property.retailer) },
+          missing: { nmi: !!r.nmi && !property.nmi, retailer: !!r.retailer && !property.retailer },
         };
       }),
     unread: docs.filter((d) => !d.billReading).map((d) => ({ documentId: d.id, fileName: d.fileName, readable: isReadableType(d.mimeType) })),
@@ -366,8 +373,9 @@ export async function getOrderBills(ctx: Ctx, orderId: string): Promise<OrderBil
 }
 
 /**
- * Puts the meter number or the retailer printed on a bill into the property in place of what is
- * there, on a person's decision.
+ * Puts the meter number or the retailer printed on a bill into the property, in place of what is
+ * there if anything is, on a person's decision. It is also the way a value gets there from a
+ * bill that filled nothing in by itself, whatever the comparison of the addresses said.
  */
 export async function takeBillValue(ctx: Ctx, input: { readingId: string; field: 'nmi' | 'retailer' }): Promise<void> {
   const reading = await ctx.db.billReading.findUnique({ where: { id: input.readingId } });
