@@ -184,6 +184,8 @@ async function ingestOne(tx: Tx, ctx: Ctx, lead: LeadInput, source: LeadSource, 
   const dryRun = !!opts.dryRun;
   const trusted = opts.trusted !== false;
   const salesperson = opts.enteredBySalesperson;
+  // Manual entry and CSV import are our own people's typing; every other source passes on what a member of the public wrote.
+  const typedByStaff = source.kind === 'MANUAL' || source.kind === 'CSV';
 
   // 1. Idempotency: the same external id from the same source is never processed twice.
   if (lead.externalId) {
@@ -268,7 +270,7 @@ async function ingestOne(tx: Tx, ctx: Ctx, lead: LeadInput, source: LeadSource, 
       const wakes = !opts.backfill && duplicateOf.isBackfill && !duplicateOf.ownerId;
       if (!dryRun) {
         if (trusted) {
-          await mergeContactInfo(tx, customerId, lead, phone.normalized);
+          await mergeContactInfo(tx, customerId, lead, phone.normalized, typedByStaff);
           if (fillAddressOnPropertyId) await fillPropertyAddress(tx, fillAddressOnPropertyId, lead);
         }
         if (wakes) await tx.order.update({ where: { id: duplicateOf.id }, data: { isBackfill: false, lastStaffActivityAt: now, idleLevel: 0 } });
@@ -353,7 +355,7 @@ async function ingestOne(tx: Tx, ctx: Ctx, lead: LeadInput, source: LeadSource, 
       await tx.customerEmail.create({ data: { id: newId('cem'), customerId, email: lead.email, isPrimary: true, createdAt: now } });
     }
   } else if (trusted) {
-    await mergeContactInfo(tx, customerId, lead, phone.normalized);
+    await mergeContactInfo(tx, customerId, lead, phone.normalized, typedByStaff);
   }
 
   if (!propertyId) {
@@ -452,8 +454,12 @@ async function ingestOne(tx: Tx, ctx: Ctx, lead: LeadInput, source: LeadSource, 
   return { status: 'created', id: orderId, orderNo, pooled: !ownerId && !opts.backfill };
 }
 
-/** Adds a phone number or email the customer has not used with us before. */
-async function mergeContactInfo(tx: Tx, customerId: string, lead: LeadInput, phoneNormalized: string): Promise<void> {
+/**
+ * Adds a phone number or email the customer has not used with us before. An address that did not
+ * come from our own staff (anyone can fill in the website form with somebody else's phone number)
+ * is added as unconfirmed: it is on the record, but nobody has checked that it is the customer's.
+ */
+async function mergeContactInfo(tx: Tx, customerId: string, lead: LeadInput, phoneNormalized: string, typedByStaff: boolean): Promise<void> {
   const hasPhone = await tx.customerPhone.findFirst({ where: { customerId, normalized: phoneNormalized }, select: { id: true } });
   if (!hasPhone) {
     const any = await tx.customerPhone.count({ where: { customerId } });
@@ -465,7 +471,7 @@ async function mergeContactInfo(tx: Tx, customerId: string, lead: LeadInput, pho
     const hasEmail = await tx.customerEmail.findFirst({ where: { customerId, email: lead.email }, select: { id: true } });
     if (!hasEmail) {
       const any = await tx.customerEmail.count({ where: { customerId } });
-      await tx.customerEmail.create({ data: { id: newId('cem'), customerId, email: lead.email, isPrimary: any === 0 } });
+      await tx.customerEmail.create({ data: { id: newId('cem'), customerId, email: lead.email, isPrimary: any === 0, unconfirmed: !typedByStaff } });
     }
   }
 }

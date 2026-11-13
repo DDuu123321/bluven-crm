@@ -2,11 +2,11 @@
 import type { Prisma, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, normalizeEmail, normalizePhone } from '../domain';
-import { FieldErrors } from '../errors';
+import { FieldErrors, NotFoundError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
-import { lockOrderForEdit, type OrderState } from './orders';
+import { lockOrderForEdit, lockOrderForStaff, type OrderState } from './orders';
 
 export interface UpdateCustomerInput {
   orderId: string;
@@ -90,6 +90,30 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
       customerId: customer.id,
       summary: `${order.orderNo}: updated customer details`,
       ...change,
+    });
+  });
+}
+
+/**
+ * Someone working on the order says that an address which came with an enquiry really is the
+ * customer's. From then on mail from it is shown without a warning and can be written to.
+ */
+export async function confirmCustomerEmail(ctx: Ctx, input: { orderId: string; emailId: string }): Promise<void> {
+  await inTx(ctx.db, async (tx) => {
+    const order = await lockOrderForStaff(tx, ctx, input.orderId);
+    const row = await tx.customerEmail.findFirst({ where: { id: input.emailId, customerId: order.customerId } });
+    if (!row) throw new NotFoundError('Address not found.');
+    if (!row.unconfirmed) return;
+    await tx.customerEmail.update({ where: { id: row.id }, data: { unconfirmed: false } });
+    await audit(tx, ctx, {
+      action: 'customer.update',
+      entityType: 'Customer',
+      entityId: order.customerId,
+      orderId: order.id,
+      customerId: order.customerId,
+      summary: `${order.orderNo}: confirmed that ${row.email} is the customer’s address`,
+      before: { email: row.email, unconfirmed: true },
+      after: { email: row.email, unconfirmed: false },
     });
   });
 }

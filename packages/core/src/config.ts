@@ -28,8 +28,10 @@ export interface AppConfig {
    * Zoho Mail. Each salesperson connects their own mailbox by OAuth; the client id and secret
    * come from one application registered in Zoho's API console. Off unless both are set.
    * The company's account lives in Zoho's Australian data centre, hence the default addresses.
+   * Zoho blocks an application that sends more than 30 API requests a minute, for a time it
+   * does not disclose; `requestsPerMinute` is how many the background reading allows itself.
    */
-  zoho: { clientId: string; clientSecret: string; accountsUrl: string; mailUrl: string };
+  zoho: { clientId: string; clientSecret: string; accountsUrl: string; mailUrl: string; requestsPerMinute: number };
   /**
    * The assistant: summaries, reply drafts, reading attachments and bills, the brief for
    * operations. Off unless a key for Anthropic's API is set. `baseUrl` is only for tests and
@@ -46,6 +48,7 @@ export function getConfig(): AppConfig {
   const env = process.env;
   const storage = env.STORAGE_DIR?.trim() || './data/storage';
   const maxMb = Number(env.MAX_UPLOAD_MB ?? '500');
+  const zohoRate = Number(env.ZOHO_REQUESTS_PER_MINUTE ?? '24');
   cached = {
     appUrl: (env.APP_URL?.trim() || 'http://localhost:3000').replace(/\/+$/, ''),
     timeZone: env.APP_TIMEZONE?.trim() || DEFAULT_TIMEZONE,
@@ -69,6 +72,7 @@ export function getConfig(): AppConfig {
       clientSecret: env.ZOHO_CLIENT_SECRET?.trim() ?? '',
       accountsUrl: (env.ZOHO_ACCOUNTS_URL?.trim() || 'https://accounts.zoho.com.au').replace(/\/+$/, ''),
       mailUrl: (env.ZOHO_MAIL_URL?.trim() || 'https://mail.zoho.com.au').replace(/\/+$/, ''),
+      requestsPerMinute: Number.isFinite(zohoRate) && zohoRate >= 1 ? Math.min(120, Math.floor(zohoRate)) : 24,
     },
     ai: {
       apiKey: env.ANTHROPIC_API_KEY?.trim() ?? '',
