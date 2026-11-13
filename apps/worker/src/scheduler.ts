@@ -39,9 +39,15 @@ export function startScheduler(jobs: Job[], log: (line: string) => void = consol
   };
 
   jobs.forEach((job, i) => {
-    // Stagger the first runs so they do not all hit the database at once.
-    timers.push(setTimeout(() => tick(job), 1_000 + i * 500));
-    timers.push(setInterval(() => tick(job), job.everyMs));
+    // The first runs are spread out, and each job's interval counts from its own first run. Were
+    // the intervals all started now, jobs with the same period would hit the database together
+    // on every turn after the first.
+    timers.push(
+      setTimeout(() => {
+        tick(job);
+        timers.push(setInterval(() => tick(job), job.everyMs));
+      }, 1_000 + i * 500),
+    );
   });
 
   return {

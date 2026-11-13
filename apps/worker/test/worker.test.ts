@@ -425,4 +425,25 @@ describe('scheduler', () => {
     expect(slowRuns).toBe(runsAtStop);
     errors.mockRestore();
   });
+
+  it('keeps jobs with the same period apart on every turn, not only the first', async () => {
+    const started = Date.now();
+    const runs: Record<string, number[]> = { first: [], second: [], third: [] };
+    const scheduler = startScheduler(
+      Object.keys(runs).map((name) => ({
+        name,
+        everyMs: 60_000,
+        run: async () => {
+          runs[name]!.push(Date.now() - started);
+        },
+      })),
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 5_000);
+    await scheduler.stop();
+    // Each job's minute counts from its own first run, so the half second between them stays.
+    expect(runs.first).toEqual([1_000, 61_000, 121_000, 181_000]);
+    expect(runs.second).toEqual([1_500, 61_500, 121_500, 181_500]);
+    expect(runs.third).toEqual([2_000, 62_000, 122_000, 182_000]);
+  });
 });
