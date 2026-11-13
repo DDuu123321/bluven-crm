@@ -351,27 +351,42 @@ export interface RetentionProcessResult {
 }
 
 /**
+ * Who hears about the retention of an order's documents: its salesperson and the managers. Only
+ * accounts that are in use count. A notification for someone who has left reaches nobody.
+ */
+async function retentionAudience(tx: Tx, ownerId: string | null): Promise<string[]> {
+  const owner = ownerId ? await tx.user.findFirst({ where: { id: ownerId, isActive: true }, select: { id: true } }) : null;
+  return [...(owner ? [owner.id] : []), ...(await managerIds(tx))];
+}
+
+/**
  * Sends each order's reminder once per retention period, reminds the managers again every week
  * about orders past their period, and, only when the setting is on, deletes what nobody decided
  * about. Safe to run as often as you like: every step is recorded on the order before the next
- * one can happen.
+ * one can happen. A reminder counts only when it reached somebody, and only the documents whose
+ * end date a reminder announced are ever deleted.
  */
 export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult> {
   const result: RetentionProcessResult = { reminders: 0, repeatReminders: 0, deleted: 0 };
-  const s = (await getSettings(ctx.db)).retention;
+  // The settings at the start of the run pick the orders to look at. What is done to each of them
+  // is decided by the settings as they are when its turn comes.
+  const atStart = (await getSettings(ctx.db)).retention;
   const now = nowOf(ctx);
   const tz = getConfig().timeZone;
   const awaiting = await ctx.db.$queryRaw<(AwaitingRow & { remindedFor: Date | null; remindedAt: Date | null; nudgedAt: Date | null })[]>(Prisma.sql`
     SELECT a.*, o."retentionRemindedFor" AS "remindedFor", o."retentionRemindedAt" AS "remindedAt", o."retentionNudgedAt" AS "nudgedAt"
-    FROM (${awaitingSql(s, now)}) a JOIN "Order" o ON o."id" = a."id"
+    FROM (${awaitingSql(atStart, now)}) a JOIN "Order" o ON o."id" = a."id"
     ORDER BY a."deadline", a."id"`);
 
   const failures: unknown[] = [];
   for (const row of awaiting) {
     // Most orders in the list have had their reminder and are simply waiting: skip them without a transaction.
-    if (!nextRetentionStep(row, s, now)) continue;
+    if (!nextRetentionStep(row, atStart, now)) continue;
     await inTx(ctx.db, async (tx) => {
       await lockOrder(tx, row.id);
+      // Read again under the lock: a run can take a while, and when an admin switches automatic
+      // deletion off, or lengthens the period, the very next order must already follow that.
+      const s = (await getSettings(tx)).retention;
       const order = await tx.order.findUniqueOrThrow({
         where: { id: row.id },
         select: {
@@ -407,7 +422,7 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
       if (step === 'REMIND') {
         const past = deadline.getTime() <= now.getTime();
         const deleteOn = autoDeleteMoment({ ...progress, remindedFor: deadline, remindedAt: now }, s, now);
-        await notifyUsers(tx, ctx, [order.ownerId, ...(await managerIds(tx))], {
+        const told = await notifyUsers(tx, ctx, await retentionAudience(tx, order.ownerId), {
           type: 'retention.reminder',
           title: past
             ? `${order.orderNo}: the retention period of ${count(n)} ended on ${day}`
@@ -418,6 +433,9 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
           href,
           orderId: order.id,
         });
+        // A reminder nobody received is no reminder. It is not recorded, so the order stays due
+        // for one and nothing can be deleted on the strength of it.
+        if (told === 0) return;
         await tx.order.update({ where: { id: order.id }, data: { retentionRemindedFor: deadline, retentionRemindedAt: now, retentionNudgedAt: null } });
         await audit(tx, ctx, {
           action: 'retention.reminder',
@@ -433,13 +451,14 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
       }
 
       if (step === 'NUDGE') {
-        await notifyUsers(tx, ctx, await managerIds(tx), {
+        const told = await notifyUsers(tx, ctx, await managerIds(tx), {
           type: 'retention.overdue',
           title: `${order.orderNo}: ${count(n)} ${one ? 'is' : 'are'} past ${one ? 'its' : 'their'} retention period and still waiting for a decision`,
           body: `${context} The period ended on ${day}. Keep ${one ? 'it' : 'them'} for another year, or delete ${one ? 'it' : 'them'}.`,
           href,
           orderId: order.id,
         });
+        if (told === 0) return;
         await tx.order.update({ where: { id: order.id }, data: { retentionNudgedAt: now } });
         await audit(tx, ctx, {
           action: 'retention.reminder',
@@ -454,11 +473,13 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
         return;
       }
 
-      // DELETE: only what is actually past its period. Anything that merely ends soon gets a reminder of its own.
-      const over = docs.filter((d) => d.deadline.getTime() <= now.getTime());
+      // DELETE: only the documents whose end date was announced, which is `deadline`, the date the
+      // reminder was about. A document whose own period ended later gets a reminder of its own
+      // first, and the full lead time after it, even when that later date has long passed too.
+      const over = docs.filter((d) => d.deadline.getTime() <= deadline.getTime());
       if (over.length === 0) return;
       await deleteForRetention(tx, ctx, order, over, 'automatic');
-      await notifyUsers(tx, ctx, [order.ownerId, ...(await managerIds(tx))], {
+      await notifyUsers(tx, ctx, await retentionAudience(tx, order.ownerId), {
         type: 'retention.auto_deleted',
         title: `${order.orderNo}: ${count(over.length)} ${over.length === 1 ? 'was' : 'were'} deleted automatically at the end of ${over.length === 1 ? 'its' : 'their'} retention period`,
         body: `${context} Nobody chose to keep ${over.length === 1 ? 'it' : 'them'}. The ${over.length === 1 ? 'file leaves' : 'files leave'} the server in ${PURGE_AFTER_DAYS} days.`,
