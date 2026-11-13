@@ -12,13 +12,16 @@ export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 /** Pictures smaller than this are logos and signature graphics, not photographs or scans. */
 export const MIN_IMAGE_BYTES = 20 * 1024;
 
-const IMAGE_TYPES: ReadonlySet<string> = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic']);
+const IMAGE_TYPES: readonly string[] = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic'];
+
+/** The types of file that can be shown to the model at all: PDFs and pictures. */
+export const READABLE_TYPES: readonly string[] = ['application/pdf', ...IMAGE_TYPES];
 
 export type ReadableFile = { ok: true; input: AiInput } | { ok: false; reason: string };
 
 /** Whether a file of this type can be shown to the model at all. */
 export function isReadableType(mimeType: string): boolean {
-  return mimeType === 'application/pdf' || IMAGE_TYPES.has(mimeType);
+  return READABLE_TYPES.includes(mimeType);
 }
 
 /** Loads a stored PDF or picture for the model, or says why it cannot be read. */
@@ -31,7 +34,7 @@ export async function loadForModel(file: { storageKey: string; mimeType: string;
       return { ok: false, reason: 'The file is no longer in storage.' };
     }
   }
-  if (IMAGE_TYPES.has(file.mimeType)) {
+  if (IMAGE_TYPES.includes(file.mimeType)) {
     const data = await imageForReading(file.storageKey);
     return data ? { ok: true, input: { type: 'image', mediaType: 'image/jpeg', data } } : { ok: false, reason: 'The picture could not be opened.' };
   }

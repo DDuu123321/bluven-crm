@@ -630,6 +630,24 @@ describe('an electricity bill', () => {
     await expect(readBill(as(w.fin, w.clock), { documentId: billId }, model)).rejects.toThrow('Document not found.');
   });
 
+  it('of a kind that cannot be read is left to a person, and does not keep the bills behind it from being read', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const typeId = (await docType('electricity_bill')).id;
+    for (const fileName of ['bill.docx', 'bill-2.docx']) await uploadDocument(sam(), { orderId, typeId, fileName, body: stream(Buffer.from(`PK ${fileName}`)) });
+    const documentId = await uploadBill(orderId);
+    expect(await pendingBills(db, w.clock.now(), 10)).toEqual([documentId]);
+
+    // A round reads two bills at most. The two files it cannot read take neither place, and are not counted as read.
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 1, failed: 0 });
+    expect(await db.billReading.count({ where: { documentId } })).toBe(1);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 0, failed: 0 });
+    // The order's page goes on listing them as files that cannot be read.
+    expect((await getOrderBills(sam(), orderId)).unread.map((u) => [u.fileName, u.readable])).toEqual([
+      ['bill-2.docx', false],
+      ['bill.docx', false],
+    ]);
+  });
+
   it('that was read on an earlier order of the same property is not read a second time', async () => {
     const first = await orderAt(w, 'ASSIGNED');
     const documentId = await uploadBill(first.orderId, 'same bill');
