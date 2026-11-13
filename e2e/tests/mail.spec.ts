@@ -240,3 +240,42 @@ test('the owner decides how much of a mailbox is kept, and an address from the w
   await expect(page.getByRole('link', { name: 'not.mia@example.net' })).toBeVisible();
   await context.close();
 });
+
+test('a quote version gets its file, goes out by e-mail, and is recorded as sent by that', async ({ browser }) => {
+  const { context, page } = await signIn(browser, 'sam');
+  await page.goto(orderUrl);
+  await openTab(page, 'Quote, contract & deposit');
+  // As a version arrives from Pylon: the figures, and no file.
+  await page.getByRole('button', { name: 'Add quote version' }).click();
+  const add = page.getByRole('dialog');
+  await add.getByLabel('Short description').fill('8 kW solar');
+  await add.getByLabel('Solar size (kW)').fill('8');
+  await add.getByLabel('Total price').fill('8,400');
+  await add.getByLabel('Deposit ($)').fill('840');
+  await add.getByRole('button', { name: 'Add version' }).click();
+  await expect(page.getByText('Not sent')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Attach file' }).click();
+  const attach = page.getByRole('dialog');
+  await attach.getByLabel('Quote file (PDF)').setInputFiles(file('Quote - Mia Mailer.pdf', pdf('quote for Mia'), 'application/pdf'));
+  await attach.getByRole('button', { name: 'Attach file' }).click();
+  await expect(page.getByRole('link', { name: 'Quote - Mia Mailer.pdf' })).toBeVisible();
+  // Having a file is not having been sent.
+  await expect(page.getByText('Not sent')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Replace file' })).toBeVisible();
+
+  // Sent from the Email tab with the file attached: that is what records the version as sent.
+  await openTab(page, 'Email');
+  await page.getByRole('button', { name: 'Write an email' }).click();
+  const compose = page.getByRole('dialog');
+  await compose.getByLabel('Subject', { exact: true }).fill('Your quote');
+  await compose.getByLabel('Message', { exact: true }).fill('Hi Mia,\n\nYour quote is attached.\n\nSam');
+  await compose.getByRole('checkbox', { name: /Quote - Mia Mailer\.pdf/ }).check();
+  await compose.getByRole('button', { name: 'Send' }).click();
+  await expect(compose).toBeHidden();
+  expect((await sentByCrm()).at(-1)).toMatchObject({ subject: 'Your quote', attachments: ['Quote - Mia Mailer.pdf'] });
+  await openTab(page, 'Quote, contract & deposit');
+  await expect(page.getByText('Not sent')).toHaveCount(0);
+  await expectStage(page, 'Quoted');
+  await context.close();
+});
