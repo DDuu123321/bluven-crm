@@ -227,6 +227,25 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                           </div>
                         </ActionForm>
                       </Modal>
+                      <Modal
+                        trigger={q.document ? 'Replace file' : 'Attach file'}
+                        title={`The file of quote v${q.version}`}
+                        size="sm"
+                        description="The PDF you will send to the customer, for example the quote pages cut from the Pylon proposal. Attach it to an e-mail from the Email tab and the version is recorded as sent when the e-mail goes out."
+                      >
+                        <ActionForm endpoint={`/api/quotes/${q.id}/file`} className="space-y-4">
+                          <div>
+                            <Label htmlFor={`file-${q.id}`}>Quote file (PDF)</Label>
+                            <input id={`file-${q.id}`} name="file" type="file" accept=".pdf,image/*" required className={fileInput} />
+                            <FieldError name="file" />
+                          </div>
+                          <FormMessage />
+                          <div className="flex justify-end gap-2">
+                            <CancelButton />
+                            <SubmitButton>{q.document ? 'Replace file' : 'Attach file'}</SubmitButton>
+                          </div>
+                        </ActionForm>
+                      </Modal>
                       <Modal trigger="Edit" title={`Edit quote v${q.version}`} size="sm">
                         <ActionForm action={updateQuoteAction.bind(null, q.id)} keepValues className="space-y-4">
                           <QuoteFields q={q} idPrefix={`edit-${q.id}`} />

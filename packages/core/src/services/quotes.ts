@@ -137,6 +137,43 @@ export async function updateQuote(ctx: Ctx, input: { quoteId: string } & QuoteFi
   });
 }
 
+/**
+ * Puts the file that will go to the customer on a version that has not been sent yet, without
+ * saying that it was sent. A version that came from Pylon has figures but no file; once it has
+ * one, the salesperson can attach it to an e-mail written from the order, and sending that
+ * e-mail is what records the version as sent.
+ */
+export async function attachQuoteFile(ctx: Ctx, input: { quoteId: string; file: StagedFile }): Promise<void> {
+  try {
+    const found = await loadQuote(ctx, input.quoteId);
+    const doc = await inTx(ctx.db, async (tx) => {
+      const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+      const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id } });
+      if (quote.sentAt || quote.isAccepted) throw new ConflictError('This version has already gone to the customer. Add a new version instead.');
+      const quoteType = await tx.documentType.findUniqueOrThrow({ where: { key: DOC_TYPE.quote } });
+      const current = quote.documentId ? await tx.document.findUnique({ where: { id: quote.documentId } }) : null;
+      const attached = await attachStaged(tx, ctx, order, input.file, { type: quoteType, note: `Quote v${quote.version}`, replaces: current });
+      await tx.quote.update({ where: { id: quote.id }, data: { documentId: attached.id } });
+      await touchStaffActivity(tx, ctx, order);
+      await audit(tx, ctx, {
+        action: 'quote.update',
+        entityType: 'Quote',
+        entityId: quote.id,
+        orderId: order.id,
+        customerId: order.customerId,
+        summary: `${order.orderNo}: ${current ? 'replaced' : 'attached'} the file of quote v${quote.version}`,
+        before: { documentId: quote.documentId },
+        after: { documentId: attached.id },
+      });
+      return attached;
+    });
+    await finishImage(ctx, doc);
+  } catch (e) {
+    await cleanupStaged(input.file);
+    throw e;
+  }
+}
+
 export interface MarkSentOptions {
   sentAt?: Date | null;
   via: QuoteSentVia;
