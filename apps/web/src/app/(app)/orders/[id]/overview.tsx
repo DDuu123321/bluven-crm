@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import {
   AU_STATES,
@@ -20,7 +21,7 @@ import { Timeline } from '@/components/timeline';
 import { Card, CardBody, CardHeader, Dl, Input, Label, Select, StageBadge, Textarea, cx } from '@/components/ui';
 import { fmtDateTime, inputDateTime } from '@/lib/fmt';
 import { completeTaskAction, createTaskAction } from '../../tasks/actions';
-import { logActivityAction, movePropertyAction, readBillAction, summariseAction, summaryHintAction, updateCustomerAction, updatePropertyAction, billValueAction } from './actions';
+import { confirmEmailAction, logActivityAction, movePropertyAction, readBillAction, summariseAction, summaryHintAction, updateCustomerAction, updatePropertyAction, billValueAction } from './actions';
 import { ActivityFields } from './activity-fields';
 
 export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
@@ -197,7 +198,28 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
             <Dl
               rows={[
                 ['Phone', c.phones.length ? <ContactList items={c.phones.map((ph) => ({ key: ph.id, text: ph.raw, href: `tel:${ph.normalized}` }))} /> : null],
-                ['Email', c.emails.length ? <ContactList items={c.emails.map((e) => ({ key: e.id, text: e.email, href: `mailto:${e.email}` }))} /> : null],
+                [
+                  'Email',
+                  c.emails.length ? (
+                    <ContactList
+                      items={c.emails.map((e) => ({
+                        key: e.id,
+                        text: e.email,
+                        href: `mailto:${e.email}`,
+                        extra: e.unconfirmed ? (
+                          <span className="ml-1.5 inline-flex flex-wrap items-center gap-1.5 text-xs text-amber-700">
+                            came with a website enquiry, not confirmed
+                            {staff && (
+                              <ActionButton action={confirmEmailAction.bind(null, order.id, e.id)} variant="link" size="sm" confirm={`Is ${e.email} really this customer’s address? Anyone can type an address into the website form.`}>
+                                Confirm
+                              </ActionButton>
+                            )}
+                          </span>
+                        ) : undefined,
+                      }))}
+                    />
+                  ) : null,
+                ],
                 ['Notes', c.notes ? <span className="whitespace-pre-wrap">{c.notes}</span> : null],
               ]}
             />
@@ -310,7 +332,7 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
   );
 }
 
-function ContactList({ items }: { items: { key: string; text: string; href: string }[] }) {
+function ContactList({ items }: { items: { key: string; text: string; href: string; extra?: ReactNode }[] }) {
   return (
     <ul>
       {items.map((item, i) => (
@@ -319,6 +341,7 @@ function ContactList({ items }: { items: { key: string; text: string; href: stri
             {item.text}
           </a>
           {i === 0 && items.length > 1 && <span className="ml-1.5 text-xs text-slate-400">main</span>}
+          {item.extra}
         </li>
       ))}
     </ul>

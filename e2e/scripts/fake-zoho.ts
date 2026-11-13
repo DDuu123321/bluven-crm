@@ -1,6 +1,11 @@
 // A stand-in for Zoho's sign-in and mail services, for the end-to-end tests. It speaks the same
 // HTTP as the real thing as far as the CRM uses it, keeps everything in memory, and has a few
 // extra addresses (under /__test) through which a test plays the customer.
+//
+// Where Zoho's reference shows a peculiarity in its sample answers, this follows the sample:
+// ids are nineteen digits that begin with the time, a conversation has no id until it has a
+// second message and then carries the id of its first, "sentDateInGMT" is off by the mailbox's
+// distance from UTC, and sending answers with the Message-ID of what was sent as "mailId".
 import http from 'node:http';
 import { E2E } from '../env';
 
@@ -12,7 +17,8 @@ interface Attachment {
 interface Message {
   messageId: string;
   folderId: string;
-  threadId: string;
+  /** The id of the first message of the conversation this one belongs to. */
+  conversation: string;
   subject: string;
   fromAddress: string;
   sender: string;
@@ -29,6 +35,11 @@ const ACCOUNT = '9001';
 const INBOX = '1001';
 const SENT = '1002';
 let seq = 100;
+/** Ids as Zoho makes them: the time in milliseconds, then six more digits. */
+const nextId = (): string => `${Date.now()}${String(++seq).padStart(6, '0')}`;
+/** What Zoho's samples show for a mailbox in Sydney: the same moment, eleven hours off. */
+const SYDNEY_OFFSET_MS = 11 * 3_600_000;
+const revoked = new Set<string>();
 const messages: Message[] = [];
 const uploads = new Map<string, { name: string; body: Buffer }>();
 const sent: { to: string[]; cc: string[]; subject: string; content: string; attachments: string[]; replyTo: string | null }[] = [];
@@ -70,19 +81,32 @@ const server = http.createServer(async (req, res) => {
       const form = new URLSearchParams((await readBody(req)).toString());
       if (form.get('client_id') !== E2E.zohoClientId || form.get('client_secret') !== E2E.zohoClientSecret) return send(200, { error: 'invalid_client' });
       if (form.get('grant_type') === 'authorization_code') return send(200, form.get('code') === 'fake-code' ? { access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, token_type: 'Bearer' } : { error: 'invalid_code' });
-      return send(200, form.get('refresh_token') === 'rt-1' ? { access_token: 'at-1', expires_in: 3600, token_type: 'Bearer' } : { error: 'invalid_code' });
+      return send(200, form.get('refresh_token') === 'rt-1' && !revoked.has('rt-1') ? { access_token: 'at-1', expires_in: 3600, token_type: 'Bearer' } : { error: 'invalid_code' });
     }
-    if (path === '/oauth/v2/token/revoke') return send(200, { status: 'success' });
+    // The documented form: the application's own credentials in the header, the token in the body.
+    if (path === '/oauth/v2/revoke/token' && req.method === 'POST') {
+      const expected = `Basic ${Buffer.from(`${E2E.zohoClientId}:${E2E.zohoClientSecret}`).toString('base64')}`;
+      const token = new URLSearchParams((await readBody(req)).toString()).get('token');
+      if (req.headers.authorization !== expected || !token) return send(400, { error: 'invalid_request' });
+      revoked.add(token);
+      return send(200, { status: 'success' });
+    }
+    // The older form, which the Mail API guide still shows.
+    if (path === '/oauth/v2/token/revoke' && req.method === 'POST') {
+      revoked.add(url.searchParams.get('token') ?? '');
+      return send(200, { status: 'success' });
+    }
+    if (path === '/__test/revoked') return send(200, [...revoked]);
 
     // ---- what a test does as the customer
     if (path === '/__test/receive' && req.method === 'POST') {
       const input = JSON.parse((await readBody(req)).toString()) as { from: string; fromName?: string; subject: string; html: string; inReplyToSubject?: string; attachments?: { name: string; base64: string }[] };
       const answered = input.inReplyToSubject ? messages.find((m) => m.subject === input.inReplyToSubject) : undefined;
-      const id = String(++seq);
+      const id = nextId();
       messages.push({
         messageId: id,
         folderId: INBOX,
-        threadId: answered?.threadId ?? `t${id}`,
+        conversation: answered?.conversation ?? id,
         subject: input.subject,
         fromAddress: input.from,
         sender: input.fromName ?? input.from,
@@ -92,7 +116,7 @@ const server = http.createServer(async (req, res) => {
         html: input.html,
         messageIdHeader: `customer-${id}@mail.example`,
         inReplyTo: answered?.messageIdHeader ?? null,
-        attachments: (input.attachments ?? []).map((a, i) => ({ attachmentId: `${id}0${i}`, attachmentName: a.name, body: Buffer.from(a.base64, 'base64') })),
+        attachments: (input.attachments ?? []).map((a, i) => ({ attachmentId: `${++seq}${i}`, attachmentName: a.name, body: Buffer.from(a.base64, 'base64') })),
       });
       return send(200, { messageId: id });
     }
@@ -124,15 +148,16 @@ const server = http.createServer(async (req, res) => {
         list.map((m) => ({
           messageId: m.messageId,
           folderId: m.folderId,
-          threadId: m.threadId,
-          subject: m.subject,
+          // No conversation id while the message is the only one of its conversation.
+          ...(messages.filter((x) => x.conversation === m.conversation).length > 1 ? { threadId: m.conversation } : {}),
+          subject: m.subject.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
           summary: '',
           sender: m.sender,
           fromAddress: m.fromAddress,
           toAddress: encode(m.to),
           ccAddress: encode(m.cc),
           receivedTime: String(m.time),
-          sentDateInGMT: String(m.time),
+          sentDateInGMT: String(Math.floor(m.time / 1000) * 1000 - SYDNEY_OFFSET_MS),
           hasAttachment: m.attachments.length ? '1' : '0',
         })),
       );
@@ -148,12 +173,12 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString()) as { fromAddress: string; toAddress: string; ccAddress?: string; subject: string; content: string; attachments?: { storeName: string }[]; action?: string };
       const original = reply ? messages.find((m) => m.messageId === reply[1]) : undefined;
       if (reply && (!original || body.action !== 'reply')) return send(404, { status: { code: 404 }, data: { errorCode: 'URL_RULE_NOT_CONFIGURED' } });
-      const id = String(++seq);
+      const id = nextId();
       const files = (body.attachments ?? []).map((a) => uploads.get(a.storeName)).filter((u): u is { name: string; body: Buffer } => !!u);
       messages.push({
         messageId: id,
         folderId: SENT,
-        threadId: original?.threadId ?? `t${id}`,
+        conversation: original?.conversation ?? id,
         subject: body.subject,
         fromAddress: body.fromAddress,
         sender: 'Sam Sales',
@@ -163,10 +188,10 @@ const server = http.createServer(async (req, res) => {
         html: body.content,
         messageIdHeader: `crm-${id}@mail.example`,
         inReplyTo: original?.messageIdHeader ?? null,
-        attachments: files.map((f, i) => ({ attachmentId: `${id}0${i}`, attachmentName: f.name, body: f.body })),
+        attachments: files.map((f, i) => ({ attachmentId: `${++seq}${i}`, attachmentName: f.name, body: f.body })),
       });
       sent.push({ to: body.toAddress.split(','), cc: body.ccAddress ? body.ccAddress.split(',') : [], subject: body.subject, content: body.content, attachments: files.map((f) => f.name), replyTo: original?.messageId ?? null });
-      return ok({ messageId: id, subject: body.subject });
+      return ok({ messageId: id, mailId: `<crm-${id}@mail.example>`, subject: body.subject });
     }
     const one = new RegExp(`^${base}/folders/(\\d+)/messages/(\\d+)/(content|header|attachmentinfo|attachments/(\\d+))$`).exec(path);
     if (one) {

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { getConfig, isManager } from '@bluven/core';
-import { ZOHO_SCOPES, listMailboxes, zohoSettings } from '@bluven/integrations';
+import { MAILBOX_SCOPE_LABEL, ZOHO_SCOPES, getMailPause, listMailboxes, zohoSettings } from '@bluven/integrations';
 import { ActionButton } from '@/components/client';
 import { Alert, Badge, Card, CardBody, CardHeader, Dl, EmptyState, PageHeader, Table, Td } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
@@ -15,7 +15,8 @@ export default async function EmailSettingsPage() {
   if (!isManager(user)) notFound();
   const config = getConfig();
   const settings = zohoSettings();
-  const mailboxes = await listMailboxes(ctx);
+  const [mailboxes, pause] = await Promise.all([listMailboxes(ctx), getMailPause(ctx.db)]);
+  const paused = pause && pause.until > new Date() ? pause : null;
 
   return (
     <>
@@ -27,18 +28,27 @@ export default async function EmailSettingsPage() {
           </Alert>
         </div>
       )}
+      {paused && (
+        <div className="mb-4">
+          <Alert tone="amber" title={`Reading mailboxes is paused until ${fmtDateTime(paused.until)}`}>
+            {paused.reason || 'The mail service asked the CRM to wait.'} Nothing is lost: when reading starts again it picks up where it stopped. Sending from the CRM is not paused.
+          </Alert>
+        </div>
+      )}
       <div className="mb-4 grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader title="Connection" />
           <CardBody>
             <Dl
               rows={[
-                ['Zoho application', settings ? <Badge key="a" tone="green">Configured</Badge> : <Badge key="a" tone="amber">Missing</Badge>],
+                ['Client id and secret', settings ? <Badge key="a" tone="green">Entered</Badge> : <Badge key="a" tone="amber">Missing</Badge>],
                 ['Zoho sign-in', config.zoho.accountsUrl],
                 ['Zoho Mail', config.zoho.mailUrl],
                 ['Mailboxes connected', String(mailboxes.length)],
+                ['Requests to Zoho', `at most ${config.zoho.requestsPerMinute} a minute`],
               ]}
             />
+            {settings && <p className="mt-3 text-xs text-slate-500">“Entered” means both values are set on the server. Whether Zoho accepts them shows when the first person connects a mailbox.</p>}
           </CardBody>
         </Card>
         <Card>
@@ -67,16 +77,22 @@ export default async function EmailSettingsPage() {
         {mailboxes.length === 0 ? (
           <EmptyState title="Nobody has connected a mailbox yet">Salespeople connect their own under their name at the top right.</EmptyState>
         ) : (
-          <Table head={['Person', 'Mailbox', 'Connected', 'Last read', 'Status', '']}>
+          <Table head={['Person', 'Mailbox', 'Keeps', 'Connected', 'Last read', 'Status', '']}>
             {mailboxes.map((m) => (
               <tr key={m.userId}>
                 <Td className="font-medium text-slate-900">{m.userName}</Td>
                 <Td>{m.address}</Td>
+                <Td className="text-slate-600">{MAILBOX_SCOPE_LABEL[m.scope]}</Td>
                 <Td className="whitespace-nowrap text-slate-600">{fmtDateTime(m.connectedAt)}</Td>
                 <Td className="whitespace-nowrap text-slate-600">{m.lastOkAt ? fmtDateTime(m.lastOkAt) : 'not yet'}</Td>
                 <Td>
                   {m.needsReconnect ? <Badge tone="red">Needs connecting again</Badge> : m.lastError ? <Badge tone="amber">Last read failed</Badge> : <Badge tone="green">Working</Badge>}
                   {m.lastError && <div className="mt-1 max-w-xs text-xs text-slate-500">{m.lastError}</div>}
+                  {m.unreadable.length > 0 && (
+                    <div className="mt-1 max-w-xs text-xs text-amber-700">
+                      {m.unreadable.length} {m.unreadable.length === 1 ? 'message' : 'messages'} could not be read and {m.unreadable.length === 1 ? 'was' : 'were'} left in the mailbox.
+                    </div>
+                  )}
                 </Td>
                 <Td className="text-right">
                   <ActionButton action={disconnectMailboxAction.bind(null, m.userId)} variant="link" confirm={`Disconnect ${m.address}? ${m.userName} will have to connect it again to read or send customer e-mail in the CRM.`}>

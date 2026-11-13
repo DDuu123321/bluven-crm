@@ -1,12 +1,17 @@
 import { timingSafeEqual } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { AppError, getConfig } from '@bluven/core';
-import { connectMailbox } from '@bluven/integrations';
+import { MailboxConnectError, connectMailbox } from '@bluven/integrations';
 import { ctxFor, getCurrentUser } from '@/lib/session';
 
 const STATE_COOKIE = 'bluven_zoho_state';
 
-const same = (a: string, b: string): boolean => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** Compared as bytes: two strings of the same length can be different lengths once encoded, and the comparison refuses those. */
+function same(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 /** Where Zoho sends the browser back to after the person has allowed, or refused, access to their mailbox. */
 export async function GET(request: Request): Promise<Response> {
@@ -30,6 +35,6 @@ export async function GET(request: Request): Promise<Response> {
     return back('connected=1');
   } catch (e) {
     if (!(e instanceof AppError)) console.error('[zoho] connecting a mailbox failed', e);
-    return back(`problem=${e instanceof AppError ? (e.code === 'conflict' ? 'taken' : 'refused') : 'failed'}`);
+    return back(`problem=${e instanceof MailboxConnectError ? e.problem : e instanceof AppError ? (e.code === 'conflict' ? 'taken' : 'refused') : 'failed'}`);
   }
 }

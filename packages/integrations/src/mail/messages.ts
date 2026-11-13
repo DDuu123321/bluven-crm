@@ -89,8 +89,19 @@ export async function sendOrderEmail(ctx: Ctx, input: SendEmailInput, deps: Mail
 
   // A message from an order goes to that order's customer. Others may be copied in, but an
   // address typed wrongly must not send one customer's quote to a stranger unnoticed.
-  const onRecord = new Set((await db.customerEmail.findMany({ where: { customerId: order.customerId }, select: { email: true } })).map((e) => e.email));
-  if (to.length > 0 && !to.some((a) => onRecord.has(a))) errors.add('to', 'At least one recipient must be an address on this customer’s record. Add the address to the customer first.');
+  // An address that only came with a website enquiry does not count until someone has confirmed it:
+  // anybody can fill in that form with another person's phone number and their own address.
+  const addresses = await db.customerEmail.findMany({ where: { customerId: order.customerId }, select: { email: true, unconfirmed: true } });
+  const onRecord = new Set(addresses.filter((e) => !e.unconfirmed).map((e) => e.email));
+  if (to.length > 0 && !to.some((a) => onRecord.has(a))) {
+    const waiting = addresses.find((e) => e.unconfirmed && to.includes(e.email));
+    errors.add(
+      'to',
+      waiting
+        ? `${waiting.email} came with a website enquiry and nobody has confirmed that it is the customer’s. Confirm it on the customer first, or write to an address that is confirmed.`
+        : 'At least one recipient must be an address on this customer’s record. Add the address to the customer first.',
+    );
+  }
 
   const ids = [...new Set(input.documentIds ?? [])];
   const documents = ids.length ? await db.document.findMany({ where: { id: { in: ids }, orderId: order.id, deletedAt: null } }) : [];
@@ -102,15 +113,15 @@ export async function sendOrderEmail(ctx: Ctx, input: SendEmailInput, deps: Mail
   if (!mailbox) throw new ValidationError('Connect your mailbox first, under your account, so the message can be sent from your own address.');
   if (mailbox.needsReconnect) throw new ValidationError('Your mailbox has to be connected again before you can send. You can do that under your account.');
 
-  let replyTo: { id: string; providerMessageId: string | null; accountId: string | null; messageIdHeader: string | null } | null = null;
+  let replyTo: { id: string; providerMessageId: string | null; providerThreadId: string | null; accountId: string | null; messageIdHeader: string | null } | null = null;
   if (input.replyToEmailId) {
-    replyTo = await db.emailMessage.findFirst({ where: { id: input.replyToEmailId, customerId: order.customerId }, select: { id: true, providerMessageId: true, accountId: true, messageIdHeader: true } });
+    replyTo = await db.emailMessage.findFirst({ where: { id: input.replyToEmailId, customerId: order.customerId }, select: { id: true, providerMessageId: true, providerThreadId: true, accountId: true, messageIdHeader: true } });
     if (!replyTo) throw new NotFoundError('The message you are answering was not found.');
   }
 
   const api = deps.apiFor ? deps.apiFor(mailbox) : mailApiFor(db, mailbox, deps);
   const html = textToHtml(body);
-  let sent: { messageId: string | null };
+  let sent: { messageId: string | null; messageIdHeader?: string | null };
   try {
     const attachments: UploadedAttachment[] = [];
     for (const doc of documents) attachments.push(await api.uploadAttachment(mailbox.providerAccountId, doc.fileName, getStorage().createReadStream(doc.storageKey)));
@@ -134,6 +145,11 @@ export async function sendOrderEmail(ctx: Ctx, input: SendEmailInput, deps: Mail
       const now = nowOf(ctx);
       const emailId = newId('eml');
       const customer = await tx.customer.findUniqueOrThrow({ where: { id: locked.customerId }, select: { firstName: true, lastName: true } });
+      // The provider's conversation: the one being answered, when it is in this mailbox; otherwise this
+      // message starts one, and the provider gives a conversation the id of its first message.
+      const answeredHere = replyTo && replyTo.accountId === mailbox.id ? (replyTo.providerThreadId ?? replyTo.providerMessageId) : null;
+      // Its Message-ID lets the customer's answer, and the copy in the sent folder, be matched to it.
+      const header = sent.messageIdHeader && !(await tx.emailMessage.findUnique({ where: { messageIdHeader: sent.messageIdHeader }, select: { id: true } })) ? sent.messageIdHeader : null;
       const activityId = await addActivity(tx, ctx, {
         customerId: locked.customerId,
         orderId: locked.id,
@@ -151,6 +167,8 @@ export async function sendOrderEmail(ctx: Ctx, input: SendEmailInput, deps: Mail
           orderId: locked.id,
           direction: 'OUT',
           providerMessageId: sent.messageId,
+          providerThreadId: answeredHere ?? sent.messageId,
+          messageIdHeader: header,
           inReplyTo: replyTo?.messageIdHeader ?? null,
           fromAddress: mailbox.address,
           fromName: actor.name,
@@ -233,14 +251,17 @@ export interface EmailView {
   orderId: string | null;
   /** The salesperson who wrote it in the CRM, when that is how it was sent. */
   sentByName: string | null;
+  /** A sender whose address is not, or not confirmed to be, the customer's. */
   unknownSender: string | null;
+  /** That address is on the customer's record, waiting for someone to confirm it. */
+  senderAwaitsConfirmation: boolean;
   attachments: EmailAttachmentView[];
 }
 
 const emailInclude = { sentBy: { select: { name: true } }, attachments: { orderBy: { createdAt: 'asc' }, include: { document: { select: { deletedAt: true, type: { select: { label: true } } } } } } } satisfies Prisma.EmailMessageInclude;
 type EmailRow = Prisma.EmailMessageGetPayload<{ include: typeof emailInclude }>;
 
-const toView = (m: EmailRow): EmailView => ({
+const toView = (m: EmailRow, unconfirmed: ReadonlySet<string> = new Set()): EmailView => ({
   id: m.id,
   direction: m.direction,
   subject: m.subject,
@@ -254,6 +275,7 @@ const toView = (m: EmailRow): EmailView => ({
   orderId: m.orderId,
   sentByName: m.sentBy?.name ?? null,
   unknownSender: m.unknownSender,
+  senderAwaitsConfirmation: !!m.unknownSender && unconfirmed.has(m.unknownSender),
   attachments: m.attachments.map((a) => ({
     id: a.id,
     fileName: a.fileName,
@@ -295,11 +317,13 @@ export interface OrderMail {
 
 export async function getOrderMail(ctx: Ctx, orderId: string): Promise<OrderMail> {
   const { staff, customerId } = await requireMailView(ctx, orderId);
-  const [emails, unplaced] = await Promise.all([
+  const [emails, unplaced, waiting] = await Promise.all([
     ctx.db.emailMessage.findMany({ where: { orderId }, orderBy: [{ sentAt: 'desc' }, { id: 'desc' }], include: emailInclude, take: 200 }),
     staff ? ctx.db.emailMessage.findMany({ where: { customerId, orderId: null }, orderBy: [{ sentAt: 'desc' }, { id: 'desc' }], include: emailInclude, take: 50 }) : Promise.resolve([]),
+    ctx.db.customerEmail.findMany({ where: { customerId, unconfirmed: true }, select: { email: true } }),
   ]);
-  return { emails: emails.map(toView), unplaced: unplaced.map(toView) };
+  const unconfirmed = new Set(waiting.map((e) => e.email));
+  return { emails: emails.map((m) => toView(m, unconfirmed)), unplaced: unplaced.map((m) => toView(m, unconfirmed)) };
 }
 
 async function loadVisibleEmail(ctx: Ctx, emailId: string): Promise<EmailRow & { bodyHtml: string | null }> {
@@ -366,7 +390,12 @@ export async function assignEmailToOrder(ctx: Ctx, input: { emailId: string; ord
     const thread = email.providerThreadId ? await tx.emailMessage.findMany({ where: { customerId: order.customerId, orderId: null, accountId: email.accountId, providerThreadId: email.providerThreadId } }) : [email];
     const moved = thread.some((m) => m.id === email.id) ? thread : [...thread, email];
     await tx.emailMessage.updateMany({ where: { id: { in: moved.map((m) => m.id) } }, data: { orderId: order.id } });
-    await tx.activity.updateMany({ where: { id: { in: moved.map((m) => m.activityId).filter((id): id is string => !!id) } }, data: { orderId: order.id } });
+    const activityIds = moved.map((m) => m.activityId).filter((id): id is string => !!id);
+    await tx.activity.updateMany({ where: { id: { in: activityIds } }, data: { orderId: order.id } });
+    // A summary written between the arrival of this mail and now does not know about it. The
+    // entries keep the time they arrived, so the summary's own mark is moved back before them.
+    const earliest = await tx.activity.findFirst({ where: { id: { in: activityIds } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
+    if (earliest) await tx.orderSummary.updateMany({ where: { orderId: order.id, coversUntil: { gte: earliest.createdAt } }, data: { coversUntil: new Date(earliest.createdAt.getTime() - 1) } });
     const { leadCreatedAt } = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { leadCreatedAt: true } });
     const firstSent = moved.filter((m) => m.direction === 'OUT' && m.sentAt >= leadCreatedAt).sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime())[0];
     if (firstSent && !order.firstContactedAt) await tx.order.update({ where: { id: order.id }, data: { firstContactedAt: firstSent.sentAt } });
@@ -392,8 +421,22 @@ export async function addSenderToCustomer(ctx: Ctx, input: { emailId: string }):
     if (email.orderId) await lockOrderForStaff(tx, ctx, email.orderId, 'E-mail');
     else if (!isManager(actor) && !(await tx.order.findFirst({ where: { customerId: email.customerId, ownerId: actor.id }, select: { id: true } }))) throw new NotFoundError('E-mail not found.');
     const address = email.unknownSender;
-    const existing = await tx.customerEmail.findMany({ where: { customerId: email.customerId }, select: { email: true } });
-    if (!existing.some((e) => e.email === address)) {
+    const existing = await tx.customerEmail.findMany({ where: { customerId: email.customerId }, select: { id: true, email: true, unconfirmed: true } });
+    const onRecord = existing.find((e) => e.email === address);
+    if (onRecord?.unconfirmed) {
+      // It came with a website enquiry; now a person says it is the customer's.
+      await tx.customerEmail.update({ where: { id: onRecord.id }, data: { unconfirmed: false } });
+      await audit(tx, ctx, {
+        action: 'customer.update',
+        entityType: 'Customer',
+        entityId: email.customerId,
+        orderId: email.orderId,
+        customerId: email.customerId,
+        summary: `Confirmed that ${address} is the customer’s address`,
+        before: { email: address, unconfirmed: true },
+        after: { email: address, unconfirmed: false },
+      });
+    } else if (!onRecord) {
       if (existing.length >= 6) throw new ValidationError('This customer already has six e-mail addresses. Remove one that is no longer used first.');
       // The same rule as when editing a customer by hand: an address on somebody else's customer is a manager's call.
       const elsewhere = await tx.customerEmail.findFirst({ where: { email: address, customerId: { not: email.customerId } }, select: { id: true } });
@@ -416,9 +459,13 @@ export async function addSenderToCustomer(ctx: Ctx, input: { emailId: string }):
 }
 
 async function attachmentForFiling(db: Db, ctx: Ctx, attachmentId: string) {
-  const attachment = await db.emailAttachment.findUnique({ where: { id: attachmentId }, include: { message: { select: { id: true, orderId: true, subject: true, sentAt: true, direction: true } } } });
+  const attachment = await db.emailAttachment.findUnique({ where: { id: attachmentId }, include: { message: { select: { id: true, orderId: true, customerId: true, subject: true, sentAt: true, direction: true } } } });
   if (!attachment || attachment.message.direction !== 'IN') throw new NotFoundError('Attachment not found.');
-  if (!attachment.message.orderId) throw new ValidationError('Place the e-mail on an order first.');
+  if (!attachment.message.orderId) {
+    // Not found rather than an explanation for someone who may not see this customer's mail at all.
+    if (!(await canSeeCustomerMail(ctx, attachment.message.customerId))) throw new NotFoundError('Attachment not found.');
+    throw new ValidationError('Place the e-mail on an order first.');
+  }
   // Not found rather than forbidden for someone who may not see the order at all.
   const order = await loadOrderState(db, attachment.message.orderId);
   if (!order || (ctx.actor.kind === 'user' && !isOrderStaff(ctx.actor, order))) throw new NotFoundError('Attachment not found.');

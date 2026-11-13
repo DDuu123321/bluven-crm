@@ -4,6 +4,7 @@ import {
   assignOrders,
   cancelOrder,
   changeDocumentType,
+  confirmCustomerEmail,
   deleteDocument,
   deleteExpiringDocuments,
   deleteQuote,
@@ -88,6 +89,15 @@ export async function updateCustomerAction(orderId: string, formData: FormData):
       phones: formData.getAll('phone').map(String),
       emails: formData.getAll('email').map(String),
     });
+  });
+}
+
+/** Someone working on the order says an address that came with a website enquiry is the customer's. */
+export async function confirmEmailAction(orderId: string, emailId: string): Promise<ActionResult> {
+  if (!validArgs(orderId, emailId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await confirmCustomerEmail(ctx, { orderId, emailId });
+    return { message: 'Confirmed.' };
   });
 }
 
