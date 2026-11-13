@@ -224,13 +224,17 @@ model Customer {
 }
 
 model CustomerEmail {
-  id         String   @id
-  customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  id          String   @id
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   /// Always stored lower-cased and trimmed.
-  email      String
-  isPrimary  Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  email       String
+  isPrimary   Boolean  @default(false)
+  /// Set when the address came with an enquiry onto a customer who already existed, so nobody at
+  /// Bluven has confirmed that it is theirs. Mail from it is shown with a warning, and it does
+  /// not count as the customer's address when writing to them.
+  unconfirmed Boolean  @default(false)
+  createdAt   DateTime @default(now())
 
   @@unique([customerId, email])
   @@index([email])
@@ -771,39 +775,54 @@ enum EmailDirection {
   OUT
 }
 
+/// Whose customers' mail is kept from a mailbox.
+enum EmailScope {
+  /// Customers the mailbox's owner works with, or worked with before.
+  OWN
+  /// Every customer in the CRM: for a mailbox several people share.
+  ALL
+}
+
 /// A salesperson's own mailbox, connected by OAuth. One per user.
 model EmailAccount {
-  id                   String    @id
-  userId               String    @unique
-  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider             String    @default("zoho")
+  id                   String     @id
+  userId               String     @unique
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider             String     @default("zoho")
   /// The mailbox's primary address, lower-cased.
   address              String
   /// Every address the mailbox answers to (primary and aliases), lower-cased.
   addresses            String[]
-  displayName          String    @default("")
+  displayName          String     @default("")
   providerAccountId    String
   /// The refresh token, encrypted. Never leaves the server.
   refreshTokenEnc      String
   accessTokenEnc       String?
   accessTokenExpiresAt DateTime?
-  connectedAt          DateTime  @default(now())
+  connectedAt          DateTime   @default(now())
   /// Nothing older than this is read from the mailbox.
   syncFrom             DateTime
   /// The folders that are read: [{ id, name, kind }] with kind "inbox", "sent" or "filed"
   /// (a folder the owner's own rules move incoming mail into).
-  folders              Json      @default("[]")
+  folders              Json       @default("[]")
   foldersCheckedAt     DateTime?
   /// Per folder id, the time of the newest message already dealt with.
-  cursors              Json      @default("{}")
+  cursors              Json       @default("{}")
   /// When the folders other than the inbox and the sent folder were last read.
   filedFoldersAt       DateTime?
   lastSyncAt           DateTime?
   lastOkAt             DateTime?
   lastError            String?
-  consecutiveFailures  Int       @default(0)
+  consecutiveFailures  Int        @default(0)
   /// The mail provider no longer accepts our token: the owner has to connect again.
-  needsReconnect       Boolean   @default(false)
+  needsReconnect       Boolean    @default(false)
+  /// The owner's own choice of how much of the mailbox the CRM keeps.
+  scope                EmailScope @default(OWN)
+  scopeChangedAt       DateTime?
+  /// Messages that could not be read: { [provider message id]: { attempts, error, subject, at } }.
+  problemMessages      Json       @default("{}")
+  /// When the owner was last told that the mailbox has not been readable for a while.
+  alertedAt            DateTime?
 
   messages EmailMessage[]
 }
@@ -852,27 +871,31 @@ model EmailMessage {
 }
 
 model EmailAttachment {
-  id            String       @id
-  messageId     String
-  message       EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  fileName      String
-  mimeType      String       @default("application/octet-stream")
-  sizeBytes     Int
+  id                   String       @id
+  messageId            String
+  message              EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  fileName             String
+  mimeType             String       @default("application/octet-stream")
+  sizeBytes            Int
   /// Where the file is kept. Null when it was not downloaded (see skippedReason).
-  storageKey    String?
-  sha256        String?
-  skippedReason String?
+  storageKey           String?
+  sha256               String?
+  skippedReason        String?
   /// The document it was filed as, or, for a message sent from the CRM, the document that was attached.
-  documentId    String?
-  document      Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  documentId           String?
+  document             Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
   /// What the assistant took the file for: the key of a document type, or "none".
-  aiKind        String?
-  aiConfidence  String?
+  aiKind               String?
+  aiConfidence         String?
   /// One line on what the file shows.
-  aiNote        String?
+  aiNote               String?
   /// Set once the file has been looked at, or decided not worth looking at.
-  aiReadAt      DateTime?
-  createdAt     DateTime     @default(now())
+  aiReadAt             DateTime?
+  /// The provider's id of the attachment, kept while fetching the file is still worth another try.
+  providerAttachmentId String?
+  /// How many times fetching the file has failed.
+  fetchAttempts        Int          @default(0)
+  createdAt            DateTime     @default(now())
 
   @@index([messageId])
   @@index([documentId])
