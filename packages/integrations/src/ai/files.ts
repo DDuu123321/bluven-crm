@@ -3,7 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { getStorage, imageForReading } from '@bluven/core';
 import type { AiInput } from './model';
 
-/** A PDF larger than this is not sent: the request as a whole may not pass 32 MB once encoded. */
+/**
+ * A PDF larger than this is not sent. The limit is our own and well inside what the service
+ * takes: it keeps the cost and the time of one request in check, and a bill or a set of photos
+ * is never this large.
+ */
 export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 /** Pictures smaller than this are logos and signature graphics, not photographs or scans. */
 export const MIN_IMAGE_BYTES = 20 * 1024;
