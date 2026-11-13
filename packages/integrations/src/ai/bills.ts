@@ -26,7 +26,7 @@ import {
   systemCtx,
   type Ctx,
 } from '@bluven/core';
-import { isReadableType, loadForModel } from './files';
+import { READABLE_TYPES, isReadableType, loadForModel } from './files';
 import { AiError, type AiModel } from './model';
 import { getAssistantSettings, runAi, type AssistantLanguage } from './runs';
 import { S, optionalDate, optionalNumber, optionalText, record } from './shape';
@@ -173,10 +173,14 @@ export function compareAddresses(billAddress: string, property: { addressLine1: 
   return 'unknown';
 }
 
-/** Bills in the folder that have not been read yet. Oldest first. */
+/**
+ * Bills in the folder that have not been read yet. Oldest first. A file of a kind that cannot
+ * be read is not among them: nothing is ever stored for it, so it would come up again every
+ * time. The order's page says of such a file that it cannot be read.
+ */
 export async function pendingBills(db: Db, now: Date, limit: number): Promise<string[]> {
   const rows = await db.document.findMany({
-    where: { type: { key: BILL_DOC_TYPE }, ...CURRENT_DOCUMENT, billReading: { is: null }, createdAt: { gte: new Date(now.getTime() - 30 * 86_400_000) } },
+    where: { type: { key: BILL_DOC_TYPE }, ...CURRENT_DOCUMENT, mimeType: { in: [...READABLE_TYPES] }, billReading: { is: null }, createdAt: { gte: new Date(now.getTime() - 30 * 86_400_000) } },
     orderBy: { createdAt: 'asc' },
     select: { id: true },
     take: limit,
