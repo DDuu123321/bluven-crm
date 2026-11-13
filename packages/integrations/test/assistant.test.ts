@@ -596,6 +596,28 @@ describe('an electricity bill', () => {
     expect((await db.order.findUniqueOrThrow({ where: { id: orderId }, include: { property: true } })).property).toMatchObject({ nmi: '', retailer: '' });
     const note = await db.notification.findFirstOrThrow({ where: { type: 'bill.address_differs' } });
     expect(note).toMatchObject({ userId: w.sam.id, emailStatus: 'NONE', title: expect.stringContaining('the electricity bill is for another address') });
+    // The salesperson may know better (a bill sent to the postal address, say): the values stay on offer.
+    expect((await getOrderBills(sam(), orderId)).readings[0]).toMatchObject({ addressMatch: 'no', missing: { nmi: true, retailer: true } });
+  });
+
+  it('whose address cannot be compared fills nothing by itself; a person takes the values over with a click', async () => {
+    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const documentId = await uploadBill(orderId);
+    // A bill that prints no supply address: nothing says it is for another house, and nothing says it is for this one.
+    model.answers.bill = { ...BILL, supplyAddress: null };
+    const reading = (await readBill(system(), { documentId }, model))!;
+    expect(reading).toMatchObject({ isBill: true, nmi: '41031234567', retailer: 'AGL', addressMatch: 'unknown', filled: [] });
+    const property = async () => (await db.order.findUniqueOrThrow({ where: { id: orderId }, include: { property: true } })).property;
+    expect(await property()).toMatchObject({ nmi: '', retailer: '', fieldSources: {} });
+    expect(await db.notification.count({ where: { type: 'bill.address_differs' } })).toBe(0);
+
+    expect((await getOrderBills(sam(), orderId)).readings[0]).toMatchObject({ addressMatch: 'unknown', missing: { nmi: true, retailer: true }, differs: { nmi: false, retailer: false } });
+    await takeBillValue(sam(), { readingId: reading.id, field: 'nmi' });
+    await takeBillValue(sam(), { readingId: reading.id, field: 'retailer' });
+    expect(await property()).toMatchObject({ nmi: '41031234567', retailer: 'AGL' });
+    expect(readFieldSources((await property()).fieldSources)).toMatchObject({ nmi: { source: 'bill', documentId }, retailer: { source: 'bill', documentId } });
+    expect((await db.auditLog.findFirstOrThrow({ where: { orderId, action: 'property.update' }, orderBy: { at: 'desc' } })).actorId).toBe(w.sam.id);
+    expect((await getOrderBills(sam(), orderId)).readings[0]!.missing).toEqual({ nmi: false, retailer: false });
   });
 
   it('never overwrites what is on the property; a person can take the bill’s value over', async () => {

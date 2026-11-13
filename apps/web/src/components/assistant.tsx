@@ -224,16 +224,20 @@ export function BillsCard({ bills, available, read, takeValue }: { bills: OrderB
                 <BillFacts r={r} />
                 {r.addressMatch === 'no' && (
                   <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-200 ring-inset">
-                    The bill is for {r.supplyAddress}, which is not the address of this order. Nothing was taken over from it.
+                    The bill is for {r.supplyAddress}, which is not the address of this order. Nothing was filled in from it automatically.
                   </p>
                 )}
+                {r.addressMatch === 'unknown' && (r.missing.nmi || r.missing.retailer) && (
+                  <p className="text-xs text-slate-500">The address on this bill could not be compared with the address of this order, so nothing was filled in from it automatically.</p>
+                )}
                 {r.filled.length > 0 && <p className="text-xs text-slate-500">Filled in on the property from this bill: {r.filled.map((f) => (f === 'nmi' ? 'NMI' : f)).join(', ')}.</p>}
+                {/* Whatever the comparison of the addresses said, a person can take a value over: when the property has another one, and when it has none. */}
                 {(['nmi', 'retailer'] as const).map(
                   (field) =>
-                    r.differs[field] && (
+                    (r.differs[field] || r.missing[field]) && (
                       <div key={field} className="flex flex-wrap items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200 ring-inset">
                         <span>
-                          The property has another {field === 'nmi' ? 'NMI' : 'retailer'} than this bill ({r[field]}).
+                          {r.differs[field] ? `The property has another ${field === 'nmi' ? 'NMI' : 'retailer'} than this bill (${r[field]}).` : `The property has no ${field === 'nmi' ? 'NMI' : 'retailer'} yet. This bill shows ${r[field]}.`}
                         </span>
                         {takeValue && (
                           <ActionButton action={takeValue(r.id, field)} size="sm">
