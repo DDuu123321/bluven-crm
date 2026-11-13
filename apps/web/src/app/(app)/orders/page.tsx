@@ -2,10 +2,12 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import Form from 'next/form';
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
 import {
   ORDER_STAGES,
   ORDER_VIEWS,
   STAGE_LABEL,
+  can,
   formatAddress,
   fullName,
   getSettings,
@@ -36,6 +38,8 @@ const VIEW_LABEL: Record<OrderListView, string> = {
 
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { user, ctx } = await requireSession();
+  // Finance and operations have lists of their own; this one is for the people who sell.
+  if (!can(user, 'orders.work')) notFound();
   const sp = await searchParams;
   const manager = isManager(user);
   const view = (ORDER_VIEWS as readonly string[]).includes(one(sp.view) ?? '') ? (one(sp.view) as OrderListView) : 'active';
