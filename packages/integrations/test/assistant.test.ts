@@ -205,6 +205,31 @@ describe('the request to the model', () => {
     await expect(prose.client.run(request)).rejects.toMatchObject({ failure: 'unreadable' });
   });
 
+  it('adds up what every attempt used when a fallback took over, under the model that answered', async () => {
+    // The first model declined before writing anything. The figures at the top are those of the fallback's attempt alone.
+    const usage = {
+      input_tokens: 412,
+      output_tokens: 264,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      iterations: [
+        { type: 'message', model: 'claude-opus-5-5', input_tokens: 535, output_tokens: 0, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
+        { type: 'fallback_message', model: 'claude-opus-5', input_tokens: 412, output_tokens: 264, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      ],
+    };
+    const handover = { type: 'fallback', from: { model: 'claude-opus-5-5' }, to: { model: 'claude-opus-5' }, trigger: { type: 'refusal', category: 'cyber' } };
+    const fellBack = wired([() => reply(message('', { model: 'claude-opus-5', content: [handover, { type: 'text', text: '{"ok":true}' }], usage }))]);
+    expect(await fellBack.client.run(request)).toEqual({ output: { ok: true }, usage: { inputTokens: 947, outputTokens: 264, cacheReadTokens: 100, cacheWriteTokens: 20 }, model: 'claude-opus-5' });
+
+    // When the fallback declined as well, what both attempts used is on the failure.
+    const allDeclined = wired([() => reply(message('', { model: 'claude-opus-5', content: [handover], stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'cyber', explanation: 'no' }, usage }))]);
+    await expect(allDeclined.client.run(request)).rejects.toMatchObject({ failure: 'refused', usage: { inputTokens: 947, outputTokens: 264 }, servedBy: 'claude-opus-5' });
+
+    // A list without attempts says nothing: the figures at the top stand.
+    const plain = wired([() => reply(message('{"ok":true}', { usage: { ...usage, iterations: [] } }))]);
+    expect((await plain.client.run(request)).usage).toEqual({ inputTokens: 412, outputTokens: 264, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+
   it('tells a wrong key from a busy service from a request the service will not take', async () => {
     const error = (type: string, text: string) => ({ type: 'error', error: { type, message: text } });
     const badKey = wired([() => reply(error('authentication_error', 'invalid x-api-key'), 401)]);

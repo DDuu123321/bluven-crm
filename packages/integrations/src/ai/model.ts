@@ -110,6 +110,25 @@ function toBlock(input: AiInput): Anthropic.Beta.BetaContentBlockParam {
   }
 }
 
+/**
+ * What one request used. When the first model declined and a fallback took over, the service
+ * lists every attempt on its own and its top-level figures cover the last one only, so the
+ * attempts are added up: the bill has them all. The run is recorded under the model that
+ * answered, which means that the tokens of a declined first attempt are counted under that
+ * model too. An attempt that declined before writing anything is listed whether or not it is
+ * charged for, so the sum can come out a little high, never low.
+ */
+function usageOf(usage: Anthropic.Beta.BetaUsage): AiUsage {
+  const attempts: Pick<Anthropic.Beta.BetaUsage, 'input_tokens' | 'output_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens'>[] = usage.iterations?.length ? usage.iterations : [usage];
+  const sum = (tokens: (attempt: (typeof attempts)[number]) => number | null): number => attempts.reduce((total, attempt) => total + (tokens(attempt) ?? 0), 0);
+  return {
+    inputTokens: sum((a) => a.input_tokens),
+    outputTokens: sum((a) => a.output_tokens),
+    cacheReadTokens: sum((a) => a.cache_read_input_tokens),
+    cacheWriteTokens: sum((a) => a.cache_creation_input_tokens),
+  };
+}
+
 export interface AnthropicSettings {
   apiKey: string;
   model: string;
@@ -156,12 +175,7 @@ export class AnthropicModel implements AiModel {
     } catch (e) {
       throw translate(e);
     }
-    const usage: AiUsage = {
-      inputTokens: message.usage.input_tokens,
-      outputTokens: message.usage.output_tokens,
-      cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
-      cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
-    };
+    const usage = usageOf(message.usage);
     if (message.stop_reason === 'refusal') throw new AiError(AI_MESSAGES.refused, 'refused', `Declined (${message.stop_details?.category ?? 'no category given'})`, usage, message.model);
     if (message.stop_reason === 'max_tokens') throw new AiError(AI_MESSAGES.unreadable, 'unreadable', 'The answer was cut off at the length limit.', usage, message.model);
     const text = message.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
