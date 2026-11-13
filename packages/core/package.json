@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "demo": "tsx src/demo.ts"
   },
   "dependencies": {
     "@bluven/db": "workspace:*",

@@ -49,6 +49,44 @@ Things worth knowing before changing the code:
 - **Uploaded files** go to `STORAGE_DIR` on disk and are only served through `/api/documents/…`
   after an access check. Each view and download is logged.
 
+## A look on your own computer
+
+To see the CRM with sample accounts and orders, without setting anything up for real, install
+[Docker Desktop](https://www.docker.com/products/docker-desktop/), start it, and run this in the
+folder with the code:
+
+```bash
+docker compose -f docker-compose.local.yml up --build
+```
+
+The first start builds the application and takes several minutes. Then open
+<http://localhost:3000>. Every demo account has the password `Bluven-demo-1`.
+
+| Sign in as | Role | What you see first |
+|---|---|---|
+| `manager@bluven.demo` | Manager | The dashboard, every order, the unassigned leads |
+| `sam@bluven.demo`, `alex@bluven.demo` | Sales | Their own orders, tasks and reminders |
+| `finance@bluven.demo` | Finance | The deposit waiting to be confirmed |
+| `ops@bluven.demo` | Operations | The order pushed to them |
+| `admin@bluven.demo` | Admin | Users, rules and the integrations |
+
+The sample data is thirteen orders at different points of the sale: two unassigned leads, orders
+that are new, contacted, quoted (one of them quiet for six days, so the idle reminder shows),
+signed, waiting for finance, ready to push, with operations and handed over, and one each lost and
+on hold. Customer e-mail, the AI assistant, Pylon and notification e-mails are not connected in
+the demo; their pages say so.
+
+Stop it with Ctrl+C. `docker compose -f docker-compose.local.yml down -v` throws the demo
+database away, so the next start begins with fresh sample data. If port 3000 is taken, put
+`CRM_PORT=3001` in front of the command (PowerShell: `$env:CRM_PORT=3001` on a line before it).
+
+Without Docker, on a machine that has Node.js and PostgreSQL: follow *Development* below and run
+`DEMO_DATA=1 pnpm db:demo` in place of `pnpm db:seed` (PowerShell: `$env:DEMO_DATA=1`, then
+`pnpm db:demo`). It only fills a database that has no users and no orders yet.
+
+This is for looking around, not for real use: plain HTTP, and accounts whose password is printed
+above. *Production* below describes the real thing.
+
 ## Requirements
 
 - Node.js 22 or newer and pnpm 10 (`corepack enable`)
