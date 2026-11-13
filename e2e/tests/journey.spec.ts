@@ -187,6 +187,8 @@ test('operations cannot see the order before it is pushed', async ({ browser }) 
   await expect(page.getByText(orderNo)).toHaveCount(0);
   const opsPage = await page.goto(orderUrl.replace('/orders/', '/ops/orders/'));
   expect(opsPage?.status()).toBe(404);
+  // The salespeople's list is not theirs either, and says so the same way rather than failing.
+  expect((await page.goto('/orders'))?.status()).toBe(404);
   await context.close();
 });
 
