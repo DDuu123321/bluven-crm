@@ -1,5 +1,5 @@
 // Background jobs run by the worker. Each is idempotent and safe to run as often as you like.
-import { Prisma, type Db } from '@bluven/db';
+import { openConnection, type Db } from '@bluven/db';
 import { inTx, nowOf, systemCtx, type Ctx } from '../context';
 import { getConfig } from '../config';
 import { evaluateIdle, idleDays, isAutoReturnStage, isIdleTrackedStage, ORDER_STAGES, todayDateOnly } from '../domain';
@@ -13,18 +13,31 @@ import { getSettings } from './settings';
 import { resumeOrderInTx } from './sidestate';
 
 /**
- * Runs `fn` unless another worker instance already holds the job's lock. Advisory locks are
- * released when the transaction that took them ends, so a crashed worker never blocks the job.
+ * Runs `fn` unless another worker instance already holds the job's lock, and returns null then.
+ *
+ * The lock is held by a connection of its own, opened for this run and closed after it. It is not
+ * taken from the pool, so the pool is all there for the job's own queries however many jobs run
+ * at once. And it is a lock of the connection, not of a transaction: it lasts for as long as the
+ * job takes, with no time limit that could end it while the job is still going. A worker that
+ * crashes loses its connections, and the database releases the lock with them.
  */
 export async function withJobLock<T>(db: Db, lockKey: number, fn: () => Promise<T>): Promise<T | null> {
-  return db.$transaction(
-    async (tx) => {
-      const rows = await tx.$queryRaw<{ locked: boolean }[]>(Prisma.sql`SELECT pg_try_advisory_xact_lock(${lockKey}::bigint) AS locked`);
-      if (!rows[0]?.locked) return null;
-      return fn();
-    },
-    { maxWait: 5_000, timeout: 10 * 60_000 },
-  );
+  const connection = await openConnection(db);
+  // Should this connection drop, the lock goes with it. The job is not stopped for that: every
+  // job is safe to run twice. Without a listener the error would take the whole worker down.
+  connection.on('error', (e) => console.error(`[jobs] the connection holding job lock ${lockKey} was lost`, e.message));
+  try {
+    const taken = await connection.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1::bigint) AS locked', [lockKey]);
+    if (!taken.rows[0]?.locked) return null;
+    try {
+      return await fn();
+    } finally {
+      // Free from this moment, not from whenever the database notices that the connection is gone.
+      await connection.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey]).catch(() => undefined);
+    }
+  } finally {
+    await connection.end().catch(() => undefined);
+  }
 }
 
 export interface IdleRunResult {
