@@ -176,8 +176,23 @@ export class AnthropicModel implements AiModel {
       throw translate(e);
     }
     const usage = usageOf(message.usage);
-    if (message.stop_reason === 'refusal') throw new AiError(AI_MESSAGES.refused, 'refused', `Declined (${message.stop_details?.category ?? 'no category given'})`, usage, message.model);
-    if (message.stop_reason === 'max_tokens') throw new AiError(AI_MESSAGES.unreadable, 'unreadable', 'The answer was cut off at the length limit.', usage, message.model);
+    // Only an answer the model finished by itself is read. Every other way of stopping leaves no answer, or half of one.
+    switch (message.stop_reason) {
+      case 'end_turn':
+      // The service always says why it stopped. Should a gateway in front of it leave the reason out, the answer is judged by whether it can be read.
+      case null:
+        break;
+      case 'refusal':
+        throw new AiError(AI_MESSAGES.refused, 'refused', `Declined (${message.stop_details?.category ?? 'no category given'})`, usage, message.model);
+      case 'max_tokens':
+        throw new AiError(AI_MESSAGES.unreadable, 'unreadable', 'The answer was cut off at the length limit.', usage, message.model);
+      case 'model_context_window_exceeded':
+        // Trying again would end the same way: this is about the material, like a file the service will not take.
+        throw new AiError(AI_MESSAGES.rejected, 'rejected', 'The material is longer than the model can read at once.', usage, message.model);
+      default:
+        // Stopping for a tool, a pause or a stop sequence: nothing here asks for any of them.
+        throw new AiError(AI_MESSAGES.unreadable, 'unreadable', `The answer stopped for a reason that was not expected here: ${message.stop_reason}.`, usage, message.model);
+    }
     const text = message.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
     let output: unknown;
     try {
