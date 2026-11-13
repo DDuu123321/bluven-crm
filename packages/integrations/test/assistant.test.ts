@@ -205,6 +205,14 @@ describe('the request to the model', () => {
     await expect(prose.client.run(request)).rejects.toMatchObject({ failure: 'unreadable' });
   });
 
+  it('reads only an answer the model finished: material too long for it, or any other way of stopping, is a failure that says why', async () => {
+    const tooLong = wired([() => reply(message('{"folder":"elec', { stop_reason: 'model_context_window_exceeded' }))]);
+    await expect(tooLong.client.run(request)).rejects.toMatchObject({ failure: 'rejected', retryable: false, detail: 'The material is longer than the model can read at once.', usage: { inputTokens: 1200 } });
+    // What was written so far may well be valid JSON; it is still not the answer.
+    const paused = wired([() => reply(message('{"folder":"electricity_bill"}', { stop_reason: 'pause_turn' }))]);
+    await expect(paused.client.run(request)).rejects.toMatchObject({ failure: 'unreadable', retryable: true, detail: expect.stringContaining('pause_turn') });
+  });
+
   it('adds up what every attempt used when a fallback took over, under the model that answered', async () => {
     // The first model declined before writing anything. The figures at the top are those of the fallback's attempt alone.
     const usage = {
