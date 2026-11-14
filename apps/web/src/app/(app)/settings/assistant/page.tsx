@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { can, getConfig, isManager } from '@bluven/core';
-import { AI_KIND_LABEL, ASSISTANT_LANGUAGES, assistantConfigured, getAssistantSettings, getAssistantUsage, recentSetupProblem } from '@bluven/integrations';
+import { AI_KIND_LABEL, ASSISTANT_LANGUAGES, AUTOMATIC_REQUESTS_PER_ORDER_PER_DAY, assistantConfigured, getAssistantSettings, getAssistantUsage, servicePause } from '@bluven/integrations';
 import { ActionForm, FieldError, FormMessage, SubmitButton } from '@/components/client';
 import { Alert, Badge, Card, CardBody, CardHeader, Checkbox, Dl, EmptyState, Input, Label, PageHeader, Select, Table, Td } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
@@ -28,7 +28,7 @@ export default async function AssistantSettingsPage() {
   const config = getConfig();
   const configured = assistantConfigured();
   const canEdit = can(user, 'admin.settings');
-  const [settings, usage, problem] = await Promise.all([getAssistantSettings(ctx.db), getAssistantUsage(ctx, 30), recentSetupProblem(ctx.db, new Date())]);
+  const [settings, usage, pause] = await Promise.all([getAssistantSettings(ctx.db), getAssistantUsage(ctx, 30), servicePause(ctx.db, new Date())]);
 
   return (
     <>
@@ -42,9 +42,14 @@ export default async function AssistantSettingsPage() {
             Set ANTHROPIC_API_KEY in the server environment and restart the web and worker processes. Until then the buttons for it do not appear and everything else works as before.
           </Alert>
         )}
-        {configured && problem && (
+        {configured && pause?.reason === 'setup' && (
           <Alert tone="red" title="The assistant is not working">
-            The service did not accept the key or the account: {problem}. Automatic work is paused and tried again every quarter of an hour.
+            The service did not accept the key or the account: {pause.detail}. Automatic work is paused and tried again every quarter of an hour.
+          </Alert>
+        )}
+        {configured && pause?.reason === 'unavailable' && (
+          <Alert tone="amber" title="The service could not be reached a moment ago">
+            {pause.detail}. Automatic work waits a few minutes and then carries on; nothing is lost. The buttons still work if the service does.
           </Alert>
         )}
       </div>
@@ -92,7 +97,7 @@ export default async function AssistantSettingsPage() {
                   <div>
                     <Label htmlFor="dailyAutomaticLimit">Automatic requests in 24 hours, at most</Label>
                     <Input id="dailyAutomaticLimit" name="dailyAutomaticLimit" inputMode="numeric" defaultValue={settings.dailyAutomaticLimit} className="w-28" />
-                    <p className="mt-1 text-xs text-slate-500">A ceiling on what it may spend unattended.</p>
+                    <p className="mt-1 text-xs text-slate-500">A ceiling on what it may spend unattended. Of these, one order gets at most {AUTOMATIC_REQUESTS_PER_ORDER_PER_DAY} a day, so that a customer who sends a great many files does not hold up everyone else’s orders.</p>
                     <FieldError name="dailyAutomaticLimit" />
                   </div>
                 </div>

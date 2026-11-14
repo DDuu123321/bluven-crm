@@ -29,7 +29,7 @@ import {
 import { quotedLine } from './context';
 import { READABLE_TYPES, isReadableType, loadForModel } from './files';
 import { AiError, type AiModel } from './model';
-import { getAssistantSettings, runAi, type AssistantLanguage } from './runs';
+import { getAssistantSettings, rejectionSettles, runAi, type AssistantLanguage } from './runs';
 import { S, optionalDate, optionalNumber, optionalText, record } from './shape';
 import { LANGUAGE_NAME } from './summary';
 
@@ -181,14 +181,13 @@ export function compareAddresses(billAddress: string, property: { addressLine1: 
  * be read is not among them: nothing is ever stored for it, so it would come up again every
  * time. The order's page says of such a file that it cannot be read.
  */
-export async function pendingBills(db: Db, now: Date, limit: number): Promise<string[]> {
-  const rows = await db.document.findMany({
+export async function pendingBills(db: Db, now: Date, limit: number): Promise<{ id: string; orderId: string }[]> {
+  return db.document.findMany({
     where: { type: { key: BILL_DOC_TYPE }, ...CURRENT_DOCUMENT, mimeType: { in: [...READABLE_TYPES] }, billReading: { is: null }, createdAt: { gte: new Date(now.getTime() - 30 * 86_400_000) } },
-    orderBy: { createdAt: 'asc' },
-    select: { id: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, orderId: true },
     take: limit,
   });
-  return rows.map((r) => r.id);
 }
 
 function describeReading(r: BillFields): string {
@@ -293,8 +292,9 @@ export async function readBill(ctx: Ctx, input: { documentId: string; again?: bo
     );
     return await save(value, servedBy);
   } catch (e) {
-    // A file the model will not or cannot open is recorded as such, so the background process leaves it alone.
-    if (ctx.actor.kind !== 'user' && e instanceof AiError && (e.failure === 'rejected' || e.failure === 'refused')) {
+    // A file the model will not open is recorded as such, so the background process leaves it
+    // alone. One the service would not take is recorded only once that is known to be about the file.
+    if (ctx.actor.kind !== 'user' && e instanceof AiError && (e.failure === 'refused' || (e.failure === 'rejected' && (await rejectionSettles(ctx.db, 'bill', doc.id))))) {
       return save({ ...NOT_A_BILL, notes: 'The assistant could not read this file.' }, model.name);
     }
     throw e;

@@ -56,7 +56,7 @@ export function storedBrief(value: unknown): HandoffBrief | null {
 export async function pendingBriefs(db: Db, now: Date, limit: number): Promise<{ id: string; orderId: string }[]> {
   return db.handoffPackage.findMany({
     where: { decision: 'PENDING', briefAt: null, pushedAt: { gte: new Date(now.getTime() - 14 * 86_400_000) } },
-    orderBy: { pushedAt: 'asc' },
+    orderBy: [{ pushedAt: 'asc' }, { id: 'asc' }],
     select: { id: true, orderId: true },
     take: limit,
   });

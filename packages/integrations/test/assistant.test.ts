@@ -118,6 +118,7 @@ class FakeModel implements AiModel {
 }
 
 const sam = (): Ctx => as(w.sam, w.clock);
+const idsOf = async (waiting: Promise<{ id: string }[]>): Promise<string[]> => (await waiting).map((item) => item.id);
 const system = (): Ctx => systemCtx(db, 'Assistant', w.clock.now);
 
 let mailSeq = 0;
@@ -569,7 +570,7 @@ describe('what a customer attached', () => {
   it('is looked at and a folder is suggested; the file is still filed by a person', async () => {
     const { orderId } = await orderAt(w, 'OPENED');
     const { attachmentIds } = await customerMail(orderId, { subject: 'My bill', attachments: [{ name: 'scan0001.pdf', data: pdf('bill scan'), mimeType: 'application/pdf' }] });
-    expect(await pendingAttachments(db, w.clock.now(), 10)).toEqual(attachmentIds);
+    expect(await idsOf(pendingAttachments(db, w.clock.now(), 10))).toEqual(attachmentIds);
 
     expect(await readAttachment(system(), attachmentIds[0]!, model)).toBe('read');
     const request = model.of('attachment')[0]!;
@@ -585,7 +586,7 @@ describe('what a customer attached', () => {
 
     const mail = await getOrderMail(sam(), orderId);
     expect(mail.emails[0]!.attachments[0]).toMatchObject({ suggestedKind: 'electricity_bill', suggestedConfidence: 'high', suggestedNote: 'AGL electricity bill', documentId: null });
-    expect(await pendingAttachments(db, w.clock.now(), 10)).toEqual([]);
+    expect(await idsOf(pendingAttachments(db, w.clock.now(), 10))).toEqual([]);
     expect(await readAttachment(system(), attachmentIds[0]!, model)).toBe('skipped');
     expect(model.requests).toHaveLength(1);
     expect(await db.aiRun.findFirstOrThrow({ where: { kind: 'attachment' } })).toMatchObject({ userId: null, orderId, subjectId: attachmentIds[0] });
@@ -601,7 +602,7 @@ describe('what a customer attached', () => {
       ],
     });
     const unplaced = await customerMail(orderId, { placed: false, attachments: [{ name: 'later.pdf', data: pdf('later'), mimeType: 'application/pdf' }] });
-    expect(await pendingAttachments(db, w.clock.now(), 10)).toEqual(attachmentIds);
+    expect(await idsOf(pendingAttachments(db, w.clock.now(), 10))).toEqual(attachmentIds);
     expect(unplaced.attachmentIds).toHaveLength(1);
 
     expect(await readAttachment(system(), attachmentIds[0]!, model)).toBe('skipped');
@@ -620,39 +621,95 @@ describe('what a customer attached', () => {
     ]);
     // Mail older than a month is history.
     w.clock.advanceDays(31);
-    expect(await pendingAttachments(db, w.clock.now(), 10)).toEqual([]);
+    expect(await idsOf(pendingAttachments(db, w.clock.now(), 10))).toEqual([]);
   });
 
-  it('is tried again later when the service is down, with longer and longer waits, and left alone when the file cannot be read at all', async () => {
+  it('waits longer after each failure, and keeps what the service did apart from what the file did', async () => {
+    const { orderId } = await orderAt(w, 'OPENED');
+    const { attachmentIds } = await customerMail(orderId, { attachments: ['a', 'b', 'c'].map((name) => ({ name: `${name}.pdf`, data: pdf(name), mimeType: 'application/pdf' })) });
+    const [a, b, c] = attachmentIds as [string, string, string];
+    const due = (id: string) => mayAttempt(db, 'attachment', id, w.clock.now());
+    const fail = async (id: string) => expect(readAttachment(system(), id, model)).rejects.toBeInstanceOf(AiError);
+
+    // The answer cannot be used: that is about this file. Waits of 10, 30 and 90 minutes, and after the fourth in a day a rest.
+    model.fail.attachment = new AiError('The assistant’s answer could not be used.', 'unreadable', 'not the shape that was asked for');
+    await fail(a);
+    expect((await db.emailAttachment.findUniqueOrThrow({ where: { id: a } })).aiReadAt).toBeNull();
+    expect([await due(a), await due(b)]).toEqual([false, true]);
+    w.clock.advanceMinutes(10);
+    expect(await due(a)).toBe(true);
+    await fail(a);
+    w.clock.advanceMinutes(29);
+    expect(await due(a)).toBe(false);
+    w.clock.advanceMinutes(1);
+    expect(await due(a)).toBe(true);
+    await fail(a);
+    w.clock.advanceMinutes(90);
+    await fail(a);
+    w.clock.advanceMinutes(600);
+    expect(await due(a)).toBe(false);
+    w.clock.advanceDays(1);
+    expect(await due(a)).toBe(true);
+
+    // The service could not be reached: that says little about the file. The attempts are spaced
+    // out by 10 and 30 minutes and then an hour each, and they do not use up the file's four chances.
+    model.fail.attachment = new AiError('The assistant could not be reached just now.', 'unavailable', '529 overloaded');
+    const tried: number[] = [];
+    for (let minute = 0; minute <= 400; minute += 10) {
+      if (await due(b)) {
+        await fail(b);
+        tried.push(minute);
+      }
+      w.clock.advanceMinutes(10);
+    }
+    // Eight failures within a day, and it rests like the other.
+    expect(tried).toEqual([0, 10, 40, 100, 160, 220, 280, 340]);
+    w.clock.advanceMinutes(600);
+    expect(await due(b)).toBe(false);
+    w.clock.advanceDays(1);
+    expect(await due(b)).toBe(true);
+
+    // A key that is not accepted is nobody's file's fault and is never held against one.
+    model.fail.attachment = new AiError('The assistant is not working.', 'setup', 'invalid x-api-key');
+    for (let i = 0; i < 6; i++) await fail(c);
+    expect(await due(c)).toBe(true);
+  });
+
+  it('is not written off because the service would not take one request', async () => {
     const { orderId } = await orderAt(w, 'OPENED');
     const { attachmentIds } = await customerMail(orderId, { attachments: [{ name: 'a.pdf', data: pdf('a'), mimeType: 'application/pdf' }, { name: 'b.pdf', data: pdf('b'), mimeType: 'application/pdf' }] });
     const [a, b] = attachmentIds as [string, string];
-    model.fail.attachment = new AiError('The assistant could not be reached just now.', 'unavailable', '529 overloaded');
+    const read = (id: string) => db.emailAttachment.findUniqueOrThrow({ where: { id } }).then((row) => row.aiReadAt);
+    const rejected = new AiError('The assistant could not work with this material.', 'rejected', '400 invalid_request_error');
 
-    await expect(readAttachment(system(), a, model)).rejects.toThrow('could not be reached');
-    expect((await db.emailAttachment.findUniqueOrThrow({ where: { id: a } })).aiReadAt).toBeNull();
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(false);
-    expect(await mayAttempt(db, 'attachment', b, w.clock.now())).toBe(true);
-    w.clock.advanceMinutes(10);
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(true);
-    await expect(readAttachment(system(), a, model)).rejects.toThrow();
-    w.clock.advanceMinutes(29);
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(false);
-    w.clock.advanceMinutes(1);
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(true);
-    await expect(readAttachment(system(), a, model)).rejects.toThrow();
+    // The account has reached the spend limit its owner set: the service turns everything away,
+    // hour after hour. Nothing is given up on, however often it is tried.
+    model.fail.attachment = rejected;
+    for (const minutes of [0, 10, 30]) {
+      w.clock.advanceMinutes(minutes);
+      for (const id of [a, b]) await expect(readAttachment(system(), id, model)).rejects.toMatchObject({ failure: 'rejected' });
+    }
+    expect([await read(a), await read(b)]).toEqual([null, null]);
+
+    // The limit is raised and requests go through again. A file that is turned away now, as it
+    // was before, really is one the service cannot open: asking again would only cost money.
     w.clock.advanceMinutes(90);
-    await expect(readAttachment(system(), a, model)).rejects.toThrow();
-    // Four failures in a day: it rests until the day is over.
-    w.clock.advanceMinutes(600);
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(false);
-    w.clock.advanceDays(1);
-    expect(await mayAttempt(db, 'attachment', a, w.clock.now())).toBe(true);
-
-    // A file the model cannot open is settled at once.
-    model.fail.attachment = new AiError('The assistant could not work with this material.', 'rejected', 'PDF could not be processed');
+    await summariseOrder(sam(), { orderId }, model);
+    w.clock.advanceMinutes(1);
+    expect(await readAttachment(system(), a, model)).toBe('read');
+    expect(await db.emailAttachment.findUniqueOrThrow({ where: { id: a } })).toMatchObject({ aiKind: null, aiReadAt: w.clock.now() });
+    // The other one can be opened after all.
+    model.fail.attachment = undefined;
     expect(await readAttachment(system(), b, model)).toBe('read');
-    expect(await db.emailAttachment.findUniqueOrThrow({ where: { id: b } })).toMatchObject({ aiKind: null, aiReadAt: w.clock.now() });
+    expect((await db.emailAttachment.findUniqueOrThrow({ where: { id: b } })).aiKind).toBe('electricity_bill');
+  });
+
+  it('that the model declines to look at is settled at once', async () => {
+    const { orderId } = await orderAt(w, 'OPENED');
+    const { attachmentIds } = await customerMail(orderId, { attachments: [{ name: 'a.pdf', data: pdf('a'), mimeType: 'application/pdf' }] });
+    model.fail.attachment = new AiError('The assistant declined to help with this.', 'refused', 'refusal');
+    expect(await readAttachment(system(), attachmentIds[0]!, model)).toBe('read');
+    expect(await db.emailAttachment.findUniqueOrThrow({ where: { id: attachmentIds[0]! } })).toMatchObject({ aiKind: null, aiReadAt: w.clock.now() });
   });
 });
 
@@ -660,7 +717,7 @@ describe('an electricity bill', () => {
   it('is read, kept with its file, and fills the meter number and retailer that were still empty', async () => {
     const { orderId } = await orderAt(w, 'OPENED');
     const documentId = await uploadBill(orderId);
-    expect(await pendingBills(db, w.clock.now(), 10)).toEqual([documentId]);
+    expect(await idsOf(pendingBills(db, w.clock.now(), 10))).toEqual([documentId]);
 
     const reading = (await readBill(system(), { documentId }, model))!;
     expect(reading).toMatchObject({ isBill: true, retailer: 'AGL', nmi: '41031234567', usageKwh: 1656, amountCents: 61_240, tariff: 'Single rate', addressMatch: 'yes', filled: ['nmi', 'retailer'] });
@@ -681,7 +738,7 @@ describe('an electricity bill', () => {
     const bills = await getOrderBills(sam(), orderId);
     expect(bills.unread).toEqual([]);
     expect(bills.readings[0]).toMatchObject({ fileName: 'AGL bill.pdf', dailyKwh: 18, differs: { nmi: false, retailer: false } });
-    expect(await pendingBills(db, w.clock.now(), 10)).toEqual([]);
+    expect(await idsOf(pendingBills(db, w.clock.now(), 10))).toEqual([]);
     // The summary and the brief are told what the bill says.
     expect((await buildOrderContext(db, orderId)).text).toContain('From the file <<<AGL bill.pdf>>>: retailer <<<AGL>>>; NMI <<<41031234567>>>; billing period 1 Aug 2026 to 31 Oct 2026; 1656 kWh used in the period; 18 kWh a day on average');
     // Read once: asking again without saying so costs nothing.
@@ -774,7 +831,7 @@ describe('an electricity bill', () => {
     const typeId = (await docType('electricity_bill')).id;
     for (const fileName of ['bill.docx', 'bill-2.docx']) await uploadDocument(sam(), { orderId, typeId, fileName, body: stream(Buffer.from(`PK ${fileName}`)) });
     const documentId = await uploadBill(orderId);
-    expect(await pendingBills(db, w.clock.now(), 10)).toEqual([documentId]);
+    expect(await idsOf(pendingBills(db, w.clock.now(), 10))).toEqual([documentId]);
 
     // A round reads two bills at most. The two files it cannot read take neither place, and are not counted as read.
     expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 1, failed: 0 });
@@ -909,19 +966,17 @@ describe('what the assistant does by itself', () => {
     expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 1, allowanceUsedUp: false });
   });
 
-  it('stops the round when the key is wrong, and does not let one failure stop the rest', async () => {
+  it('does not let one item’s failure stop the rest', async () => {
     await busyOrder();
     w.clock.advanceMinutes(3);
-    model.fail.attachment = new AiError('The assistant could not be reached just now.', 'unavailable', '529');
-    let work = (await runAssistantWork(system(), model))!;
-    expect(work).toMatchObject({ briefs: 1, attachments: 0, bills: 1, summaries: 1, failed: 1, setupProblem: null });
+    model.fail.attachment = new AiError('The assistant’s answer could not be used.', 'unreadable', 'not the shape that was asked for');
+    expect(await runAssistantWork(system(), model)).toMatchObject({ briefs: 1, attachments: 0, bills: 1, summaries: 1, failed: 1, setupProblem: null, serviceDown: null });
+  });
 
-    await resetDb();
-    w = await makeWorld();
-    model = new FakeModel();
+  it('stops the round when the key is wrong, and waits for it to be fixed', async () => {
     await busyOrder();
     model.fail.brief = new AiError('The assistant is not working.', 'setup', 'invalid x-api-key');
-    work = (await runAssistantWork(system(), model))!;
+    let work = (await runAssistantWork(system(), model))!;
     expect(work).toMatchObject({ briefs: 0, attachments: 0, bills: 0, summaries: 0, failed: 1, setupProblem: 'invalid x-api-key' });
     expect(model.requests).toHaveLength(1);
     expect(await db.aiRun.findFirstOrThrow({ where: { kind: 'brief' } })).toMatchObject({ status: 'FAILED', failure: 'setup' });
@@ -929,10 +984,138 @@ describe('what the assistant does by itself', () => {
     w.clock.advanceMinutes(5);
     expect(await runAssistantWork(system(), model)).toMatchObject({ failed: 0, setupProblem: 'invalid x-api-key' });
     expect(model.requests).toHaveLength(1);
-    // Then it tries again, and once the key works everything is caught up on.
-    w.clock.advanceMinutes(11);
+    // The key stays wrong all morning. One request every quarter of an hour finds that out, and
+    // none of them is held against the brief that happened to be first in line.
+    for (let i = 0; i < 12; i++) {
+      w.clock.advanceMinutes(16);
+      work = (await runAssistantWork(system(), model))!;
+      expect(work).toMatchObject({ failed: 1, briefs: 0 });
+    }
+    expect(model.requests).toHaveLength(13);
+    // Once the key works everything is caught up on in the next round.
+    w.clock.advanceMinutes(16);
     model.fail.brief = undefined;
     expect(await runAssistantWork(system(), model)).toMatchObject({ briefs: 1, attachments: 1, bills: 1, summaries: 1, setupProblem: null });
+  });
+
+  it('stops the round when the service cannot be reached, and holds that against no item', async () => {
+    const first = await busyOrder();
+    w.clock.advanceMinutes(3);
+    const down = new AiError('The assistant could not be reached just now.', 'unavailable', '529 overloaded');
+    model.fail = { brief: down, attachment: down, bill: down, summary: down };
+    // 9:00. The first request of the round finds the service down; the others are not sent.
+    expect(await runAssistantWork(system(), model)).toMatchObject({ briefs: 0, attachments: 0, bills: 0, summaries: 0, failed: 1, serviceDown: '529 overloaded', setupProblem: null });
+    expect(model.requests).toHaveLength(1);
+    // For five minutes nothing is asked at all.
+    w.clock.advanceMinutes(4);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ failed: 0, serviceDown: '529 overloaded' });
+    expect(model.requests).toHaveLength(1);
+    // The outage lasts two and a half hours. A round a minute costs one request every five
+    // minutes or so, and the round moves on to whatever is due instead of hammering the same item.
+    for (let minute = 4; minute < 150; minute++) {
+      w.clock.advanceMinutes(1);
+      await runAssistantWork(system(), model);
+    }
+    // Never more than one in five minutes, and each item at its own, slower pace.
+    expect(model.requests.length).toBeGreaterThan(8);
+    expect(model.requests.length).toBeLessThanOrEqual(31);
+    expect(new Set(model.requests.map(kindOf))).toEqual(new Set(['brief', 'attachment', 'bill', 'summary']));
+
+    // 11:30. It is back. An order pushed now gets its brief in the very next round: it does not
+    // stand behind the items that failed during the outage.
+    model.fail = {};
+    const second = await orderAt(w, 'READY', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    await pushOrder(sam(), { orderId: second.orderId });
+    w.clock.advanceMinutes(6);
+    const done = { briefs: 0, attachments: 0, bills: 0, summaries: 0 };
+    const round = async () => {
+      w.clock.advanceMinutes(1);
+      const work = (await runAssistantWork(system(), model))!;
+      expect(work.failed).toBe(0);
+      for (const key of ['briefs', 'attachments', 'bills', 'summaries'] as const) done[key] += work[key];
+    };
+    await round();
+    expect((await db.handoffPackage.findFirstOrThrow({ where: { orderId: second.orderId } })).briefAt).not.toBeNull();
+    // And what failed during the outage is not put off until tomorrow: within the hour all of it is done.
+    for (let minute = 0; minute < 60; minute++) await round();
+    expect(done).toEqual({ briefs: 2, attachments: 1, bills: 2, summaries: 1 });
+    expect((await db.handoffPackage.findFirstOrThrow({ where: { orderId: first.orderId } })).briefAt).not.toBeNull();
+  });
+
+  it('does not wait behind items that are resting after a failure', async () => {
+    // Three orders, each with a bill. The first two bills cannot be read however often they are tried.
+    const orders = [
+      await orderAt(w, 'READY'),
+      await orderAt(w, 'READY', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' }),
+      await orderAt(w, 'READY', { phone: '0400 555 777', email: 'third@example.com', address: '3 Other Rd' }),
+    ];
+    expect(await idsOf(pendingBills(db, w.clock.now(), 10))).toHaveLength(3);
+    const unreadable = new AiError('The assistant’s answer could not be used.', 'unreadable', 'not the shape that was asked for');
+    // Two bills a round. The first round tries the two oldest, and both fail.
+    model.fail.bill = unreadable;
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 0, failed: 2 });
+    // The next round does not wait for them: the third bill is read while they rest.
+    model.fail.bill = undefined;
+    w.clock.advanceMinutes(1);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 1, failed: 0 });
+    expect(await db.billReading.count({ where: { orderId: orders[2]!.orderId } })).toBe(1);
+    expect(await db.billReading.count()).toBe(1);
+    // They are tried again when their wait of ten minutes is over, not before, and again both together.
+    model.fail.bill = unreadable;
+    w.clock.advanceMinutes(8);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 0, failed: 0 });
+    w.clock.advanceMinutes(1);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ bills: 0, failed: 2 });
+  });
+
+  it('does not let one order use up the day’s allowance of all', async () => {
+    const admin = await makeUser(['ADMIN'], 'Ada Admin');
+    await updateAssistantSettings(as(admin, w.clock), { ...(await getAssistantSettings(db)), readBills: false, autoBrief: false, autoSummary: false });
+    const busy = await orderAt(w, 'OPENED');
+    const quiet = await orderAt(w, 'OPENED', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    // One customer sends thirty photos in one go; a moment later another customer sends one file.
+    await customerMail(busy.orderId, { attachments: Array.from({ length: 30 }, (_, i) => ({ name: `photo-${i}.pdf`, data: pdf(`photo ${i}`), mimeType: 'application/pdf' })) });
+    w.clock.advanceMinutes(1);
+    const other = await customerMail(quiet.orderId, { attachments: [{ name: 'bill.pdf', data: pdf('their bill'), mimeType: 'application/pdf' }] });
+
+    for (let round = 0; round < 12; round++) {
+      w.clock.advanceMinutes(1);
+      await runAssistantWork(system(), model);
+    }
+    // Twenty-five requests for the first order, and no more today. The other order was not kept waiting behind it.
+    expect(await db.aiRun.count({ where: { orderId: busy.orderId, userId: null } })).toBe(25);
+    expect(await db.emailAttachment.count({ where: { message: { orderId: busy.orderId }, aiReadAt: null } })).toBe(5);
+    expect((await db.emailAttachment.findUniqueOrThrow({ where: { id: other.attachmentIds[0]! } })).aiReadAt).not.toBeNull();
+    expect(await runAssistantWork(system(), model)).toMatchObject({ attachments: 0, failed: 0, allowanceUsedUp: false });
+    // What a person asks for on that order is not held back by this.
+    await summariseOrder(sam(), { orderId: busy.orderId }, model);
+    // A day later the rest is looked at.
+    w.clock.advanceDays(1);
+    w.clock.advanceMinutes(1);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ attachments: 4 });
+    w.clock.advanceMinutes(1);
+    expect(await runAssistantWork(system(), model)).toMatchObject({ attachments: 1 });
+  });
+
+  it('refreshes the summaries that have waited longest first, and passes none over', async () => {
+    const places = ['1 First St', '2 Second St', '3 Third St', '4 Fourth St', '5 Fifth St'];
+    const orders: string[] = [];
+    for (const [i, address] of places.entries()) orders.push((await orderAt(w, 'OPENED', { phone: `0400 555 10${i}`, email: `c${i}@example.com`, address })).orderId);
+    // Mail arrives on the orders in the opposite order to the one they were created in.
+    for (const orderId of [...orders].reverse()) {
+      await customerMail(orderId);
+      w.clock.advanceMinutes(1);
+    }
+    w.clock.advanceMinutes(2);
+    // The second in line already has a summary that covers its mail: it takes nobody's place.
+    await summariseOrder(sam(), { orderId: orders[3]! }, model);
+    expect(await ordersNeedingSummary(db, w.clock.now(), 2)).toEqual([orders[4], orders[2]]);
+    expect(await ordersNeedingSummary(db, w.clock.now(), 10)).toEqual([orders[4], orders[2], orders[1], orders[0]]);
+    // Two a round, in that order, until all are done.
+    expect((await runAssistantWork(system(), model))!.summaries).toBe(2);
+    expect(await ordersNeedingSummary(db, w.clock.now(), 10)).toEqual([orders[1], orders[0]]);
+    expect((await runAssistantWork(system(), model))!.summaries).toBe(2);
+    expect(await ordersNeedingSummary(db, w.clock.now(), 10)).toEqual([]);
   });
 
   it('leaves closed orders alone', async () => {
