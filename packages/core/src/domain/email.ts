@@ -92,29 +92,142 @@ export function replySubject(subject: string): string {
 
 const BLOCK_TAGS = 'p|div|br|tr|h[1-6]|table|blockquote|section|article|header|footer|ul|ol|pre|hr';
 
+/** No more of a message than this is turned into text. A message is never this long; what is, is not a message. */
+const MAX_HTML_CHARS = 1_000_000;
+
+// The steps below look for a closing mark after an opening one. Written as one pattern each they
+// took time growing with the square of the length when the closing marks were missing: every
+// opening mark sent the search to the end of the text. A message of a megabyte made that way held
+// the reading of every mailbox up for minutes. Here no stretch of the text is searched twice.
+
+/** Finds `needle` at or after a position. Asked for positions that never go back, it reads the text once in all. */
+function finderOf(text: string, needle: string): (from: number) => number {
+  let found = -2;
+  return (from) => {
+    if (found !== -1 && found < from) found = text.indexOf(needle, from);
+    return found;
+  };
+}
+
+/**
+ * Cuts out what a mail program does not show as text: comments, styles, scripts, the head,
+ * drawings. They are taken in the order they come, so a comment mark inside a style belongs to
+ * the style, and a style inside a comment to the comment.
+ */
+function withoutHiddenParts(s: string): string {
+  const opener = /<(?:!--|(head|style|script|title|noscript|template|svg)\b)/gi;
+  const commentEnd = finderOf(s, '-->');
+  const commentEndBang = finderOf(s, '--!>');
+  const closers = new Map<string, RegExp>();
+  const neverClosed = new Set<string>();
+  let out = '';
+  let at = 0;
+  for (let m = opener.exec(s); m; m = opener.exec(s)) {
+    const name = m[1]?.toLowerCase();
+    let end = -1;
+    if (!name) {
+      // "<!-->" and "<!--->" are whole comments, and "--!>" closes one as "-->" does.
+      const plain = commentEnd(m.index + 2);
+      const bang = commentEndBang(m.index + 4);
+      if (plain >= 0 && (bang < 0 || plain < bang)) end = plain + 3;
+      else if (bang >= 0) end = bang + 4;
+    } else if (!neverClosed.has(name)) {
+      let closer = closers.get(name);
+      if (!closer) closers.set(name, (closer = new RegExp(`</${name}\\s*>`, 'gi')));
+      closer.lastIndex = opener.lastIndex;
+      const found = closer.exec(s);
+      if (found) end = found.index + found[0].length;
+      else neverClosed.add(name);
+    }
+    if (end < 0) {
+      // A comment, a style or a script that is never closed runs to the end of the message in a
+      // mail program, and nothing after it is shown. The other tags go with the tags further down.
+      if (!name || name === 'style' || name === 'script') return out + s.slice(at, m.index);
+      continue;
+    }
+    out += s.slice(at, m.index);
+    at = end;
+    opener.lastIndex = end;
+  }
+  return out + s.slice(at);
+}
+
+/** Where the tag that begins at `from` ends: the first ">" outside a quoted value. -1 when it never ends. */
+function tagEndOf(s: string, from: number): number {
+  let quote = 0;
+  let afterEquals = false;
+  for (let i = from; i < s.length; i++) {
+    const ch = s.charCodeAt(i);
+    if (quote) {
+      if (ch === quote) quote = 0;
+    } else if (ch === 62) {
+      return i;
+    } else if (afterEquals && (ch === 34 || ch === 39)) {
+      quote = ch;
+      afterEquals = false;
+    } else if (ch === 61) {
+      afterEquals = true;
+    } else if (ch !== 32 && ch !== 9 && ch !== 10 && ch !== 12 && ch !== 13) {
+      afterEquals = false;
+    }
+  }
+  return -1;
+}
+
+/** Takes the tags out. A tag ends with ">", so after the last one there are none, and a long run of "<" with nothing closing it costs nothing. */
+function withoutTags(s: string): string {
+  const end = s.lastIndexOf('>') + 1;
+  return s.slice(0, end).replace(/<[^>]*>/g, '') + s.slice(end);
+}
+
+/** Links keep their target when it says more than the text does. */
+function withLinkTargets(s: string): string {
+  const opener = /<a\b/gi;
+  const closer = /<\/a\s*>/gi;
+  let out = '';
+  let at = 0;
+  for (let m = opener.exec(s); m; m = opener.exec(s)) {
+    const tagEnd = tagEndOf(s, m.index);
+    if (tagEnd < 0) break;
+    const href = /href\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(s.slice(m.index, tagEnd + 1));
+    if (!href) {
+      opener.lastIndex = tagEnd + 1;
+      continue;
+    }
+    closer.lastIndex = tagEnd + 1;
+    const end = closer.exec(s);
+    if (!end) break;
+    const inner = s.slice(tagEnd + 1, end.index);
+    const target = decodeEntities(href[1] ?? href[2] ?? '').trim();
+    const label = withoutTags(inner).trim();
+    let shown = inner;
+    if (/^https?:\/\//i.test(target) && label) {
+      const text = decodeEntities(label).replace(/\s+/g, ' ');
+      shown = text.includes(target.replace(/^https?:\/\//i, '').replace(/\/$/, '')) || text === target ? text : `${text} (${target})`;
+    }
+    out += s.slice(at, m.index) + shown;
+    at = end.index + end[0].length;
+    opener.lastIndex = at;
+  }
+  return out + s.slice(at);
+}
+
 /**
  * The readable text of an HTML message: no markup, no styles or scripts, no hidden preview text,
  * paragraphs and line breaks kept. This is what the CRM shows and searches; the HTML itself is
  * only ever displayed inside a sandbox.
  */
 export function htmlToText(html: string): string {
-  let s = html.replace(/\r\n?/g, '\n');
-  s = s.replace(/<!--[\s\S]*?-->/g, '');
-  s = s.replace(/<(head|style|script|title|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, '');
-  s = s.replace(/<(style|script)\b[\s\S]*$/gi, '');
-  // Links keep their target when it says more than the text does.
-  s = s.replace(/<a\b[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a\s*>/gi, (_m, d: string | undefined, q: string | undefined, inner: string) => {
-    const href = decodeEntities(d ?? q ?? '').trim();
-    const label = inner.replace(/<[^>]*>/g, '').trim();
-    if (!/^https?:\/\//i.test(href) || !label) return inner;
-    const shown = decodeEntities(label).replace(/\s+/g, ' ');
-    return shown.includes(href.replace(/^https?:\/\//i, '').replace(/\/$/, '')) || shown === href ? shown : `${shown} (${href})`;
-  });
-  s = s.replace(/<li\b[^>]*>/gi, '\n• ').replace(/<\/li\s*>/gi, '');
-  s = s.replace(new RegExp(`<\\/?(?:${BLOCK_TAGS})\\b[^>]*>`, 'gi'), '\n');
-  s = s.replace(/<\/t[dh]\s*>/gi, ' ');
-  s = s.replace(/<[^>]*>/g, '');
-  s = decodeEntities(s);
+  let s = html.slice(0, MAX_HTML_CHARS).replace(/\r\n?/g, '\n');
+  s = withLinkTargets(withoutHiddenParts(s));
+  // As in withoutTags: what follows the last ">" holds no tag and is left alone.
+  const lastTagEnd = s.lastIndexOf('>') + 1;
+  let tagged = s.slice(0, lastTagEnd);
+  tagged = tagged.replace(/<li\b[^>]*>/gi, '\n• ').replace(/<\/li\s*>/gi, '');
+  tagged = tagged.replace(new RegExp(`<\\/?(?:${BLOCK_TAGS})\\b[^>]*>`, 'gi'), '\n');
+  tagged = tagged.replace(/<\/t[dh]\s*>/gi, ' ');
+  tagged = tagged.replace(/<[^>]*>/g, '');
+  s = decodeEntities(tagged + s.slice(lastTagEnd));
   s = s.replace(/[​-‍⁠﻿­]/g, '');
   s = s
     .split('\n')
@@ -193,8 +306,10 @@ export type TemplateField = keyof typeof TEMPLATE_FIELDS;
  */
 export function fillTemplate(text: string, values: Partial<Record<TemplateField, string>>): string {
   return text.replace(/\{\{\s*([a-z_]+)\s*\}\}/gi, (whole, name: string) => {
-    const value = values[name.toLowerCase() as TemplateField];
-    return value && value.trim() ? value.trim() : whole;
+    // Only what was put into `values`: a name such as "constructor" is on every object, and is not a field.
+    const key = name.toLowerCase();
+    const value = Object.hasOwn(values, key) ? values[key as TemplateField] : undefined;
+    return typeof value === 'string' && value.trim() ? value.trim() : whole;
   });
 }
 
@@ -203,7 +318,7 @@ export function unknownTemplateFields(text: string): string[] {
   const found = new Set<string>();
   for (const m of text.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/g)) {
     const name = m[1]!.toLowerCase();
-    if (!(name in TEMPLATE_FIELDS)) found.add(m[1]!);
+    if (!Object.hasOwn(TEMPLATE_FIELDS, name)) found.add(m[1]!);
   }
   return [...found];
 }

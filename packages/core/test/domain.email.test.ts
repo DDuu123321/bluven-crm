@@ -73,6 +73,69 @@ describe('message bodies', () => {
   });
 });
 
+describe('markup that is not well formed', () => {
+  it('comes out the way a mail program would show it', () => {
+    // Closed comments and styles go; what follows them stays.
+    expect(htmlToText('<p>One</p><!-- note --><style>p { color: red }</style><p>Two</p>')).toBe('One\n\nTwo');
+    // The comments Outlook reads, and the short forms of a comment.
+    expect(htmlToText('<!--[if mso]><p>Outlook only</p><![endif]--><!--[if !mso]><!--><p>Shown</p><!--<![endif]-->')).toBe('Shown');
+    expect(htmlToText('<p>A</p><!--><p>B</p><!---><p>C</p><!-- x --!><p>D</p>')).toBe('A\n\nB\n\nC\n\nD');
+    // What is never closed hides the rest, as it does in a mail program.
+    expect(htmlToText('<p>Shown</p><style>p { color: red } <p>never shown</p>')).toBe('Shown');
+    expect(htmlToText('<p>Shown</p><SCRIPT>var a = "<p>never shown</p>"')).toBe('Shown');
+    expect(htmlToText('<p>Before</p><!-- not closed <p>After</p>')).toBe('Before');
+    // Each belongs to what opened first.
+    expect(htmlToText('<style><!-- p { margin: 0 } </style><p>Hello</p>')).toBe('Hello');
+    expect(htmlToText('<!-- <style> --><p>Hello</p><!-- </style> -->')).toBe('Hello');
+    // A drawing or a title without an end loses its tag only.
+    expect(htmlToText('<svg><p>Still here</p>')).toBe('Still here');
+    // Links: the target is added when the text does not say it, a link that is never closed is plain text.
+    expect(htmlToText('<a href="https://example.com/quote">Your quote</a> and <a href="https://example.com/x">https://example.com/x</a>')).toBe('Your quote (https://example.com/quote) and https://example.com/x');
+    expect(htmlToText('<A HREF=\'https://example.com/a\'>First</A> then <a href="https://example.com/b">never closed')).toBe('First (https://example.com/a) then never closed');
+    expect(htmlToText('<a name="top">Top</a> <a href="mailto:x@example.com">Write</a>')).toBe('Top Write');
+    expect(htmlToText('<a title="More >" href="https://example.com/more">More</a> <a href="https://example.com/?a>b">Odd</a>')).toBe('More (https://example.com/more) Odd (https://example.com/?a>b)');
+    // A "<" that opens nothing is text.
+    expect(htmlToText('<p>3 < 5</p> and 2 < 4 < 8')).toBe('3 < 5\nand 2 < 4 < 8');
+    // Letters whose small form is longer than the capital do not shift where things are cut.
+    expect(htmlToText('<p>İbrahim İİİ</p><style>p{}</style><p>Merhaba <a href="https://example.com/a">İ link</a></p><!-- x --><p>Son</p>')).toBe('İbrahim İİİ\n\nMerhaba İ link (https://example.com/a)\n\nSon');
+  });
+
+  it('takes time in proportion to its length, whatever it is missing', () => {
+    const size = 600_000;
+    const many = (piece: string): string => piece.repeat(Math.floor(size / piece.length));
+    const shapes = [
+      many('<!-- never closed '),
+      many('<!-- closed -->'),
+      many('<!-- closed --!>'),
+      many('<style>p{}'),
+      many('<svg><path d="M0 0">'),
+      many('<title>'),
+      many('</style '),
+      many('<a href="https://example.com/x">no end '),
+      many('<a href="https://example.com/x'),
+      `${many('<a ')}>`,
+      `${many('<a x="')}>`,
+      `<a href="https://example.com/x">${many('<')}</a>`,
+      many('<a href="https://example.com/x">x</a>'),
+      many('a < b '),
+      many('<'),
+      `${many('<p <li <div ')}>`,
+      many('<p <li <div '),
+      many('&amp &lt &nbsp '),
+      `&${many('a')}`,
+      many(' \n'),
+    ];
+    for (const html of shapes) {
+      const started = performance.now();
+      htmlToText(html);
+      // The worst of these took minutes before. They need a few milliseconds now; a second allows for a slow machine.
+      expect(performance.now() - started, html.slice(0, 24)).toBeLessThan(1000);
+    }
+    // Only the first million characters are looked at.
+    expect(htmlToText('x'.repeat(1_200_000))).toHaveLength(1_000_000);
+  });
+});
+
 describe('sealed secrets', () => {
   it('opens only with the same key material and purpose, and only if untouched', () => {
     const sealed = sealSecret('1000.refresh-token', 'client-secret', 'mail-token');

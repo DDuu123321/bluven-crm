@@ -18,6 +18,9 @@ describe('ready-made e-mail texts', () => {
   it('fills in what it knows and leaves the rest for the person sending to see', () => {
     expect(fillTemplate('Hi {{first_name}}, about {{ Address }}: {{unknown}} {{my_name}}', { first_name: 'Jane', address: '12 Sample St', my_name: '' })).toBe('Hi Jane, about 12 Sample St: {{unknown}} {{my_name}}');
     expect(unknownTemplateFields('{{first_name}} {{firstname}} {{ two words }} {{ORDER_NO}}')).toEqual(['firstname', 'two words']);
+    // Names every object has are not fields: they are refused when a template is saved, and left as written when one is filled.
+    expect(unknownTemplateFields('{{constructor}} {{__proto__}} {{toString}} {{first_name}}')).toEqual(['constructor', '__proto__', 'toString']);
+    expect(fillTemplate('{{constructor}} {{__proto__}} {{valueOf}} {{first_name}}', { first_name: 'Jane' })).toBe('{{constructor}} {{__proto__}} {{valueOf}} Jane');
   });
 
   it('come with a few to start from, filled in for the order and the person writing', async () => {
