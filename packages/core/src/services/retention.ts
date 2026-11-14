@@ -3,7 +3,8 @@
 // it expires. Shortly before the end of the period the salesperson and the managers are asked to
 // choose: keep for another year, or delete. Deleting is a soft delete; the file leaves storage 30
 // days later. Contract and deposit files, and every document type an admin has marked "never
-// delete automatically", are outside all of this.
+// delete automatically", never reach the end of a period: nothing reminds about them and nothing
+// deletes them. A file of such a type that a person deleted by hand leaves storage like any other.
 import { Prisma, type DbOrTx, type Tx } from '@bluven/db';
 import { actorId, inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
@@ -499,6 +500,11 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
  * Removes the files of documents that were deleted at least 30 days ago, however they came to be
  * deleted. The row stays, with the time of the purge.
  *
+ * "Never delete automatically" on a document type is about the end of the retention period, not
+ * about this: a file somebody deleted by hand, say one filed on the wrong customer, has to leave
+ * storage whatever its type. Contract and deposit files cannot be deleted by hand at all, and
+ * stay outside as the record of what was signed and paid.
+ *
  * A file can belong to more than one document: site photos reused on a later order at the same
  * property point at the same storage key. The bytes are removed only when no other document that
  * has not been purged itself still uses the key. A new sharer cannot appear in between, because a
@@ -508,7 +514,7 @@ export async function purgeDeletedDocuments(ctx: Ctx): Promise<{ purged: number;
   const now = nowOf(ctx);
   const cutoff = new Date(now.getTime() - PURGE_AFTER_DAYS * DAY_MS);
   const due = await ctx.db.document.findMany({
-    where: { deletedAt: { lte: cutoff }, purgedAt: null, type: { neverAutoDelete: false, key: { notIn: EXEMPT_TYPE_KEYS } } },
+    where: { deletedAt: { lte: cutoff }, purgedAt: null, type: { key: { notIn: EXEMPT_TYPE_KEYS } } },
     select: { id: true, orderId: true, fileName: true, storageKey: true, thumbKey: true, deletedAt: true, type: { select: { label: true } }, order: { select: { orderNo: true, customerId: true } } },
     orderBy: [{ deletedAt: 'asc' }, { id: 'asc' }],
     take: 500,

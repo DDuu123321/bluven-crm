@@ -407,7 +407,7 @@ Pylon 里每个设计对应 CRM 里的一个报价版本：容量、电池、总
 - 到期前 30 天，负责销售和主管各收到一次提醒。打开订单的 Documents 页，最上面会列出到期的文件，两个按钮：**Keep for another year** 再保留一年，**Delete now** 现在删除。
 - 主管在左侧导航的 **Documents to review** 里能看到所有等待处理的订单。
 - 没人处理的话，默认什么都不删，每周再提醒主管一次。管理员可以在 Rules 里打开"到期自动删除"。
-- 删除后文件立刻从订单里消失，30 天后从服务器上移除。资料类型勾了 Never delete automatically 的除外。
+- 删除后文件立刻从订单里消失，30 天后从服务器上移除，不论哪一类资料。
 - 年数、提前提醒的天数由管理员在 Administration → Rules 里设置；某一类资料要单独的年数，在 Handoff checklist 里设。
 
 几条规则：
@@ -461,7 +461,7 @@ AI 自动做的那几件事，管理员可以在 Administration → AI assistant
 
 **通知。** 左侧 Notifications 页列出所有通知，可以按类型筛选：线索与分派、闲置提醒、客户邮件、定金与尾款、运营、待办、资料、Pylon。每类旁边是未读数，也可以只看未读。
 
-通知是否同时发到邮箱，取决于部署时有没有配置通知邮件（部署指南第 9 节）：配置了就发，在系统里已经读过的不发；没配置时只有系统内通知，每日摘要也不发。客户来信的通知只在系统内显示，因为那封信本身已经在你的邮箱里。嫌邮件多的人，在 Notifications 页底部勾上 **Send me one summary each morning**，改成每天早上一封摘要。这是每个人自己的选择。
+通知是否同时发到邮箱，取决于部署时有没有配置通知邮件（部署指南第 9 节）：配置了就发，在系统里已经读过的不发；没配置时只有系统内通知，每日摘要也不发。客户来信的通知只在系统内显示，因为那封信本身已经在你的邮箱里。嫌邮件多的人，在 Notifications 页底部勾上 **Send me one summary each morning**，改成每天早上一封摘要。这是每个人自己的选择。服务器没有配置通知邮件时，这个选项不显示，页面上会说明。
 
 **订单列表。** All orders / My orders 默认显示还在销售手里的订单，按阶段分组。**Show** 下拉可以切到 With operations（运营处理中）、Completed（已完成）、On hold、Lost、Cancelled 或 Everything。可以按线索来源（Lead source）和接入渠道（Came in through）筛选。
 

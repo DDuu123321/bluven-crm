@@ -657,15 +657,32 @@ describe('removing deleted files from storage', () => {
     expect(await db.emailMessage.count({ where: { id: 'eml_1' } })).toBe(1);
   });
 
-  it('does not purge a deleted file of a type that is never deleted automatically', async () => {
+  it('removes a file a person deleted by hand, also of a type that is never deleted automatically', async () => {
     const { orderId } = await orderAt(w, 'OPENED');
-    const paper = await upload(orderId, 'other', 'compliance.pdf', pdf('compliance'));
-    await db.documentType.update({ where: { key: 'other' }, data: { neverAutoDelete: true } });
+    // Filed on the wrong customer, in a folder whose files never reach the end of a period.
+    const paper = await upload(orderId, 'approvals', 'compliance.pdf', pdf('compliance'));
+    expect((await docType('approvals')).neverAutoDelete).toBe(true);
     await deleteDocument(as(w.sam, w.clock), { documentId: paper.id });
-    w.clock.advanceDays(400);
+    w.clock.advanceDays(29);
     expect(await job()).toEqual(NOTHING);
+    expect(onDisk((await db.document.findUniqueOrThrow({ where: { id: paper.id } })).storageKey)).toBe(true);
+    w.clock.advanceDays(1);
+    expect(await job()).toEqual({ ...NOTHING, purged: 1, filesRemoved: 1 });
     const row = await db.document.findUniqueOrThrow({ where: { id: paper.id } });
-    expect(row.purgedAt).toBeNull();
+    expect(row.purgedAt).toEqual(w.clock.current);
+    expect(onDisk(row.storageKey)).toBe(false);
+  });
+
+  it('leaves the files of such a type alone while nobody deletes them, however old the order', async () => {
+    const { orderId } = await orderAt(w, 'OPENED');
+    const paper = await upload(orderId, 'approvals', 'approval.pdf', pdf('approval'));
+    const price = await db.lostReason.findFirstOrThrow({ where: { key: 'price' } });
+    await markLost(as(w.sam, w.clock), { orderId, reasonId: price.id, note: '' });
+    await setRetention({ autoDelete: true });
+    w.clock.advanceDays(5 * 365);
+    await job();
+    const row = await db.document.findUniqueOrThrow({ where: { id: paper.id } });
+    expect(row).toMatchObject({ deletedAt: null, purgedAt: null });
     expect(onDisk(row.storageKey)).toBe(true);
   });
 });
