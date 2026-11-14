@@ -1,9 +1,9 @@
-// Gives an order one document, marks it as lost, and moves the day it was lost into the past, so
+// Opens the job of an order, gives it one document, marks it as lost, and moves the day it was lost into the past, so
 // that a test can look at what happens when a retention period is about to end without waiting
 // two years for it.
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
-import { markLost, uploadDocument, userCtx } from '@bluven/core';
+import { markLost, openJob, uploadDocument, userCtx } from '@bluven/core';
 import { createDb } from '@bluven/db';
 import { E2E, type E2EState } from '../env';
 
@@ -15,6 +15,11 @@ const state = JSON.parse(readFileSync(E2E.stateFile, 'utf8')) as E2EState;
 const u = await db.user.findUniqueOrThrow({ where: { email: state.users.sam.email } });
 const sam = userCtx(db, { id: u.id, name: u.name, email: u.email, roles: u.roles });
 
+// Files belong to a job somebody has opened.
+if (!(await db.order.findUniqueOrThrow({ where: { id: orderId }, select: { openedAt: true } })).openedAt) {
+  const origin = await db.leadOrigin.findFirstOrThrow({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
+  await openJob(sam, { orderId, leadOriginId: origin.id });
+}
 const bill = await db.documentType.findUniqueOrThrow({ where: { key: 'electricity_bill' } });
 await uploadDocument(sam, { orderId, typeId: bill.id, fileName: 'old-bill.pdf', body: Readable.from([Buffer.from(`%PDF-1.4\n% old bill ${orderId}\n%%EOF\n`)]) });
 const reason = await db.lostReason.findFirstOrThrow({ where: { key: 'price' } });

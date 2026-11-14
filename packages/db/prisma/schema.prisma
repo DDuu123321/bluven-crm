@@ -27,15 +27,26 @@ enum Role {
 }
 
 enum OrderStage {
+  /// In the pool, or assigned and not opened yet.
   NEW
-  CONTACTED
-  QUOTED
-  SIGNED
-  DEPOSIT_PENDING
-  DEPOSIT_CONFIRMED
+  /// The salesperson has opened the job and is following up.
+  FOLLOW_UP
+  /// The customer's intent is clear: the system is being designed in Pylon.
+  DESIGN
+  /// The proposal has gone to the customer. Followed up until the deposit arrives.
+  PROPOSAL_SENT
+  /// Proof of the deposit is on file.
+  DEPOSIT_PAID
+  /// Pushed to operations, who have not accepted it yet.
   PUSHED
+  /// Sent back by operations, which is the exception.
   RETURNED
-  HANDED_OVER
+  /// Accepted by operations: the installation is being arranged.
+  IN_PROGRESS
+  /// Job done. The balance is due.
+  INSTALLED
+  /// The final payment has arrived and the job is closed.
+  COMPLETED
 }
 
 enum SideState {
@@ -180,6 +191,7 @@ model User {
   decidedHandoffs   HandoffPackage[] @relation("HandoffDecider")
   emailAccount      EmailAccount?
   sentEmails        EmailMessage[]   @relation("EmailSender")
+  openedOrders      Order[]          @relation("OrderOpener")
 
   // ---- e-mail preferences
   /// One summary e-mail each morning instead of an e-mail for every notification.
@@ -334,6 +346,18 @@ model LostReason {
   orders Order[]
 }
 
+/// Where a customer can have come from: the website, a partner, a referral. Managers keep the
+/// list. The salesperson picks one when opening a job, and partners are paid by it.
+model LeadOrigin {
+  id        String  @id
+  key       String  @unique
+  label     String
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  orders Order[]
+}
+
 model Order {
   id         String     @id
   /// Human-facing number, e.g. BLV-2026-00123. Also used as the Pylon reference_number.
@@ -350,28 +374,49 @@ model Order {
 
   // ---- lead origin
   sourceId              String
-  source                LeadSource @relation(fields: [sourceId], references: [id])
-  sourceDetail          String     @default("")
+  source                LeadSource  @relation(fields: [sourceId], references: [id])
+  sourceDetail          String      @default("")
   externalLeadId        String?
-  leadDetails           Json       @default("{}")
-  attribution           Json       @default("{}")
+  leadDetails           Json        @default("{}")
+  attribution           Json        @default("{}")
   leadCreatedAt         DateTime
-  isBackfill            Boolean    @default(false)
+  isBackfill            Boolean     @default(false)
   possibleDuplicateOfId String?
-  possibleDuplicateOf   Order?     @relation("PossibleDuplicate", fields: [possibleDuplicateOfId], references: [id], onDelete: SetNull)
-  possibleDuplicates    Order[]    @relation("PossibleDuplicate")
+  possibleDuplicateOf   Order?      @relation("PossibleDuplicate", fields: [possibleDuplicateOfId], references: [id], onDelete: SetNull)
+  possibleDuplicates    Order[]     @relation("PossibleDuplicate")
   duplicateDismissedAt  DateTime?
+  /// Where the customer came from, as the salesperson recorded it when opening the job. What
+  /// partners are paid by. `source` above is only the channel the lead arrived through.
+  leadOriginId          String?
+  leadOrigin            LeadOrigin? @relation(fields: [leadOriginId], references: [id])
+  leadOriginNote        String      @default("")
 
   // ---- milestone facts
   assignedAt       DateTime?
+  /// The salesperson took the job up. Nothing is worked on before this.
+  openedAt         DateTime?
+  openedById       String?
+  openedBy         User?     @relation("OrderOpener", fields: [openedById], references: [id])
   firstContactedAt DateTime?
+  /// The customer's intent was clear and the design started. Cleared when the order goes back to following up.
+  designAt         DateTime?
   quotedAt         DateTime?
   signedAt         DateTime?
+  /// When the deposit that is on record was recorded: the moment the sale counts from. Null
+  /// again when that record is withdrawn. Kept by the same code that derives the stage.
+  depositAt        DateTime?
   firstPushedAt    DateTime?
   pushedAt         DateTime?
   returnedAt       DateTime?
+  /// When operations accepted the order (the latest time, if it was returned in between).
   handedOverAt     DateTime?
   returnCount      Int       @default(0)
+  /// Operations marked the installation as done.
+  jobDoneAt        DateTime?
+  jobDoneById      String?
+  /// The final payment arrived and the job was closed.
+  completedAt      DateTime?
+  completedById    String?
 
   // ---- side state details
   lostReasonId String?
@@ -413,6 +458,8 @@ model Order {
   emailMessages EmailMessage[]
   summary       OrderSummary?
   billReadings  BillReading[]
+  opsJob        OpsJob?
+  notices       CustomerNotice[]
 
   // ---- document retention (counted from the day the order ended)
   /// Set by "Keep for another year": none of this order's documents expires before this moment.
@@ -704,6 +751,76 @@ model HandoffPackage {
 // ----------------------------------------------------------------------------
 // Audit log (append-only; UPDATE and DELETE are blocked by a trigger)
 // ----------------------------------------------------------------------------
+
+/// What operations keeps track of once it has accepted an order. One per order, made at the
+/// first acceptance. The items are worked on side by side, in no fixed sequence.
+model OpsJob {
+  orderId String @id
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Connection approval: "TODO", "APPLIED", "APPROVED" or "NOT_REQUIRED".
+  caStatus           String    @default("TODO")
+  caReference        String    @default("")
+  /// Where the job was assigned for the certificates: "formbay", "greendeal", "bridgeselect" or "other". Null: not assigned yet.
+  stcPlatform        String?
+  stcReference       String    @default("")
+  installerName      String    @default("")
+  electricianLicence String    @default("")
+  installDate        DateTime? @db.Date
+  /// "DELIVERY" (with the expected day in deliveryEta) or "PICKUP" by the installer. Null: not arranged yet.
+  deliveryMode       String?
+  deliveryEta        DateTime? @db.Date
+  /// "UNDECIDED", "IN_STOCK", "TO_ORDER" or "ORDERED".
+  purchaseStatus     String    @default("UNDECIDED")
+
+  // ---- after the installation
+  rebateAppliedAt       DateTime?
+  rebateAppliedById     String?
+  /// When operations was reminded to apply for the rebate, and that the balance is still open.
+  rebateRemindedAt      DateTime?
+  balanceRemindedAt     DateTime?
+  /// When operations asked the salesperson to chase the balance.
+  balanceChaseAskedAt   DateTime?
+  balanceChaseAskedById String?
+  finalAmountCents      Int?
+  finalReceivedOn       DateTime? @db.Date
+  finalNote             String    @default("")
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+
+  @@index([installDate])
+}
+
+/// An e-mail the CRM sends to the customer by itself at a fixed point: the welcome when operations
+/// accepts, the dates of the installation, the thank-you asking for the balance. Written out
+/// when it is queued, sent by the background process through the operations mailbox.
+model CustomerNotice {
+  id             String    @id
+  orderId        String
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// "WELCOME", "SCHEDULE" or "JOB_DONE".
+  kind           String
+  /// "PENDING", "SENT", "FAILED" (given up) or "SKIPPED" (could not be sent at all, see `note`).
+  status         String    @default("PENDING")
+  toAddress      String    @default("")
+  subject        String
+  body           String
+  /// What the text was written from, for example the dates it announced.
+  payload        Json      @default("{}")
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime?
+  note           String    @default("")
+  /// The stored copy once it has gone out.
+  emailMessageId String?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  sentAt         DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([orderId, createdAt])
+}
 
 model AuditLog {
   id         String   @id

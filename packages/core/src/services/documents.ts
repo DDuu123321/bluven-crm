@@ -5,12 +5,12 @@ import type { DocSource, Document, DocumentType, Tx } from '@bluven/db';
 import { actorId, inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
 import { FINANCE_VISIBLE_DOC_TYPES, zonedTimeToUtc } from '../domain';
-import { ConflictError, GoneError, NotFoundError, ValidationError } from '../errors';
+import { ConflictError, ForbiddenError, GoneError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { INLINE_SAFE_TYPES, THUMBNAIL_TYPES, cleanFileName, detectContentType, getStorage, safeExtension, type TempFile } from '../storage';
 import { addActivity } from './activity';
 import { audit } from './audit';
-import { lockOrderForEdit, requireEditableOrder, requireOrderView, touchStaffActivity, type OrderState } from './orders';
+import { lockOrderForFolder, lockOrderForWork, requireFolderAccess, requireOrderView, touchStaffActivity, type OrderState } from './orders';
 import { CURRENT_DOCUMENT, DOC_TYPE } from './reference';
 
 /** A file received from the client and parked in temporary storage, not yet attached to anything. */
@@ -165,24 +165,30 @@ export interface UploadDocumentInput {
 /**
  * Uploads one file into an order's folder. Contract and deposit-proof files are not accepted
  * here: they come in through the contract and deposit flows, which create the matching record.
+ *
+ * The salesperson and the managers add files while the order is theirs to work on. Operations
+ * add files while the order is with them, from the push until the job is closed: what is
+ * missing they ask the customer for themselves. They add to the folder and replace what they
+ * put there; what sales filed stays as it is.
  */
 export async function uploadDocument(ctx: Ctx, input: UploadDocumentInput): Promise<{ id: string }> {
   // Check access and state before reading the body, so a refused upload costs no bandwidth.
-  await requireEditableOrder(ctx, input.orderId);
+  await requireFolderAccess(ctx, input.orderId);
   const type = await ctx.db.documentType.findUnique({ where: { id: input.typeId } });
   if (!type || !type.isActive) throw new ValidationError('Choose a document type.');
   // Quote, contract and deposit files come in through their own flows, which create the matching record.
-  if (type.isSystem) throw new ValidationError(`${type.label} files are added from the “Quote, contract & deposit” section.`);
+  if (type.isSystem) throw new ValidationError(`${type.label} files are added from the “Proposal & deposit” tab of the order.`);
 
   const staged = await stageUpload(input.body, input.fileName);
   let doc: Document;
   try {
     doc = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, input.orderId);
+      const { order, role } = await lockOrderForFolder(tx, ctx, input.orderId);
       let replaces: Document | null = null;
       if (input.replacesId) {
         replaces = await tx.document.findFirst({ where: { id: input.replacesId, orderId: order.id, typeId: type.id, ...CURRENT_DOCUMENT } });
         if (!replaces) throw new ValidationError('The file to replace no longer exists.');
+        if (role === 'OPS' && replaces.uploadedById !== actorId(ctx)) throw new ConflictError('This file was added by sales and stays on record. Add yours as a new file next to it.');
       }
       const created = await attachStaged(tx, ctx, order, staged, { type, note: input.note, replaces, source: input.source });
       await touchStaffActivity(tx, ctx, order);
@@ -205,12 +211,14 @@ export async function deleteDocument(ctx: Ctx, input: { documentId: string }): P
   const found = await ctx.db.document.findUnique({ where: { id: input.documentId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Document not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Document');
+    const { order, role } = await lockOrderForFolder(tx, ctx, found.orderId, 'Document');
     const doc = await tx.document.findUnique({
       where: { id: input.documentId },
       include: { type: true, quote: true },
     });
     if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
+    // Operations take back what they put there themselves, nothing else.
+    if (role === 'OPS' && doc.uploadedById !== actorId(ctx)) throw new ForbiddenError('This file was added by sales. Only the salesperson or a manager can remove it.');
     if (doc.type.key === DOC_TYPE.signedContract) throw new ConflictError('Contract files are kept as a record. To take a contract off the order, remove the contract.');
     if (doc.type.key === DOC_TYPE.depositProof) throw new ConflictError('Deposit files are kept as a record. To take a submission back, withdraw the deposit.');
     if (doc.quote?.sentAt) throw new ConflictError('This file belongs to a quote that was sent to the customer.');
@@ -243,7 +251,7 @@ export async function changeDocumentType(ctx: Ctx, input: { documentId: string; 
   const found = await ctx.db.document.findUnique({ where: { id: input.documentId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Document not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Document');
+    const order = await lockOrderForWork(tx, ctx, found.orderId, 'Document');
     const doc = await tx.document.findUnique({ where: { id: input.documentId }, include: { type: true } });
     if (!doc || doc.deletedAt) throw new NotFoundError('Document not found.');
     const type = await tx.documentType.findUnique({ where: { id: input.typeId } });
@@ -324,7 +332,7 @@ export async function listReusableDocuments(ctx: Ctx, orderId: string): Promise<
 export async function reuseDocuments(ctx: Ctx, input: { orderId: string; documentIds: string[] }): Promise<{ reused: number }> {
   if (input.documentIds.length === 0) throw new ValidationError('Select at least one file.');
   return inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, input.orderId);
+    const order = await lockOrderForWork(tx, ctx, input.orderId);
     const sources = await tx.document.findMany({
       where: {
         id: { in: input.documentIds },

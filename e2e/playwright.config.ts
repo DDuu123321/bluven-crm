@@ -15,6 +15,8 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     // The screenshots are kept for people to look at, so render them sharp.
     deviceScaleFactor: 2,
+    // A control that is not there fails the step, instead of using up the whole test's time.
+    actionTimeout: 20_000,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

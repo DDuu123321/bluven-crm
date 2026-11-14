@@ -1,6 +1,7 @@
 'use server';
 
 import {
+  acceptQuote,
   assignOrders,
   cancelOrder,
   changeDocumentType,
@@ -14,11 +15,14 @@ import {
   logActivity,
   markLost,
   moveOrderToNewProperty,
+  openJob,
   pushOrder,
   restoreLost,
   resumeOrder,
   returnOrdersToPool,
   reuseDocuments,
+  setIntent,
+  setLeadOrigin,
   unlinkPylonProject,
   updateCustomer,
   updateHandoffNotes,
@@ -58,6 +62,32 @@ import { describePylonSync, withPylon } from '@/lib/pylon';
 function chosenTime(formData: FormData, name: string): Date | null {
   const value = str(formData, name);
   return value && value !== str(formData, `${name}Default`) ? dateTime(formData, name) : null;
+}
+
+// ---- the job
+
+/** The salesperson takes the job up and says where the customer came from. */
+export async function openJobAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await openJob(ctx, { orderId, leadOriginId: str(formData, 'leadOriginId'), note: str(formData, 'leadOriginNote') });
+    return { message: 'The job is open.' };
+  });
+}
+
+export async function leadOriginAction(orderId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(orderId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await setLeadOrigin(ctx, { orderId, leadOriginId: str(formData, 'leadOriginId'), note: str(formData, 'leadOriginNote') });
+  });
+}
+
+/** Ready for a design, or back to following up. */
+export async function intentAction(orderId: string, intent: string): Promise<ActionResult> {
+  if (!validArgs(orderId, intent)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await setIntent(ctx, { orderId, intent });
+  });
 }
 
 // ---- timeline
@@ -230,6 +260,14 @@ export async function deleteQuoteAction(quoteId: string): Promise<ActionResult> 
   if (!validArgs(quoteId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await deleteQuote(ctx, { quoteId });
+  });
+}
+
+/** Says which version the customer went ahead with. */
+export async function acceptQuoteAction(quoteId: string): Promise<ActionResult> {
+  if (!validArgs(quoteId)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await acceptQuote(ctx, { quoteId });
   });
 }
 

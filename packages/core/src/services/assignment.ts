@@ -1,7 +1,7 @@
 // Order ownership: assign, reassign, return to the pool, bulk transfer.
 import type { Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
-import { can } from '../domain';
+import { OPERATIONS_STAGES, can } from '../domain';
 import { ForbiddenError, ValidationError } from '../errors';
 import { addActivity } from './activity';
 import { audit } from './audit';
@@ -144,7 +144,7 @@ export async function transferOrders(ctx: Ctx, input: TransferInput): Promise<{ 
     where: {
       ownerId: input.fromUserId,
       ...(input.orderIds ? { id: { in: input.orderIds } } : {}),
-      ...(input.onlyOpen && !input.orderIds ? { sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } } : {}),
+      ...(input.onlyOpen && !input.orderIds ? { sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } } : {}),
     },
     select: { id: true },
   });

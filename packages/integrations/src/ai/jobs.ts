@@ -31,7 +31,7 @@ export async function ordersNeedingSummary(db: Db, now: Date, limit: number): Pr
   const orders = await db.order.findMany({
     where: {
       sideState: { in: ['NONE', 'ON_HOLD'] },
-      stage: { not: 'HANDED_OVER' },
+      stage: { not: 'COMPLETED' },
       activities: { some: { type: 'EMAIL_IN', createdAt: { gte: new Date(now.getTime() - 3 * 86_400_000) } } },
     },
     select: { id: true, summary: { select: { coversUntil: true } }, activities: { where: { type: 'EMAIL_IN' }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } } },

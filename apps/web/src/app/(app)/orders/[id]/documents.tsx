@@ -172,7 +172,7 @@ export async function DocumentsTab({ ctx, header, editable, staff }: { ctx: Ctx;
               {setAside.length > 0 && (
                 <details className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                   <summary className="cursor-pointer text-xs font-medium text-slate-600">
-                    No longer current ({setAside.length}): kept as a record of {type.key === DOC_TYPE.signedContract ? 'a contract that was removed or replaced' : 'a submission that was withdrawn or rejected'}
+                    No longer current ({setAside.length}): kept as a record of {type.key === DOC_TYPE.signedContract ? 'a signed copy that was removed or replaced' : type.key === DOC_TYPE.quote ? 'a proposal file that was replaced' : 'a deposit record that was withdrawn'}
                   </summary>
                   <ul className="mt-2 space-y-1">
                     {setAside.map((d) => (
@@ -193,7 +193,7 @@ export async function DocumentsTab({ ctx, header, editable, staff }: { ctx: Ctx;
                 <p className="text-xs text-slate-500">
                   Managed from the{' '}
                   <Link href={`${base}?tab=deal`} className="font-medium text-brand-700 hover:underline">
-                    Quote, contract &amp; deposit
+                    Proposal &amp; deposit
                   </Link>{' '}
                   tab.
                 </p>

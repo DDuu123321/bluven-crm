@@ -1,8 +1,9 @@
 // The background process. It owns everything that happens without a person clicking:
-// idle reminders, holds that end, task reminders, notification emails and Pylon events.
-import { getConfig, purgeExpiredSessions, runDocumentRetention, runHoldExpiry, runIdleRules, runTaskReminders, systemCtx } from '@bluven/core';
+// idle reminders, holds that end, task reminders, the reminders after an installation,
+// notification emails, the e-mails to customers and Pylon events.
+import { getConfig, purgeExpiredSessions, runDocumentRetention, runHoldExpiry, runIdleRules, runOperationsReminders, runTaskReminders, systemCtx } from '@bluven/core';
 import { getDb } from '@bluven/db';
-import { PylonClient, assistantModel, createPacer, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
+import { PylonClient, assistantModel, createPacer, mailApiFactory, pollPylonEvents, processPylonEvents, pullBluvenLeads, purgePylonEvents, reconcilePylonEvents, runAssistantWork, sendCustomerNotices, setAsideCustomerNotices, syncAllMailboxes, zohoSettings } from '@bluven/integrations';
 import { describeMailSetup, sendDailySummaries, sendNotificationEmails } from './mailer';
 import { startScheduler, type Job } from './scheduler';
 
@@ -64,6 +65,15 @@ const jobs: Job[] = [
     run: async () => some([[(await runHoldExpiry(db)).resumed, 'orders taken off hold']]),
   },
   {
+    // After a job is done: operations is reminded to apply for the rebate, and that the balance is still open.
+    name: 'operations-reminders',
+    everyMs: 10 * MINUTE,
+    run: async () => {
+      const r = await runOperationsReminders(db);
+      return some([[r.rebateReminders, 'rebate reminders'], [r.balanceReminders, 'balance reminders']]);
+    },
+  },
+  {
     // Reminders before a retention period ends, the weekly reminder when nobody decides, automatic
     // deletion where an admin switched it on, and the removal of files 30 days after a deletion.
     name: 'document-retention',
@@ -121,6 +131,22 @@ if (mail) {
       const done = some([[r.stored, 'e-mails added to timelines'], [r.failed, 'mailboxes could not be read'], [r.removed, 'mailboxes disconnected because their owner may no longer have one']]);
       return [done, r.pausedUntil && r.failed ? `reading is paused until ${r.pausedUntil.toISOString()}` : ''].filter(Boolean).join('; ') || undefined;
     },
+  });
+  jobs.push({
+    // The welcome, the dates and the thank-you that operations' steps queue for the customer.
+    name: 'customer-notices',
+    everyMs: MINUTE,
+    run: async () => {
+      const r = await sendCustomerNotices(systemCtx(db, 'Operations e-mail'), { pace });
+      return r ? some([[r.sent, 'e-mails to customers sent'], [r.waiting, 'will be tried again'], [r.stopped, 'could not be sent']]) : undefined;
+    },
+  });
+} else {
+  jobs.push({
+    // Without customer e-mail nothing can go out: what is queued is set aside, with the reason, for operations to see.
+    name: 'customer-notices',
+    everyMs: MINUTE,
+    run: async () => some([[await setAsideCustomerNotices(systemCtx(db, 'Operations e-mail')), 'e-mails to customers set aside: customer e-mail is not set up']]),
   });
 }
 

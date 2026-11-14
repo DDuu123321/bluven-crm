@@ -11,7 +11,7 @@ import {
   getStorage,
   htmlToText,
   inTx,
-  isOpenOrder,
+  isActiveOrder,
   isOrderStaff,
   lockOrder,
   managerIds,
@@ -174,13 +174,14 @@ async function relationWatermark(db: Db, account: SyncAccount): Promise<string> 
 
 /**
  * Which order a message belongs to: the one its conversation is already on; otherwise the
- * customer's only open order; with nothing open, their latest order, so that mail after
- * handover is still seen. With several open orders a person decides.
+ * customer's only order that is still being worked on, by sales or by operations; with none,
+ * their latest order, so that mail after a job is closed is still seen. With several a person
+ * decides.
  */
 async function pickOrder(tx: Prisma.TransactionClient, customerId: string, threadOrderId: string | null): Promise<string | null> {
   const orders = await tx.order.findMany({ where: { customerId }, orderBy: { createdAt: 'desc' }, select: { id: true, stage: true, sideState: true } });
   if (threadOrderId && orders.some((o) => o.id === threadOrderId)) return threadOrderId;
-  const open = orders.filter(isOpenOrder);
+  const open = orders.filter(isActiveOrder);
   if (open.length === 1) return open[0]!.id;
   if (open.length === 0) return orders[0]?.id ?? null;
   return null;
@@ -424,7 +425,7 @@ async function storeMessage(ctx: Ctx, api: MailApi, account: SyncAccount, item: 
         // The customer has several open orders and nobody has said which one this is about. The
         // people who could say are told; until then it is on no order's timeline.
         if (direction === 'IN' && recent) {
-          const open = (await tx.order.findMany({ where: { customerId }, orderBy: { createdAt: 'desc' }, select: { id: true, stage: true, sideState: true, ownerId: true } })).filter(isOpenOrder);
+          const open = (await tx.order.findMany({ where: { customerId }, orderBy: { createdAt: 'desc' }, select: { id: true, stage: true, sideState: true, ownerId: true } })).filter(isActiveOrder);
           const owners = [...new Set(open.map((o) => o.ownerId).filter((o): o is string => !!o))];
           for (const ownerId of owners.length ? owners : await managerIds(tx)) {
             const theirs = open.find((o) => o.ownerId === ownerId) ?? open[0];

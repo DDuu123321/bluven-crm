@@ -75,6 +75,7 @@ export async function sendOrderEmail(ctx: Ctx, input: SendEmailInput, deps: Mail
   const db = ctx.db;
   const { order } = await requireOrderView(db, ctx, input.orderId);
   if (!isOrderStaff(actor, order)) throw new ForbiddenError('Only the salesperson for this order or a manager can write to the customer.');
+  if (!order.openedAt) throw new ConflictError('Open the job first. Until then it is only a lead.');
 
   const errors = new FieldErrors();
   const to = recipients(input.to, 'to', errors);

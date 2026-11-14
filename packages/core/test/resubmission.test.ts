@@ -1,5 +1,5 @@
 // What happens to the files and tasks of a submission once that submission is taken back:
-// a withdrawn or rejected deposit, a removed or replaced contract.
+// a withdrawn deposit record, a removed or replaced contract.
 import { readdirSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -8,7 +8,6 @@ import {
   cancelOrder,
   createQuote,
   createTask,
-  decideDeposit,
   deleteDocument,
   getHandoffChecklist,
   getOrderDocuments,
@@ -19,7 +18,7 @@ import {
   openDocument,
   parseDateOnly,
   pushOrder,
-  reopenDeposit,
+  returnHandoff,
   returnOrdersToPool,
   assignOrders,
   setTaskStatus,
@@ -46,14 +45,14 @@ beforeEach(async () => {
 
 describe('submitting the same file again', () => {
   it('accepts the same payment screenshot after a withdrawal', async () => {
-    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PENDING');
+    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PAID');
     const sam = as(w.sam, w.clock);
     const proof = pdf(`proof ${orderId}`); // byte for byte what was submitted the first time
     await withdrawDeposit(sam, { depositId: depositId! });
 
     // Typical case: the amount was mistyped, the screenshot is the same.
     const second = await submitDeposit(sam, { orderId, amountCents: 95_000, method: 'BANK_TRANSFER', files: [await staged(proof, 'transfer.pdf')] });
-    expect((await order(orderId)).stage).toBe('DEPOSIT_PENDING');
+    expect((await order(orderId)).stage).toBe('DEPOSIT_PAID');
 
     const current = await currentOf(orderId, 'deposit_proof');
     expect(current).toHaveLength(1);
@@ -71,25 +70,11 @@ describe('submitting the same file again', () => {
     expect(listed.superseded.map((d) => d.id)).toEqual([old.id]);
   });
 
-  it('accepts the same screenshot after finance rejects, and closes the "resubmit" task', async () => {
-    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PENDING');
-    await decideDeposit(as(w.fin, w.clock), { depositId: depositId!, decision: 'REJECT', note: 'No matching transfer yet.' });
-    expect(await db.task.count({ where: { orderId, kind: 'DEPOSIT_REJECTED', status: 'OPEN' } })).toBe(1);
-
-    w.clock.advanceDays(2);
-    await submitDeposit(as(w.sam, w.clock), { orderId, amountCents: 90_000, method: 'BANK_TRANSFER', files: [await staged(pdf(`proof ${orderId}`), 'transfer.pdf')] });
-    expect((await order(orderId)).stage).toBe('DEPOSIT_PENDING');
-    expect(await currentOf(orderId, 'deposit_proof')).toHaveLength(1);
-    // The task the rejection raised is done: it must not sit in the list, overdue, for ever.
-    expect(await db.task.findFirstOrThrow({ where: { orderId, kind: 'DEPOSIT_REJECTED' } })).toMatchObject({ status: 'DONE', completedById: w.sam.id });
-    // Nothing was left behind in temporary storage.
-    expect(readdirSync(`${getStorage().root}/.tmp`)).toEqual([]);
-  });
-
   it('accepts the same signed PDF when a contract is replaced or archived again', async () => {
-    const { orderId, quoteId } = await orderAt(w, 'SIGNED');
+    const { orderId, quoteId } = await orderAt(w, 'QUOTED');
     const sam = as(w.sam, w.clock);
     const signed = pdf(`contract ${orderId}`);
+    await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09'), files: [await staged(signed, 'signed.pdf')] });
 
     // Replace: same file, corrected signing date.
     await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-08'), files: [await staged(signed, 'signed.pdf')], replaceExisting: true });
@@ -101,13 +86,13 @@ describe('submitting the same file again', () => {
     expect(await currentOf(orderId, 'signed_contract')).toHaveLength(0);
     await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-08'), files: [await staged(signed, 'signed.pdf')] });
 
-    expect((await order(orderId)).stage).toBe('SIGNED');
+    expect((await order(orderId)).stage).toBe('PROPOSAL_SENT');
     expect(await currentOf(orderId, 'signed_contract')).toHaveLength(1);
     expect(await db.document.count({ where: { orderId, type: { key: 'signed_contract' }, supersededAt: { not: null } } })).toBe(2);
   });
 
   it('still refuses the same file twice while the first is current', async () => {
-    const { orderId } = await orderAt(w, 'SIGNED');
+    const { orderId } = await orderAt(w, 'QUOTED');
     const sam = as(w.sam, w.clock);
     const file = pdf('one screenshot');
     await expect(submitDeposit(sam, { orderId, amountCents: 90_000, method: 'BANK_TRANSFER', files: [await staged(file, 'a.pdf'), await staged(file, 'b.pdf')] })).rejects.toMatchObject({
@@ -120,6 +105,7 @@ describe('submitting the same file again', () => {
   it('keeps set-aside files out of what operations receives', async () => {
     const { orderId, quoteId } = await orderAt(w, 'READY');
     const sam = as(w.sam, w.clock);
+    await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09'), files: [await staged(pdf('first contract'), 'signed.pdf')] });
     const contract = await db.contract.findFirstOrThrow({ where: { orderId, voidedAt: null } });
     await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09'), files: [await staged(pdf('corrected contract'), 'signed-v2.pdf')], replaceExisting: true });
     expect((await getHandoffChecklist(db, orderId)).complete).toBe(true);
@@ -156,7 +142,7 @@ describe('contract and deposit files as a record', () => {
 
 describe('a contract fixes the quote version it was signed against', () => {
   it('records the version as sent and protects it from later Pylon changes', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const sam = as(w.sam, w.clock);
     const pylon = systemCtx(db, 'Pylon', w.clock.now);
     const design = { pylonDesignId: 'des_1', title: '6.6 kW', dcWatts: 6600, storageWh: null, totalCents: 1_850_000, depositCents: 185_000, currency: 'AUD', webProposalUrl: null };
@@ -168,8 +154,8 @@ describe('a contract fixes the quote version it was signed against', () => {
     expect(v1.sentAt).not.toBeNull();
     expect(v1.isAccepted).toBe(true);
     const o = await order(orderId);
-    expect(o.stage).toBe('SIGNED');
-    expect(o.quotedAt).not.toBeNull(); // "quoted" never trails "signed" in the figures
+    expect(o.stage).toBe('PROPOSAL_SENT');
+    expect(o.quotedAt).not.toBeNull(); // a version the customer signed has been sent, whether or not anyone said so
     expect(await db.activity.count({ where: { orderId, type: 'QUOTE', summary: { contains: 'recorded as sent' } } })).toBe(1);
     await expect(updateQuote(sam, { quoteId: v1.id, title: 'x', dcWatts: 1, storageWh: null, totalCents: 1, depositCents: null, notes: '' })).rejects.toMatchObject({ code: 'conflict' });
 
@@ -182,7 +168,7 @@ describe('a contract fixes the quote version it was signed against', () => {
   });
 
   it('says so when a version is marked as sent twice, and keeps nothing of the second file', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const sam = as(w.sam, w.clock);
     const quote = await createQuote(sam, { orderId, title: '6.6 kW', dcWatts: 6600, storageWh: null, totalCents: 900_000, depositCents: null, notes: '' });
     await markQuoteSent(sam, { quoteId: quote.id, file: await staged(pdf('as sent'), 'quote.pdf') });
@@ -193,46 +179,36 @@ describe('a contract fixes the quote version it was signed against', () => {
 });
 
 describe('a deposit on a cancelled order', () => {
-  it('is closed out by finance, not by sales', async () => {
-    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PENDING');
+  it('stays on record: sales cannot take it back', async () => {
+    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PAID');
     const sam = as(w.sam, w.clock);
     await cancelOrder(sam, { orderId, note: 'Customer changed their mind', refundStatus: 'PENDING' });
-
+    // Whether money has to go back is settled under the refund status, with the record of what was paid in front of everyone.
     await expect(withdrawDeposit(sam, { depositId: depositId! })).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('cancelled') });
-    // Finance records that the money did arrive; nobody is told to push the order.
-    await decideDeposit(as(w.fin, w.clock), { depositId: depositId!, decision: 'CONFIRM', receivedAmountCents: 90_000, receivedOn: parseDateOnly('2026-11-10') });
-    const deposit = await db.deposit.findUniqueOrThrow({ where: { id: depositId! } });
-    expect(deposit.status).toBe('CONFIRMED');
-    expect((await order(orderId)).sideState).toBe('CANCELLED');
-    const note = await db.notification.findFirstOrThrow({ where: { type: 'deposit.confirmed', userId: w.manager.id } });
-    expect(note.title).toContain('cancelled order');
-    expect(await db.notification.count({ where: { type: 'deposit.confirmed', body: { contains: 'push the order' } } })).toBe(0);
-    // And the confirmation is not something to undo here any more.
-    await expect(reopenDeposit(as(w.fin, w.clock), { depositId: depositId!, reason: 'x' })).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('cancelled') });
-  });
-
-  it('can be rejected without sending sales a task to resubmit', async () => {
-    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PENDING');
-    await cancelOrder(as(w.sam, w.clock), { orderId, note: 'Customer changed their mind', refundStatus: 'NOT_REQUIRED' });
-    await decideDeposit(as(w.fin, w.clock), { depositId: depositId!, decision: 'REJECT', note: 'Nothing arrived.' });
-    expect((await db.deposit.findUniqueOrThrow({ where: { id: depositId! } })).status).toBe('REJECTED');
-    expect(await db.task.count({ where: { orderId, kind: 'DEPOSIT_REJECTED' } })).toBe(0);
+    expect((await db.deposit.findUniqueOrThrow({ where: { id: depositId! } })).status).toBe('PENDING');
+    expect(await order(orderId)).toMatchObject({ sideState: 'CANCELLED', refundStatus: 'PENDING' });
   });
 });
 
 describe('the idle clock', () => {
-  it('restarts when finance confirms, because waiting for finance does not count', async () => {
-    const { orderId, depositId } = await orderAt(w, 'DEPOSIT_PENDING');
-    w.clock.advanceDays(11);
-    await decideDeposit(as(w.fin, w.clock), { depositId: depositId!, decision: 'CONFIRM', receivedAmountCents: 90_000, receivedOn: parseDateOnly('2026-11-20') });
-    const o = await order(orderId);
-    expect(o.stage).toBe('DEPOSIT_CONFIRMED');
+  it('restarts when the deposit is recorded, and when operations sends the order back', async () => {
+    const { orderId } = await orderAt(w, 'QUOTED');
+    w.clock.advanceDays(4);
+    await submitDeposit(as(w.sam, w.clock), { orderId, amountCents: 90_000, method: 'BANK_TRANSFER', files: [await staged(pdf('late proof'), 'transfer.pdf')] });
+    let o = await order(orderId);
     expect(o.lastStaffActivityAt.getTime()).toBe(w.clock.current.getTime());
     expect(o.idleLevel).toBe(0);
+    // Waiting for operations does not count against the salesperson. When the order comes back, the clock starts afresh.
+    const back = await orderAt(w, 'PUSHED', { phone: '0400 000 009', email: 'nine@example.com', address: '9 Nine St' });
+    w.clock.advanceDays(11);
+    await returnHandoff(as(w.ops, w.clock), { orderId: back.orderId, reason: 'The customer cannot be reached.' });
+    o = await order(back.orderId);
+    expect(o.stage).toBe('RETURNED');
+    expect(o.lastStaffActivityAt.getTime()).toBe(w.clock.current.getTime());
   });
 
   it('is not restarted by planning: adding, moving or cancelling a task', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const sam = as(w.sam, w.clock);
     const assignedAt = (await order(orderId)).lastStaffActivityAt.getTime();
     w.clock.advanceDays(3);
@@ -249,7 +225,7 @@ describe('the idle clock', () => {
 
 describe('tasks after a reassignment', () => {
   it('gives a reopened task to whoever has the order now', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const task = await createTask(as(w.sam, w.clock), { orderId, title: 'Send the brochure', dueAt: new Date('2026-11-12T00:00:00Z') });
     await setTaskStatus(as(w.sam, w.clock), { taskId: task.id, status: 'DONE' });
     const manager = as(w.manager, w.clock);

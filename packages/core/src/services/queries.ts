@@ -6,6 +6,7 @@ import {
   FINANCE_VISIBLE_DOC_TYPES,
   NOTIFICATION_KINDS,
   NOTIFICATION_KIND_RULES,
+  OPERATIONS_STAGES,
   ORDER_STAGES,
   can,
   endOfLocalDay,
@@ -53,7 +54,7 @@ function pipelineWhere(actor: UserActor): Prisma.OrderWhereInput {
 
 /**
  * Orders that are idle at the given tier or beyond: 1 from the day the salesperson is reminded,
- * 2 from the day the managers are told, 3 from the day an unsigned order goes back to the pool.
+ * 2 from the day the managers are told, 3 from the day an order without a deposit goes back to the pool.
  * The database form of idleTier(), and the only definition lists and figures use, so that a
  * number on the dashboard and the list behind it always agree.
  */
@@ -66,7 +67,7 @@ export function idleOrdersWhere(tier: 1 | 2 | 3, thresholds: IdleThresholds, now
 // Order lists
 // ---------------------------------------------------------------------------
 
-export const ORDER_VIEWS = ['active', 'on_hold', 'handed_over', 'lost', 'cancelled', 'all'] as const;
+export const ORDER_VIEWS = ['active', 'on_hold', 'operations', 'completed', 'lost', 'cancelled', 'all'] as const;
 export type OrderListView = (typeof ORDER_VIEWS)[number];
 
 export interface OrderListFilters {
@@ -75,6 +76,8 @@ export interface OrderListFilters {
   /** A user id, or "unassigned". Managers only. */
   owner?: string | null;
   sourceId?: string | null;
+  /** A lead source the salesperson chose, or "none" for orders that have none on record. */
+  leadOriginId?: string | null;
   q?: string | null;
   /** Only orders that are idle at this tier or beyond (see idleOrdersWhere). */
   idle?: 1 | 2 | 3 | null;
@@ -100,6 +103,7 @@ const listSelect = {
   leadDetails: true,
   owner: { select: { id: true, name: true } },
   source: { select: { id: true, name: true } },
+  leadOrigin: { select: { id: true, label: true } },
   customer: {
     select: {
       id: true,
@@ -126,11 +130,13 @@ export interface Paged<T> {
 function viewWhere(view: OrderListView): Prisma.OrderWhereInput {
   switch (view) {
     case 'active':
-      return { sideState: 'NONE', stage: { not: 'HANDED_OVER' } };
+      return { sideState: 'NONE', stage: { notIn: OPERATIONS_STAGES } };
     case 'on_hold':
       return { sideState: 'ON_HOLD' };
-    case 'handed_over':
-      return { stage: 'HANDED_OVER', sideState: { in: ['NONE', 'ON_HOLD'] } };
+    case 'operations':
+      return { stage: { in: ['IN_PROGRESS', 'INSTALLED'] }, sideState: { in: ['NONE', 'ON_HOLD'] } };
+    case 'completed':
+      return { stage: 'COMPLETED', sideState: { in: ['NONE', 'ON_HOLD'] } };
     case 'lost':
       return { sideState: 'LOST' };
     case 'cancelled':
@@ -194,6 +200,7 @@ export async function listPipelineOrders(ctx: Ctx, filters: OrderListFilters): P
   const and: Prisma.OrderWhereInput[] = [pipelineWhere(actor), viewWhere(filters.view ?? 'active')];
   if (filters.stage) and.push({ stage: filters.stage });
   if (filters.sourceId) and.push({ sourceId: filters.sourceId });
+  if (filters.leadOriginId) and.push({ leadOriginId: filters.leadOriginId === 'none' ? null : filters.leadOriginId });
   if (filters.idle) and.push(idleOrdersWhere(filters.idle, (await getSettings(ctx.db)).idle, nowOf(ctx)));
   if (isManager(actor)) {
     if (filters.owner === 'unassigned') and.push({ ownerId: null });
@@ -219,14 +226,14 @@ export async function pipelineStageCounts(ctx: Ctx, owner?: string | null): Prom
 export async function listUnassignedOrders(ctx: Ctx, filters: OrderListFilters & { history?: boolean }): Promise<Paged<OrderListRow>> {
   const actor = user(ctx);
   if (!can(actor, 'orders.assign')) throw new ForbiddenError();
-  const and: Prisma.OrderWhereInput[] = [{ ownerId: null, isBackfill: !!filters.history, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } }];
+  const and: Prisma.OrderWhereInput[] = [{ ownerId: null, isBackfill: !!filters.history, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } }];
   if (filters.sourceId) and.push({ sourceId: filters.sourceId });
   if (filters.q) and.push(searchWhere(filters.q));
   return page(ctx.db, { AND: and }, filters, [{ leadCreatedAt: filters.history ? 'desc' : 'asc' }, { id: 'asc' }], (r) => r);
 }
 
 export async function unassignedCount(db: Db): Promise<number> {
-  return db.order.count({ where: { ownerId: null, isBackfill: false, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } } });
+  return db.order.count({ where: { ownerId: null, isBackfill: false, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } } });
 }
 
 /** Active salespeople, for assignment pickers. */
@@ -234,7 +241,7 @@ export async function listSalespeople(db: Db): Promise<{ id: string; name: strin
   const users = await db.user.findMany({ where: { isActive: true, roles: { has: 'SALES' } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
   const counts = await db.order.groupBy({
     by: ['ownerId'],
-    where: { ownerId: { in: users.map((u) => u.id) }, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } },
+    where: { ownerId: { in: users.map((u) => u.id) }, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } },
     _count: { _all: true },
   });
   const byOwner = new Map(counts.map((c) => [c.ownerId, c._count._all]));
@@ -248,6 +255,8 @@ export async function listSalespeople(db: Db): Promise<{ id: string; name: strin
 const detailInclude = {
   owner: { select: { id: true, name: true, email: true } },
   source: { select: { id: true, name: true, key: true } },
+  leadOrigin: { select: { id: true, label: true } },
+  openedBy: { select: { name: true } },
   lostReason: { select: { label: true } },
   customer: {
     include: {
@@ -529,10 +538,15 @@ const depositInclude = {
 } satisfies Prisma.DepositInclude;
 export type DepositRow = Prisma.DepositGetPayload<{ include: typeof depositInclude }>;
 
-export async function listDeposits(ctx: Ctx, status: 'PENDING' | 'DECIDED'): Promise<DepositRow[]> {
+/**
+ * Deposits, for finance to read: the ones sales has recorded and operations has not confirmed
+ * yet (oldest first), or the ones confirmed as received (latest first). Finance decides nothing
+ * here: operations confirms a deposit when it accepts the order.
+ */
+export async function listDeposits(ctx: Ctx, status: 'PENDING' | 'RECEIVED'): Promise<DepositRow[]> {
   if (!can(user(ctx), 'finance.deposits')) throw new ForbiddenError();
   return ctx.db.deposit.findMany({
-    where: { status: status === 'PENDING' ? 'PENDING' : { in: ['CONFIRMED', 'REJECTED'] } },
+    where: { status: status === 'PENDING' ? 'PENDING' : 'CONFIRMED' },
     include: depositInclude,
     orderBy: status === 'PENDING' ? [{ submittedAt: 'asc' }] : [{ decidedAt: 'desc' }],
     take: status === 'PENDING' ? 500 : 100,
@@ -546,8 +560,9 @@ export async function getDeposit(ctx: Ctx, depositId: string): Promise<DepositRo
   return deposit;
 }
 
-export async function pendingDepositCount(db: Db): Promise<number> {
-  return db.deposit.count({ where: { status: 'PENDING' } });
+/** Refunds finance still has to pay, for its menu. */
+export async function pendingRefundCount(db: Db): Promise<number> {
+  return db.order.count({ where: { sideState: 'CANCELLED', refundStatus: 'PENDING' } });
 }
 
 /** Cancelled orders whose refund is still to be paid. */
@@ -611,30 +626,39 @@ export interface Dashboard {
   range: DashboardRange;
   totals: {
     leads: number;
-    signed: number;
-    handedOver: number;
+    /** Orders whose deposit was recorded in the period. */
+    deposits: number;
+    /** Orders operations accepted in the period. */
+    accepted: number;
+    /** Jobs closed in the period, with the final payment in. */
+    completed: number;
     lost: number;
     unassigned: number;
-    pendingDeposits: number;
+    /** Orders with a deposit that have not been pushed to operations yet. */
+    readyToPush: number;
     returned: number;
     /** Orders idle at tier 1, 2 and 3 or beyond. Each number includes the ones after it. */
     idle: [number, number, number];
-    /** For the contracts signed in the period: days from the enquiry to the signature, on average. */
-    avgDaysToSign: number | null;
+    /** For the deposits paid in the period: days from the enquiry to the deposit, on average. */
+    avgDaysToDeposit: number | null;
   };
   /** The idle days at which each tier starts, for labelling the figures. */
   idleDays: [number, number, number];
-  bySource: { sourceId: string; name: string; leads: number; contacted: number; quoted: number; signed: number; lost: number; avgDaysToSign: number | null }[];
-  bySalesperson: { userId: string; name: string; open: number; stages: Partial<Record<OrderStage, number>>; signedInRange: number; avgFirstResponseHours: number | null; idle: number; idleLong: number }[];
+  /** By the channel a lead arrived through. */
+  bySource: { sourceId: string; name: string; leads: number; opened: number; proposals: number; deposits: number; lost: number; avgDaysToDeposit: number | null }[];
+  /** By where the customer came from, as the salesperson recorded it: what partners are paid by. Deposits and their value count by the day the deposit was paid. */
+  byOrigin: { originId: string | null; label: string; opened: number; deposits: number; depositValueCents: number; completed: number }[];
+  bySalesperson: { userId: string; name: string; open: number; stages: Partial<Record<OrderStage, number>>; depositsInRange: number; avgFirstResponseHours: number | null; idle: number; idleLong: number }[];
   lostReasons: { label: string; count: number }[];
-  weekly: { weekStart: string; leads: number; signed: number }[];
+  weekly: { weekStart: string; leads: number; deposits: number }[];
   /** The last twelve calendar months, oldest first. */
-  monthly: { month: string; leads: number; signed: number; handedOver: number; lost: number }[];
+  monthly: { month: string; leads: number; deposits: number; accepted: number; completed: number; lost: number }[];
 }
 
 /**
  * Figures for the manager dashboard. A salesperson gets the same shape limited to their own orders.
- * "Signed" counts orders whose signing date falls in the range.
+ * A sale counts from the day its deposit was recorded: "deposits" are the orders whose deposit
+ * falls in the range and is still on record.
  */
 export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Dashboard> {
   const actor = user(ctx);
@@ -643,9 +667,6 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   const start = zonedTimeToUtc(range.from, tz);
   const end = endOfLocalDay(range.to, tz);
   if (!start || !end) throw new NotFoundError('Invalid date range.');
-  // Signing dates are date-only values.
-  const signedFrom = new Date(`${range.from}T00:00:00Z`);
-  const signedTo = new Date(`${range.to}T00:00:00Z`);
   const mine = isManager(actor) ? Prisma.sql`TRUE` : Prisma.sql`o."ownerId" = ${actor.id}`;
   const scope = pipelineWhere(actor);
   const db = ctx.db;
@@ -653,44 +674,58 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   const thresholds = (await getSettings(db)).idle;
   const idleWhere = (tier: 1 | 2 | 3): Prisma.OrderWhereInput => ({ AND: [scope, idleOrdersWhere(tier, thresholds, now)] });
 
-  const [leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle1, idle2, idle3] = await Promise.all([
+  const [leads, deposits, accepted, completed, lost, unassigned, readyToPush, returned, idle1, idle2, idle3] = await Promise.all([
     db.order.count({ where: { AND: [scope, { leadCreatedAt: { gte: start, lt: end } }] } }),
-    db.order.count({ where: { AND: [scope, { signedAt: { gte: signedFrom, lte: signedTo } }] } }),
-    db.order.count({ where: { AND: [scope, { handedOverAt: { gte: start, lt: end } }] } }),
+    db.order.count({ where: { AND: [scope, { depositAt: { gte: start, lt: end } }] } }),
+    db.order.count({ where: { AND: [scope, { handedOverAt: { gte: start, lt: end }, stage: { in: OPERATIONS_STAGES } }] } }),
+    db.order.count({ where: { AND: [scope, { completedAt: { gte: start, lt: end } }] } }),
     db.order.count({ where: { AND: [scope, { sideState: 'LOST', lostAt: { gte: start, lt: end } }] } }),
     isManager(actor) ? unassignedCount(db) : Promise.resolve(0),
-    db.order.count({ where: { AND: [scope, { stage: 'DEPOSIT_PENDING', sideState: { in: ['NONE', 'ON_HOLD'] } }] } }),
+    db.order.count({ where: { AND: [scope, { stage: 'DEPOSIT_PAID', sideState: { in: ['NONE', 'ON_HOLD'] } }] } }),
     db.order.count({ where: { AND: [scope, { stage: 'RETURNED', sideState: 'NONE' }] } }),
     db.order.count({ where: idleWhere(1) }),
     db.order.count({ where: idleWhere(2) }),
     db.order.count({ where: idleWhere(3) }),
   ]);
-  // Both dates as calendar days in the business time zone; a signature dated before the enquiry was typed in counts as the same day.
-  const daysToSign = Prisma.sql`GREATEST(0, o."signedAt"::date - (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})::date)`;
-  const [{ days: avgDaysToSign }] = await db.$queryRaw<[{ days: number | null }]>(Prisma.sql`
-    SELECT AVG(${daysToSign})::float AS "days" FROM "Order" o WHERE o."signedAt" >= ${signedFrom} AND o."signedAt" <= ${signedTo} AND ${mine}`);
+  // Both as calendar days in the business time zone; a deposit recorded before the enquiry was typed in counts as the same day.
+  const daysToDeposit = Prisma.sql`GREATEST(0, (o."depositAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})::date - (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})::date)`;
+  const [{ days: avgDaysToDeposit }] = await db.$queryRaw<[{ days: number | null }]>(Prisma.sql`
+    SELECT AVG(${daysToDeposit})::float AS "days" FROM "Order" o WHERE o."depositAt" >= ${start} AND o."depositAt" < ${end} AND ${mine}`);
 
   const bySource = await db.$queryRaw<Dashboard['bySource']>(Prisma.sql`
     SELECT s."id" AS "sourceId", s."name",
            COUNT(*)::int AS "leads",
-           -- A funnel only narrows: an order that was quoted counts as contacted even if nobody logged the call.
-           COUNT(*) FILTER (WHERE o."firstContactedAt" IS NOT NULL OR o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "contacted",
-           COUNT(*) FILTER (WHERE o."quotedAt" IS NOT NULL OR o."signedAt" IS NOT NULL)::int AS "quoted",
-           COUNT(*) FILTER (WHERE o."signedAt" IS NOT NULL)::int AS "signed",
+           -- A funnel only narrows: an order with a deposit counts as opened and as proposed to, whatever was or was not recorded on the way.
+           COUNT(*) FILTER (WHERE o."openedAt" IS NOT NULL OR o."quotedAt" IS NOT NULL OR o."depositAt" IS NOT NULL)::int AS "opened",
+           COUNT(*) FILTER (WHERE o."quotedAt" IS NOT NULL OR o."depositAt" IS NOT NULL)::int AS "proposals",
+           COUNT(*) FILTER (WHERE o."depositAt" IS NOT NULL)::int AS "deposits",
            COUNT(*) FILTER (WHERE o."sideState" = 'LOST')::int AS "lost",
-           (AVG(${daysToSign}) FILTER (WHERE o."signedAt" IS NOT NULL))::float AS "avgDaysToSign"
+           (AVG(${daysToDeposit}) FILTER (WHERE o."depositAt" IS NOT NULL))::float AS "avgDaysToDeposit"
     FROM "Order" o JOIN "LeadSource" s ON s."id" = o."sourceId"
     WHERE o."leadCreatedAt" >= ${start} AND o."leadCreatedAt" < ${end} AND ${mine}
     GROUP BY s."id", s."name"
     ORDER BY COUNT(*) DESC, s."name"`);
 
+  // What partners are paid by. Each column counts by its own date: jobs opened, deposits paid and jobs completed in the period.
+  const byOrigin = await db.$queryRaw<Dashboard['byOrigin']>(Prisma.sql`
+    SELECT g."id" AS "originId", COALESCE(g."label", 'Not recorded') AS "label",
+           COUNT(*) FILTER (WHERE o."openedAt" >= ${start} AND o."openedAt" < ${end})::int AS "opened",
+           COUNT(*) FILTER (WHERE o."depositAt" >= ${start} AND o."depositAt" < ${end})::int AS "deposits",
+           COALESCE(SUM((SELECT q."totalCents" FROM "Quote" q WHERE q."orderId" = o."id" AND q."isAccepted" LIMIT 1)) FILTER (WHERE o."depositAt" >= ${start} AND o."depositAt" < ${end}), 0)::float AS "depositValueCents",
+           COUNT(*) FILTER (WHERE o."completedAt" >= ${start} AND o."completedAt" < ${end})::int AS "completed"
+    FROM "Order" o LEFT JOIN "LeadOrigin" g ON g."id" = o."leadOriginId"
+    WHERE ${mine}
+      AND ((o."openedAt" >= ${start} AND o."openedAt" < ${end}) OR (o."depositAt" >= ${start} AND o."depositAt" < ${end}) OR (o."completedAt" >= ${start} AND o."completedAt" < ${end}))
+    GROUP BY g."id", g."label", g."sortOrder"
+    ORDER BY g."sortOrder" NULLS LAST, 2`);
+
   const people = isManager(actor)
-    ? await db.user.findMany({ where: { OR: [{ isActive: true, roles: { has: 'SALES' } }, { ownedOrders: { some: { sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } } } }] }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
+    ? await db.user.findMany({ where: { OR: [{ isActive: true, roles: { has: 'SALES' } }, { ownedOrders: { some: { sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } } } }] }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
     : [{ id: actor.id, name: actor.name }];
   const ids = people.map((p) => p.id);
-  const [stageGroups, signedGroups, responseRows, idleGroups, idleLongGroups] = await Promise.all([
-    db.order.groupBy({ by: ['ownerId', 'stage'], where: { ownerId: { in: ids }, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { not: 'HANDED_OVER' } }, _count: { _all: true } }),
-    db.order.groupBy({ by: ['ownerId'], where: { ownerId: { in: ids }, signedAt: { gte: signedFrom, lte: signedTo } }, _count: { _all: true } }),
+  const [stageGroups, depositGroups, responseRows, idleGroups, idleLongGroups] = await Promise.all([
+    db.order.groupBy({ by: ['ownerId', 'stage'], where: { ownerId: { in: ids }, sideState: { in: ['NONE', 'ON_HOLD'] }, stage: { notIn: OPERATIONS_STAGES } }, _count: { _all: true } }),
+    db.order.groupBy({ by: ['ownerId'], where: { ownerId: { in: ids }, depositAt: { gte: start, lt: end } }, _count: { _all: true } }),
     ids.length
       ? db.$queryRaw<{ ownerId: string; hours: number }[]>(Prisma.sql`
           SELECT o."ownerId", AVG(EXTRACT(EPOCH FROM (o."firstContactedAt" - o."assignedAt")) / 3600)::float AS "hours"
@@ -715,7 +750,7 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
       name: p.name,
       open,
       stages,
-      signedInRange: signedGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
+      depositsInRange: depositGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
       avgFirstResponseHours: responseRows.find((r) => r.ownerId === p.id)?.hours ?? null,
       idle: idleGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
       idleLong: idleLongGroups.find((g) => g.ownerId === p.id)?._count._all ?? 0,
@@ -737,7 +772,7 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     )
     SELECT to_char(weeks.w, 'YYYY-MM-DD') AS "weekStart",
            (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('week', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = weeks.w) AS "leads",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."signedAt" IS NOT NULL AND date_trunc('week', o."signedAt") = weeks.w) AS "signed"
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."depositAt" IS NOT NULL AND date_trunc('week', (o."depositAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = weeks.w) AS "deposits"
     FROM weeks ORDER BY weeks.w`);
 
   const monthly = await db.$queryRaw<Dashboard['monthly']>(Prisma.sql`
@@ -746,16 +781,18 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
     )
     SELECT to_char(months.m, 'YYYY-MM') AS "month",
            (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('month', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "leads",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."signedAt" IS NOT NULL AND date_trunc('month', o."signedAt") = months.m) AS "signed",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."handedOverAt" IS NOT NULL AND date_trunc('month', (o."handedOverAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "handedOver",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."depositAt" IS NOT NULL AND date_trunc('month', (o."depositAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "deposits",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."handedOverAt" IS NOT NULL AND o."stage" IN ('IN_PROGRESS', 'INSTALLED', 'COMPLETED') AND date_trunc('month', (o."handedOverAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "accepted",
+           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."completedAt" IS NOT NULL AND date_trunc('month', (o."completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "completed",
            (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."sideState" = 'LOST' AND o."lostAt" IS NOT NULL AND date_trunc('month', (o."lostAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "lost"
     FROM months ORDER BY months.m`);
 
   return {
     range,
-    totals: { leads, signed, handedOver, lost, unassigned, pendingDeposits, returned, idle: [idle1, idle2, idle3], avgDaysToSign },
+    totals: { leads, deposits, accepted, completed, lost, unassigned, readyToPush, returned, idle: [idle1, idle2, idle3], avgDaysToDeposit },
     idleDays: idleTierDays(thresholds),
     bySource,
+    byOrigin,
     bySalesperson,
     lostReasons,
     weekly,
@@ -774,11 +811,15 @@ const reportSelect = {
   sideState: true,
   leadCreatedAt: true,
   assignedAt: true,
+  openedAt: true,
   firstContactedAt: true,
+  designAt: true,
   quotedAt: true,
-  signedAt: true,
+  depositAt: true,
   firstPushedAt: true,
   handedOverAt: true,
+  jobDoneAt: true,
+  completedAt: true,
   lostAt: true,
   cancelledAt: true,
   returnCount: true,
@@ -786,10 +827,13 @@ const reportSelect = {
   customer: { select: { firstName: true, lastName: true } },
   property: { select: { addressLine1: true, addressLine2: true, suburb: true, state: true, postcode: true } },
   source: { select: { name: true } },
+  leadOrigin: { select: { label: true } },
+  leadOriginNote: true,
   owner: { select: { name: true } },
   lostReason: { select: { label: true } },
   quotes: { where: { isAccepted: true }, take: 1, select: { dcWatts: true, storageWh: true, totalCents: true } },
-  deposits: { where: { status: 'CONFIRMED' as const }, take: 1, select: { receivedAmountCents: true, amountCents: true, receivedOn: true } },
+  deposits: { where: { status: { in: ['PENDING', 'CONFIRMED'] } }, orderBy: { submittedAt: 'desc' as const }, take: 1, select: { status: true, receivedAmountCents: true, amountCents: true, receivedOn: true } },
+  opsJob: { select: { installDate: true, installerName: true, finalAmountCents: true, finalReceivedOn: true } },
 } satisfies Prisma.OrderSelect;
 
 export type ReportOrder = Prisma.OrderGetPayload<{ select: typeof reportSelect }> & { customerName: string; address: string };

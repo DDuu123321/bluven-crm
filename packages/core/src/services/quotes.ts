@@ -8,7 +8,7 @@ import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
 import { attachStaged, cleanupStaged, finishImage, type StagedFile } from './documents';
-import { lockOrderForEdit, lockOrderForStaff, requireEditableOrder, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { lockOrderForWork, lockOrderForStaff, markDesignStarted, requireWorkableOrder, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 import { DOC_TYPE } from './reference';
 
 export interface QuoteFields {
@@ -51,7 +51,7 @@ export async function createQuote(ctx: Ctx, input: { orderId: string; file?: Sta
   try {
     validate(input);
     const result = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, input.orderId);
+      const order = await lockOrderForWork(tx, ctx, input.orderId);
       const version = await nextVersion(tx, order.id);
       const quoteType = await tx.documentType.findUniqueOrThrow({ where: { key: DOC_TYPE.quote } });
       const doc = input.file ? await attachStaged(tx, ctx, order, input.file, { type: quoteType, note: `Quote v${version}` }) : null;
@@ -74,6 +74,9 @@ export async function createQuote(ctx: Ctx, input: { orderId: string; file?: Sta
       });
       await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'QUOTE', summary: `${describe(quote)} recorded`, payload: { quoteId: id } });
       await touchStaffActivity(tx, ctx, order);
+      // A quote version means that the design has started, whether or not anyone said so.
+      await markDesignStarted(tx, ctx, order.id);
+      await syncOrderStage(tx, ctx, order.id);
       await audit(tx, ctx, {
         action: 'quote.create',
         entityType: 'Quote',
@@ -99,10 +102,10 @@ async function loadQuote(ctx: Ctx, quoteId: string): Promise<Quote> {
   return quote;
 }
 
-/** Gate for the "mark as sent" endpoint, which may carry a file: see requireEditableOrder. */
+/** Gate for the "mark as sent" endpoint, which may carry a file: see requireWorkableOrder. */
 export async function requireEditableQuote(ctx: Ctx, quoteId: string): Promise<void> {
   const quote = await loadQuote(ctx, quoteId);
-  await requireEditableOrder(ctx, quote.orderId, 'Quote');
+  await requireWorkableOrder(ctx, quote.orderId, 'Quote');
 }
 
 /** Edits a version that has not gone to the customer yet. Sent versions are history: add a new one. */
@@ -110,7 +113,7 @@ export async function updateQuote(ctx: Ctx, input: { quoteId: string } & QuoteFi
   validate(input);
   const found = await loadQuote(ctx, input.quoteId);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+    const order = await lockOrderForWork(tx, ctx, found.orderId, 'Quote');
     const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id } });
     if (quote.sentAt || quote.isAccepted) throw new ConflictError('This version has already gone to the customer. Add a new version instead.');
     const next = {
@@ -138,21 +141,26 @@ export async function updateQuote(ctx: Ctx, input: { quoteId: string } & QuoteFi
 }
 
 /**
- * Puts the file that will go to the customer on a version that has not been sent yet, without
- * saying that it was sent. A version that came from Pylon has figures but no file; once it has
- * one, the salesperson can attach it to an e-mail written from the order, and sending that
- * e-mail is what records the version as sent.
+ * Puts the file that goes to the customer on a version, without saying that it was sent. A
+ * version that came from Pylon has figures but no file; once it has one, the salesperson can
+ * attach it to an e-mail written from the order, and sending that e-mail is what records the
+ * version as sent.
+ *
+ * Until a version has gone to the customer its file can be replaced. Afterwards the file is the
+ * record of what the customer saw: one that is missing can still be added (operations need it
+ * with the order), one that is there stays.
  */
 export async function attachQuoteFile(ctx: Ctx, input: { quoteId: string; file: StagedFile }): Promise<void> {
   try {
     const found = await loadQuote(ctx, input.quoteId);
     const doc = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+      const order = await lockOrderForWork(tx, ctx, found.orderId, 'Quote');
       const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id } });
-      if (quote.sentAt || quote.isAccepted) throw new ConflictError('This version has already gone to the customer. Add a new version instead.');
+      const gone = !!quote.sentAt || quote.isAccepted;
+      if (gone && quote.documentId) throw new ConflictError('This version has already gone to the customer with its file. Add a new version instead.');
       const quoteType = await tx.documentType.findUniqueOrThrow({ where: { key: DOC_TYPE.quote } });
       const current = quote.documentId ? await tx.document.findUnique({ where: { id: quote.documentId } }) : null;
-      const attached = await attachStaged(tx, ctx, order, input.file, { type: quoteType, note: `Quote v${quote.version}`, replaces: current });
+      const attached = await attachStaged(tx, ctx, order, input.file, { type: quoteType, note: `Quote v${quote.version}${gone ? ' as sent' : ''}`, replaces: current });
       await tx.quote.update({ where: { id: quote.id }, data: { documentId: attached.id } });
       await touchStaffActivity(tx, ctx, order);
       await audit(tx, ctx, {
@@ -185,7 +193,7 @@ export interface MarkSentOptions {
 
 /**
  * Records that a version went to the customer, inside the caller's transaction (order lock held).
- * This is what moves an order to "Quoted". Returns the attached document, if a file was given.
+ * This is what moves an order to "Proposal sent". Returns the attached document, if a file was given.
  */
 export async function markQuoteSentInTx(tx: Tx, ctx: Ctx, order: OrderState, quoteId: string, opts: MarkSentOptions): Promise<Document | null> {
   const quote = await tx.quote.findFirst({ where: { id: quoteId, orderId: order.id } });
@@ -230,7 +238,7 @@ export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?:
   try {
     const found = await loadQuote(ctx, input.quoteId);
     const doc = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+      const order = await lockOrderForWork(tx, ctx, found.orderId, 'Quote');
       // Said out loud rather than ignored: a file sent along would otherwise vanish without a word.
       const current = await tx.quote.findUniqueOrThrow({ where: { id: found.id }, select: { sentAt: true } });
       if (current.sentAt) throw new ConflictError('This version is already marked as sent.');
@@ -243,11 +251,44 @@ export async function markQuoteSent(ctx: Ctx, input: { quoteId: string; sentAt?:
   }
 }
 
+/**
+ * Says which version the customer went ahead with. It is the one operations works from. The
+ * deposit form asks for it; this is for correcting the choice afterwards.
+ */
+export async function acceptQuote(ctx: Ctx, input: { quoteId: string }): Promise<void> {
+  const found = await loadQuote(ctx, input.quoteId);
+  await inTx(ctx.db, async (tx) => {
+    const order = await lockOrderForWork(tx, ctx, found.orderId, 'Quote');
+    await acceptQuoteInTx(tx, ctx, order, found.id);
+  });
+}
+
+/** Marks one version as the accepted one, inside the caller's transaction (order lock held). */
+export async function acceptQuoteInTx(tx: Tx, ctx: Ctx, order: OrderState, quoteId: string): Promise<void> {
+  const quote = await tx.quote.findFirst({ where: { id: quoteId, orderId: order.id } });
+  if (!quote) throw new NotFoundError('Quote not found.');
+  if (quote.isAccepted) return;
+  const previous = await tx.quote.findFirst({ where: { orderId: order.id, isAccepted: true }, select: { id: true, version: true } });
+  await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true }, data: { isAccepted: false } });
+  await tx.quote.update({ where: { id: quote.id }, data: { isAccepted: true } });
+  await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'QUOTE', summary: `${describe(quote)} marked as the version the customer accepted`, payload: { quoteId: quote.id } });
+  await audit(tx, ctx, {
+    action: 'quote.accept',
+    entityType: 'Quote',
+    entityId: quote.id,
+    orderId: order.id,
+    customerId: order.customerId,
+    summary: `${order.orderNo}: quote v${quote.version} marked as accepted`,
+    before: { acceptedVersion: previous?.version ?? null },
+    after: { acceptedVersion: quote.version },
+  });
+}
+
 /** Removes a version that never went to the customer. */
 export async function deleteQuote(ctx: Ctx, input: { quoteId: string }): Promise<void> {
   const found = await loadQuote(ctx, input.quoteId);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Quote');
+    const order = await lockOrderForWork(tx, ctx, found.orderId, 'Quote');
     const quote = await tx.quote.findUniqueOrThrow({ where: { id: found.id }, include: { contracts: { select: { id: true } } } });
     if (quote.sentAt || quote.isAccepted || quote.contracts.length > 0) {
       throw new ConflictError('This version has gone to the customer or is referenced by a contract, so it is kept as history.');
@@ -314,7 +355,8 @@ export interface PylonQuoteData {
 /**
  * Records what a Pylon design currently says. A version the customer has not seen is updated in
  * place; once a version has been sent, changed figures become a new version so the sent one is
- * preserved. Never changes the order's stage. Must run inside a transaction holding the order lock.
+ * preserved. The first version tells that the design has started. Must run inside a transaction
+ * holding the order lock.
  */
 export async function upsertPylonQuote(
   tx: Tx,
@@ -393,5 +435,7 @@ export async function upsertPylonQuote(
     summary: `${order.orderNo}: ${describe(quote)} received from Pylon`,
     after: { version, pylonDesignId: data.pylonDesignId, ...figures },
   });
+  await markDesignStarted(tx, ctx, order.id);
+  await syncOrderStage(tx, ctx, order.id);
   return { quoteId: id, outcome: existing ? 'new_version' : 'created', documentId: doc?.id ?? null };
 }

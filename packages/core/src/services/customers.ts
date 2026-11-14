@@ -1,12 +1,12 @@
 // Editing the customer and the property behind an order.
 import type { Prisma, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
-import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, normalizeEmail, normalizePhone } from '../domain';
-import { FieldErrors, NotFoundError } from '../errors';
+import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, isOrderStaff, normalizeEmail, normalizePhone, orderViewFor } from '../domain';
+import { FieldErrors, ForbiddenError, NotFoundError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit, diff } from './audit';
-import { lockOrderForEdit, lockOrderForStaff, type OrderState } from './orders';
+import { accessFacts, loadOrderState, lockOrder, lockOrderForEdit, lockOrderForStaff, type OrderState } from './orders';
 
 export interface UpdateCustomerInput {
   orderId: string;
@@ -96,11 +96,20 @@ export async function updateCustomer(ctx: Ctx, input: UpdateCustomerInput): Prom
 
 /**
  * Someone working on the order says that an address which came with an enquiry really is the
- * customer's. From then on mail from it is shown without a warning and can be written to.
+ * customer's. From then on mail from it is shown without a warning and can be written to. That
+ * is the salesperson or a manager, and operations once the order has been pushed to them: the
+ * e-mails that go to the customer by themselves need a confirmed address too.
  */
 export async function confirmCustomerEmail(ctx: Ctx, input: { orderId: string; emailId: string }): Promise<void> {
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForStaff(tx, ctx, input.orderId);
+    await lockOrder(tx, input.orderId);
+    const order = await loadOrderState(tx, input.orderId);
+    if (!order) throw new NotFoundError('Order not found.');
+    if (ctx.actor.kind === 'user') {
+      const view = orderViewFor(ctx.actor, accessFacts(order));
+      if (!view) throw new NotFoundError('Order not found.');
+      if (!isOrderStaff(ctx.actor, order) && view !== 'OPS') throw new ForbiddenError('Only the people working on this order can do this.');
+    }
     const row = await tx.customerEmail.findFirst({ where: { id: input.emailId, customerId: order.customerId } });
     if (!row) throw new NotFoundError('Address not found.');
     if (!row.unconfirmed) return;

@@ -14,17 +14,25 @@ const HEADER = [
   'Order',
   'Customer',
   'Address',
-  'Source',
+  'Lead source',
+  'Lead source note',
+  'Came in through',
   'Salesperson',
   'Stage',
   'State',
   'Enquiry received',
   'Assigned',
+  'Job opened',
   'First contact',
-  'Quoted',
-  'Signed',
+  'Design started',
+  'Proposal sent',
+  'Deposit recorded',
   'First pushed to operations',
-  'Handed over',
+  'Accepted by operations',
+  'Installation date',
+  'Installer',
+  'Job done',
+  'Job closed',
   'Lost',
   'Lost reason',
   'Cancelled',
@@ -32,14 +40,16 @@ const HEADER = [
   'Last staff activity',
   'Solar',
   'Battery',
-  'Quote total',
-  'Deposit received',
-  'Deposit received on',
+  'Proposal total',
+  'Deposit',
+  'Deposit confirmed on',
+  'Final payment',
+  'Final payment received on',
 ];
 
 /**
- * The orders whose enquiry was received in the period, as CSV: one row per order with the date it
- * reached each stage. A manager gets every order, a salesperson their own. The export is recorded
+ * The orders whose enquiry was received in the period, as CSV: one row per order with where the
+ * customer came from and the date it reached each stage, from the lead to the closed job. A manager gets every order, a salesperson their own. The export is recorded
  * in the audit log, and rows are sent a page at a time.
  */
 export async function GET(request: Request): Promise<Response> {
@@ -81,18 +91,26 @@ export async function GET(request: Request): Promise<Response> {
                 o.orderNo,
                 o.customerName,
                 o.address,
+                o.leadOrigin?.label ?? '',
+                o.leadOriginNote,
                 o.source.name,
                 o.owner?.name ?? '',
                 STAGE_LABEL[o.stage],
                 o.sideState === 'NONE' ? '' : SIDE_STATE_LABEL[o.sideState],
                 day(o.leadCreatedAt),
                 day(o.assignedAt),
+                day(o.openedAt),
                 day(o.firstContactedAt),
+                day(o.designAt),
                 day(o.quotedAt),
-                // The signing date and the day the deposit arrived are calendar dates as entered.
-                dateOnlyString(o.signedAt),
+                day(o.depositAt),
                 day(o.firstPushedAt),
                 day(o.handedOverAt),
+                // The installation date and the days money arrived are calendar dates as entered.
+                dateOnlyString(o.opsJob?.installDate),
+                o.opsJob?.installerName ?? '',
+                day(o.jobDoneAt),
+                day(o.completedAt),
                 o.sideState === 'LOST' ? day(o.lostAt) : '',
                 o.sideState === 'LOST' ? (o.lostReason?.label ?? '') : '',
                 o.sideState === 'CANCELLED' ? day(o.cancelledAt) : '',
@@ -102,7 +120,9 @@ export async function GET(request: Request): Promise<Response> {
                 quote ? formatKwh(quote.storageWh) : '',
                 money(quote?.totalCents),
                 money(deposit ? (deposit.receivedAmountCents ?? deposit.amountCents) : null),
-                deposit ? dateOnlyString(deposit.receivedOn) : '',
+                deposit?.status === 'CONFIRMED' ? dateOnlyString(deposit.receivedOn) : '',
+                money(o.opsJob?.finalAmountCents),
+                o.completedAt ? dateOnlyString(o.opsJob?.finalReceivedOn) : '',
               ]
                 .map(cell)
                 .join(',') + '\r\n';

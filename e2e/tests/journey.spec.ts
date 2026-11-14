@@ -3,7 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 import { E2E } from '../env';
 import { expectStage, file, folder, pdf, png, shot, signIn, state } from './helpers';
 
-// One lead, followed from the Bluven website all the way to acceptance by operations.
+// One lead, followed from the Bluven website all the way to the closed job: opened by the
+// salesperson, proposal, deposit, pushed to operations, installed, final payment.
 test.describe.configure({ mode: 'serial' });
 
 let orderUrl = '';
@@ -102,7 +103,7 @@ test('the manager assigns the lead', async ({ browser }) => {
   await context.close();
 });
 
-test('the salesperson works the lead up to a confirmed deposit', async ({ browser }) => {
+test('the salesperson opens the job and works it up to the deposit', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'sam');
   await expect(page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: /Notifications\s*1/ })).toBeVisible();
   await page.getByRole('link', { name: 'Jane Smith' }).click();
@@ -114,25 +115,44 @@ test('the salesperson works the lead up to a confirmed deposit', async ({ browse
   await expect(page.getByText('Repeat enquiry received via Bluven website')).toBeVisible();
   await expect(page.getByText('12 Sample St, Parramatta NSW 2150').first()).toBeVisible();
 
-  // ---- log a call: New -> Contacted
+  // ---- until the job is opened it is only a lead: nothing can be recorded on it
+  await expect(page.getByRole('heading', { name: 'Open this job' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add to timeline' })).toHaveCount(0);
+  await page.goto(`${orderUrl}?tab=documents`);
+  await expect(page.locator('input[type=file]')).toHaveCount(0);
+  await page.goto(orderUrl);
+
+  // ---- opening it asks where the customer came from: New -> Following up
+  await page.getByLabel('Lead source').selectOption({ label: 'Partner' });
+  await page.locator('#open-note').fill('Northside Electrical');
+  await page.getByRole('button', { name: 'Open job' }).click();
+  await expectStage(page, 'Following up');
+  await expect(page.getByText(/Salesperson: Sam Sales · Lead source: Partner \(Northside Electrical\)/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Open this job' })).toHaveCount(0);
+
+  // ---- log a call: the customer is being followed up
   await page.getByRole('radio', { name: 'Call' }).click();
-  await page.getByLabel('What happened').fill('Talked through a 6.6 kW system with a battery. Sending a quote today.');
+  await page.getByLabel('What happened').fill('Talked through a 6.6 kW system with a battery. Sending a proposal today.');
   await page.getByRole('button', { name: 'Add to timeline' }).click();
-  await expectStage(page, 'Contacted');
   await expect(page.getByText('Outgoing call: spoke with customer')).toBeVisible();
+  await expectStage(page, 'Following up');
   // Newest first: the call just logged sits above the assignment that came before it.
   const entries = await page.locator('ol > li p:first-child').allTextContents();
   expect(entries.indexOf('Outgoing call: spoke with customer')).toBeLessThan(entries.indexOf('Assigned to Sam Sales'));
 
   // ---- a follow-up task
   await page.getByRole('button', { name: 'Add task' }).click();
-  await page.getByRole('dialog').getByLabel('What needs doing?').fill('Send the quote');
+  await page.getByRole('dialog').getByLabel('What needs doing?').fill('Send the proposal');
   await page.getByRole('dialog').getByRole('button', { name: 'Add task' }).click();
-  await expect(page.getByText('Send the quote', { exact: true })).toBeVisible();
+  await expect(page.getByText('Send the proposal', { exact: true })).toBeVisible();
   await shot(page, '02-order-overview');
 
-  // ---- quote: recording a version keeps the stage, sending it moves to Quoted
-  await openTab(page, 'Quote, contract & deposit');
+  // ---- the customer wants a proposal: Following up -> Design
+  await page.getByRole('button', { name: 'The customer wants a proposal' }).click();
+  await expectStage(page, 'Design');
+
+  // ---- a quote version keeps the stage, sending it moves to Proposal sent
+  await openTab(page, 'Proposal & deposit');
   await expect(page.getByRole('link', { name: 'Design in Pylon' })).toHaveAttribute('href', new RegExp(`reference_number=${orderNo}`));
   await page.getByRole('button', { name: 'Add quote version' }).click();
   const quote = page.getByRole('dialog');
@@ -141,38 +161,31 @@ test('the salesperson works the lead up to a confirmed deposit', async ({ browse
   await quote.getByLabel('Battery (kWh)').fill('13.5');
   await quote.getByLabel('Total price').fill('18,500');
   await quote.getByLabel('Deposit ($)').fill('1850');
-  await quote.getByLabel('Quote file (PDF)').setInputFiles(file('Quote - Jane Smith.pdf', pdf('quote v1'), 'application/pdf'));
+  await quote.getByLabel('Quote file (PDF)').setInputFiles(file('Proposal - Jane Smith.pdf', pdf('proposal v1'), 'application/pdf'));
   await quote.getByRole('button', { name: 'Add version' }).click();
   await expect(page.getByRole('cell', { name: '6.6 kW + 13.5 kWh battery' })).toBeVisible();
   await expect(page.getByRole('cell', { name: '$18,500.00' })).toBeVisible();
-  await expectStage(page, 'Contacted');
+  await expectStage(page, 'Design');
 
   await page.getByRole('button', { name: 'Mark as sent' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Mark as sent' }).click();
-  await expectStage(page, 'Quoted');
+  await expectStage(page, 'Proposal sent');
 
-  // ---- deposit is not possible before the contract
-  await expect(page.getByText('Archive the signed contract first, then record the deposit.')).toBeVisible();
-
-  // ---- contract: Quoted -> Signed
-  await page.getByLabel('Signed contract').setInputFiles(file('Signed contract.pdf', pdf('signed contract'), 'application/pdf'));
-  await page.getByRole('button', { name: 'Archive contract' }).click();
-  await expectStage(page, 'Signed');
-  await expect(page.getByText('Signed by customer')).toBeVisible();
-
-  // ---- deposit: Signed -> Deposit pending; the amount is pre-filled from the quote
+  // ---- the deposit needs no contract and nobody's confirmation; the amount is pre-filled from the proposal
   await expect(page.getByLabel('Amount paid ($)')).toHaveValue('1850.00');
   await page.getByLabel('Payment screenshot, receipt or finance approval').setInputFiles(file('transfer.png', png(1), 'image/png'));
-  await page.getByLabel('Note for finance').fill('Paid from J Smith, reference SOLAR12.');
-  await page.getByRole('button', { name: 'Submit to finance' }).click();
-  await expectStage(page, 'Deposit pending');
-  await expect(page.getByText('Waiting for finance')).toBeVisible();
-  await shot(page, '03-quote-contract-deposit');
+  await page.locator('#deposit-note').fill('Paid from J Smith, reference SOLAR12.');
+  await page.getByRole('button', { name: 'Record deposit' }).click();
+  await expectStage(page, 'Deposit paid');
+  await expect(page.getByText('Recorded, to be confirmed by operations')).toBeVisible();
+  // Recording it says which proposal the customer went ahead with.
+  await expect(page.getByText('Accepted by customer')).toBeVisible();
+  await shot(page, '03-proposal-and-deposit');
 
-  // ---- pushing is not possible yet
+  // ---- pushing is not possible until the folder is complete
   await openTab(page, 'Handoff');
+  await expect(page.getByText('3 to go')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Push to operations' })).toBeDisabled();
-  await expect(page.getByText('Submitted. Waiting for finance to confirm.')).toBeVisible();
   await context.close();
 });
 
@@ -192,37 +205,31 @@ test('operations cannot see the order before it is pushed', async ({ browser }) 
   await context.close();
 });
 
-test('finance confirms the deposit', async ({ browser }) => {
+test('finance sees the deposit and has nothing to decide', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'fin');
   await expect(page).toHaveURL(/\/finance$/);
-  await expect(page.getByRole('cell', { name: orderNo })).toBeVisible();
-  await expect(page.getByRole('cell', { name: '$1,850.00' })).toBeVisible();
-  await page.getByRole('link', { name: 'Review' }).click();
+  const recorded = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Recorded by sales, not confirmed yet' }) });
+  await expect(recorded.getByRole('cell', { name: orderNo })).toBeVisible();
+  await expect(recorded.getByRole('cell', { name: '$1,850.00' })).toBeVisible();
+  await expect(page.getByText('No deposit has been confirmed yet')).toBeVisible();
+  await recorded.getByRole('link', { name: 'Open' }).click();
 
   await expect(page.getByText('Paid from J Smith, reference SOLAR12.')).toBeVisible();
   await expect(page.getByText('transfer.png')).toBeVisible();
-  await expect(page.getByLabel('Amount received ($)')).toHaveValue('1850.00');
-  await shot(page, '04-finance-review');
+  await expect(page.getByText('There is nothing to decide here.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button')).toHaveCount(0); // nothing on this page decides anything
+  await shot(page, '04-finance-deposit');
 
-  // Finance sees the proof and the contract, but not the rest of the order.
+  // Finance sees the money of an order, not the rest of it.
   const orderPage = await page.context().request.get(orderUrl, { maxRedirects: 0 });
   expect(orderPage.status()).toBe(307);
-
-  await page.getByLabel('Bank reference').fill('NAB 20261110-7731');
-  await page.getByRole('button', { name: 'Confirm deposit' }).click();
-  await expect(page).toHaveURL(/\/finance$/);
-  await expect(page.getByText('Nothing is waiting')).toBeVisible();
   await context.close();
 });
 
-test('the salesperson completes the checklist and pushes to operations', async ({ browser }) => {
+test('the salesperson completes the folder and pushes to operations', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'sam');
   await page.goto(orderUrl);
-  await expectStage(page, 'Deposit confirmed');
-
-  await openTab(page, 'Handoff');
-  await expect(page.getByText('3 to go')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Push to operations' })).toBeDisabled();
+  await expectStage(page, 'Deposit paid');
 
   await openTab(page, 'Documents');
   await folder(page, 'Electricity bill').locator('input[type=file]').last().setInputFiles(file('AGL bill Oct 2026.pdf', pdf('bill'), 'application/pdf'));
@@ -262,6 +269,7 @@ test('operations returns the order with a reason', async ({ browser }) => {
   await expect(page.getByText('Customer prefers mornings. Friendly dog in the back yard.').first()).toBeVisible();
   await expect(page.getByText('6.6 kW + 13.5 kWh battery').first()).toBeVisible();
   await expect(page.getByText('$16,650.00')).toBeVisible(); // balance to collect after the deposit
+  await expect(page.getByText('To be confirmed when you accept')).toBeVisible();
   await expect(page.getByText('meter-box.png').first()).toBeVisible();
   await shot(page, '07-ops-review');
 
@@ -273,21 +281,22 @@ test('operations returns the order with a reason', async ({ browser }) => {
 
   await page.getByRole('button', { name: 'Return to sales' }).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByLabel('What needs to be fixed?').fill('The meter box photo is too dark to read the main switch rating. Please retake it with the door open.');
+  await dialog.getByLabel('Why is the salesperson needed?').fill('The customer does not answer our calls. Please check the best time and the number with her.');
   await dialog.getByLabel('Meter box / switchboard photos').check();
   await dialog.getByRole('button', { name: 'Return to sales' }).click();
   await expect(page.getByText(/^Returned to sales /).first()).toBeVisible();
   await page.goto('/ops');
   await expect(page.getByText('Nothing is waiting')).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: /Back with sales\s*1/ })).toBeVisible();
   await context.close();
 });
 
-test('the salesperson fixes the order and pushes it again', async ({ browser }) => {
+test('the salesperson sorts it out and pushes the order again', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'sam');
   await page.goto(orderUrl);
   await expectStage(page, 'Returned by Ops');
-  await expect(page.getByText('The meter box photo is too dark to read the main switch rating.', { exact: false }).first()).toBeVisible();
-  await expect(page.getByText('Returned by operations: fix and push again').first()).toBeVisible(); // the task
+  await expect(page.getByText('The customer does not answer our calls.', { exact: false }).first()).toBeVisible();
+  await expect(page.getByText('Returned by operations: sort it out and push again').first()).toBeVisible(); // the task
   await shot(page, '08-returned-to-sales');
 
   await openTab(page, 'Documents');
@@ -301,26 +310,137 @@ test('the salesperson fixes the order and pushes it again', async ({ browser }) 
   await context.close();
 });
 
-test('operations accepts the order and the sales side closes', async ({ browser }) => {
-  const ops = await signIn(browser, 'ops');
-  await ops.page.getByRole('link', { name: 'Review' }).click();
-  await expect(ops.page.getByText('Returned 1 time before')).toBeVisible();
-  await expect(ops.page.getByText('meter-box-door-open.png').first()).toBeVisible();
-  ops.page.on('dialog', (d) => d.accept());
-  await ops.page.getByRole('button', { name: 'Accept order' }).click();
-  await expect(ops.page.getByText(/^Accepted /).first()).toBeVisible();
-  await ops.context.close();
+test('operations accepts the order, arranges the job and marks it as done', async ({ browser }) => {
+  const { context, page } = await signIn(browser, 'ops');
+  await page.getByRole('link', { name: 'Review' }).click();
+  await expect(page.getByText('Returned 1 time before')).toBeVisible();
+  await expect(page.getByText('meter-box-door-open.png').first()).toBeVisible();
+
+  // ---- accepting is confirming that the deposit has arrived
+  await page.getByRole('button', { name: 'Accept order' }).click();
+  const accept = page.getByRole('dialog');
+  await expect(accept.getByText('transfer.png')).toBeVisible();
+  await accept.getByLabel('The deposit of $1,850.00 has arrived in the account').check();
+  await accept.getByRole('button', { name: 'Accept order' }).click();
+  await expect(page.getByText(/^Accepted /).first()).toBeVisible();
+  await expectStage(page, 'With operations');
+  await expect(page.getByText('Confirmed as received', { exact: true })).toBeVisible();
+  // The customer is welcomed by an e-mail that is written at this moment.
+  const notices = page.locator('section').filter({ has: page.getByRole('heading', { name: 'E-mails to the customer' }) });
+  await expect(notices.getByText('Welcome', { exact: true })).toBeVisible();
+  await expect(notices.getByText('to jane.smith@example.com', { exact: false })).toBeVisible();
+
+  // ---- the items stand side by side: fill in what is settled
+  const job = page.locator('section').filter({ has: page.getByRole('heading', { name: 'The job', exact: true }) });
+  await expect(job.getByText('6 open')).toBeVisible();
+  await job.getByLabel('Connection approval').selectOption({ label: 'Approved' });
+  await job.locator('#job-ca-ref').fill('CA-2026-0042');
+  await job.getByLabel('Job assigned on').selectOption({ label: 'Formbay' });
+  await job.getByLabel('Installer', { exact: true }).fill('Joe Volt');
+  await job.getByLabel('Electrician licence number').fill('EC 12345');
+  await job.getByLabel('Installation date').fill('2027-01-12');
+  await job.getByLabel('Stock').selectOption({ label: 'In stock, nothing to buy' });
+  await job.getByLabel('Delivery').selectOption({ label: 'The installer picks it up' });
+  await job.getByRole('button', { name: 'Save' }).click();
+  await expect(job.getByText('All settled')).toBeVisible();
+
+  // ---- the customer is told the dates when operations says so
+  page.on('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Send the dates to the customer' }).click();
+  await expect(page.getByText('The customer has been told the dates as they stand now.')).toBeVisible();
+  await expect(notices.getByText('Installation and delivery dates')).toBeVisible();
+
+  // ---- what operations gets from the customer or the installer goes into the folder too
+  await page.locator('#folder-approvals input[type=file]').setInputFiles(file('connection-approval.pdf', pdf('connection approval'), 'application/pdf'));
+  await expect(page.locator('#folder-approvals').getByText('connection-approval.pdf')).toBeVisible();
+  // A file from sales stays as it is; their own they can take back.
+  await expect(page.locator('#folder-meter_box').getByRole('button', { name: 'Remove' })).toHaveCount(0);
+  await expect(page.locator('#folder-approvals').getByRole('button', { name: 'Remove' })).toHaveCount(1);
+
+  // ---- a note about the job, for sales to read
+  await page.getByLabel('Add a note').fill('Steep roof: two installers booked.');
+  await page.getByRole('button', { name: 'Add note' }).click();
+  await expect(page.getByText('Steep roof: two installers booked.').first()).toBeVisible();
+  await shot(page, '09-ops-job');
+
+  // ---- job done: the customer is thanked and asked for the balance
+  await page.getByRole('button', { name: 'Job done' }).click();
+  await expectStage(page, 'Installed, balance due');
+  await expect(notices.getByText('Thank you and balance')).toBeVisible();
+  await page.getByRole('button', { name: 'Rebate applied for' }).click();
+  await expect(page.getByText(/^Applied for on /)).toBeVisible();
+
+  // ---- the balance has not come in: sales is asked to chase it
+  await page.getByRole('button', { name: 'Ask sales to chase the balance' }).click();
+  await page.getByRole('dialog').locator('#chase-note').fill('$16,650.00 is still open.');
+  await page.getByRole('dialog').getByRole('button', { name: 'Ask sales' }).click();
+  await expect(page.getByText('Sales asked to chase', { exact: true })).toBeVisible();
+  await shot(page, '10-ops-after-installation');
+
+  await page.goto('/ops?tab=installed');
+  await expect(page.getByRole('cell', { name: orderNo })).toBeVisible();
+  await expect(page.getByText('Applied for', { exact: true })).toBeVisible();
+  await context.close();
+});
+
+test('the salesperson follows the job and is asked for the balance', async ({ browser }) => {
+  const { context, page } = await signIn(browser, 'sam');
+  await page.goto(orderUrl);
+  await expectStage(page, 'Installed, balance due');
+  await expect(page.getByText(/The installation was done on/)).toBeVisible();
+  await expect(page.getByText('Ask the customer for the balance').first()).toBeVisible(); // the task
+  await expect(page.getByText('$16,650.00 is still open.').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  // Notes are still possible while operations has the order.
+  await page.getByRole('textbox', { name: 'Note', exact: true }).fill('Rang Jane about the balance. She pays on Friday.');
+  await page.getByRole('button', { name: 'Add to timeline' }).click();
+  await expect(page.getByText('Rang Jane about the balance.', { exact: false }).first()).toBeVisible();
+
+  // What operations has arranged is there to read, and only to read.
+  await openTab(page, 'Operations');
+  await expect(page.getByText('Joe Volt, licence EC 12345')).toBeVisible();
+  await expect(page.getByText('Approved (CA-2026-0042)')).toBeVisible();
+  await expect(page.getByText('Steep roof: two installers booked.')).toBeVisible();
+  await expect(page.getByText('Thank you and balance')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0);
+  await shot(page, '11-order-operations-tab');
+  // What operations filed is in the order's folder, for the salesperson to read.
+  await openTab(page, 'Documents');
+  await expect(folder(page, 'Approvals and certificates').getByText('connection-approval.pdf')).toBeVisible();
+  await expect(page.locator('input[type=file]')).toHaveCount(0);
+  await context.close();
+});
+
+test('finance confirms the final payment and the job is closed', async ({ browser }) => {
+  const fin = await signIn(browser, 'fin');
+  // The deposit was confirmed by operations; finance was told.
+  const received = fin.page.locator('section').filter({ has: fin.page.getByRole('heading', { name: 'Received', exact: true }) });
+  await expect(received.getByRole('cell', { name: orderNo })).toBeVisible();
+  await expect(fin.page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: /Notifications\s*1/ })).toBeVisible();
+
+  await fin.page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: /Balances due\s*1/ }).click();
+  await expect(fin.page.getByRole('cell', { name: orderNo })).toBeVisible();
+  await expect(fin.page.getByText('$16,650.00').first()).toBeVisible();
+  await fin.page.getByRole('button', { name: 'Final payment received' }).click();
+  const dialog = fin.page.getByRole('dialog');
+  await dialog.getByLabel(/^Amount received/).fill('16650');
+  await dialog.getByLabel(/^Note/).fill('NAB 20270115-7731');
+  await dialog.getByRole('button', { name: 'Close the job' }).click();
+  await expect(fin.page.getByText('No balance is due')).toBeVisible();
+  await fin.page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: 'Final payments received' }).click();
+  await expect(fin.page.getByRole('cell', { name: orderNo })).toBeVisible();
+  await expect(fin.page.getByRole('cell', { name: 'NAB 20270115-7731' })).toBeVisible();
+  await shot(fin.page, '12-finance-final-payments');
+  await fin.context.close();
 
   const sam = await signIn(browser, 'sam');
   await sam.page.goto(orderUrl);
-  await expectStage(sam.page, 'Handed over');
-  await expect(sam.page.getByText(/Accepted by operations on/)).toBeVisible();
-  await expect(sam.page.getByRole('button', { name: 'Edit' })).toHaveCount(0);
-  // Notes are still possible after handover.
-  await sam.page.getByRole('textbox', { name: 'Note', exact: true }).fill('Customer rang to ask about the install date. Passed on to operations.');
-  await sam.page.getByRole('button', { name: 'Add to timeline' }).click();
-  await expect(sam.page.getByText('Customer rang to ask about the install date.', { exact: false }).first()).toBeVisible();
-  await shot(sam.page, '09-handed-over');
+  await expectStage(sam.page, 'Completed');
+  await expect(sam.page.getByText(/The final payment arrived and the job was closed on/)).toBeVisible();
+  // The task to chase the balance is done with it.
+  await expect(sam.page.getByRole('button', { name: 'Done' })).toHaveCount(1); // only the task Sam added himself is still open
+  await sam.page.goto('/orders?view=completed');
+  await expect(sam.page.getByRole('link', { name: 'Jane Smith' })).toBeVisible();
   await sam.context.close();
 });
 
@@ -344,7 +464,10 @@ test('the manager sees the whole story in the dashboard and the audit log', asyn
   const { context, page } = await signIn(browser, 'manager');
   await expect(page.getByText('New leads', { exact: true })).toBeVisible();
   await expect(page.getByRole('cell', { name: 'Bluven website' })).toBeVisible();
-  await shot(page, '10-dashboard');
+  // Where the customer came from, as the salesperson said when opening the job: what partners are paid by.
+  const bySource = page.locator('section').filter({ has: page.getByRole('heading', { name: 'By lead source' }) });
+  await expect(bySource.getByRole('row').filter({ hasText: 'Partner' }).getByRole('cell')).toHaveText(['Partner', '1', '1', '$18,500.00', '1']);
+  await shot(page, '13-dashboard');
 
   // Fetching a file in pieces is still an access that gets logged, and a HEAD request gets headers only.
   await page.goto(`${orderUrl}?tab=documents`);
@@ -357,7 +480,7 @@ test('the manager sees the whole story in the dashboard and the audit log', asyn
   expect(part.headers()['content-range']).toMatch(/^bytes 1-\d+\/\d+$/);
 
   await page.goto(`${orderUrl}?tab=history`);
-  for (const action of ['order.create', 'order.assign', 'quote.sent', 'contract.archive', 'deposit.confirm', 'handoff.push', 'handoff.return', 'handoff.accept', 'document.view']) {
+  for (const action of ['order.create', 'order.assign', 'order.open', 'quote.sent', 'deposit.submit', 'handoff.push', 'handoff.return', 'handoff.accept', 'deposit.confirm', 'ops.update', 'ops.job_done', 'ops.final_payment', 'document.view']) {
     await expect(page.getByText(action, { exact: true }).first()).toBeVisible();
   }
   await expect(page.getByRole('row').filter({ hasText: 'document.view' }).filter({ hasText: 'Morgan Manager' })).toHaveCount(1);
@@ -366,7 +489,7 @@ test('the manager sees the whole story in the dashboard and the audit log', asyn
   await page.getByLabel('Order number').fill(orderNo);
   await page.getByRole('button', { name: 'Search' }).click();
   await expect(page.getByRole('cell', { name: /Fay Finance/ }).first()).toBeVisible();
-  await shot(page, '11-audit-log');
+  await shot(page, '14-audit-log');
 
   const csv = await page.context().request.get(`/api/audit/export?order=${orderNo}`);
   expect(csv.status()).toBe(200);
@@ -407,7 +530,7 @@ test('Pylon events are accepted only with a valid signature', async ({ browser }
   await admin.page.goto('/settings/pylon');
   await expect(admin.page.getByRole('cell', { name: 'solar_projects.created' })).toHaveCount(1);
   await expect(admin.page.getByText('Waiting', { exact: true })).toBeVisible();
-  await shot(admin.page, '12-pylon-settings');
+  await shot(admin.page, '15-pylon-settings');
   await admin.context.close();
 
   // Not for other roles.

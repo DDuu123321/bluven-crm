@@ -40,6 +40,9 @@ const DOC_TYPES: DocTypeSeed[] = [
   { key: 'install_location', label: 'Installation location photos', description: 'Where the panels, inverter and battery will go.', scope: 'PROPERTY', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 50 },
   { key: 'meter_box', label: 'Meter box / switchboard photos', description: 'Clear photos of the meter box and switchboard, door open.', scope: 'PROPERTY', isRequiredForHandoff: true, isSystem: false, neverAutoDelete: false, sortOrder: 60 },
   { key: 'additional_photos', label: 'Additional site photos', description: 'Anything else operations should see.', scope: 'PROPERTY', isRequiredForHandoff: false, isSystem: false, neverAutoDelete: false, sortOrder: 70 },
+  // What operations collects once the order is theirs.
+  { key: 'approvals', label: 'Approvals and certificates', description: 'Connection approval, certificates of compliance and other paperwork for the job.', scope: 'ORDER', isRequiredForHandoff: false, isSystem: false, neverAutoDelete: true, sortOrder: 75 },
+  { key: 'installation_photos', label: 'Photos of the finished installation', description: 'Taken by the installer when the job is done.', scope: 'PROPERTY', isRequiredForHandoff: false, isSystem: false, neverAutoDelete: false, sortOrder: 80 },
   { key: 'other', label: 'Other documents', description: '', scope: 'ORDER', isRequiredForHandoff: false, isSystem: false, neverAutoDelete: false, sortOrder: 90 },
 ];
 
@@ -54,6 +57,17 @@ const LOST_REASONS: [key: string, label: string][] = [
   ['duplicate', 'Duplicate lead'],
   ['invalid_contact', 'Invalid contact details'],
   ['other', 'Other'],
+];
+
+/** Where customers come from. A first list: managers rename, add and retire entries, with the partners' own names. */
+const LEAD_ORIGINS: [key: string, label: string][] = [
+  ['bluven_website', 'Bluven website'],
+  ['partner', 'Partner'],
+  ['purchased_lead', 'Purchased lead'],
+  ['customer_referral', 'Referral from a customer'],
+  ['advertising', 'Advertising'],
+  ['walk_in', 'Called or walked in'],
+  ['other', 'Other / not known'],
 ];
 
 const SOURCES: [key: string, name: string, kind: LeadSourceKind][] = [
@@ -111,11 +125,11 @@ Regards,
 Bluven`,
   },
   {
-    name: 'After signing: deposit and next steps',
+    name: 'Going ahead: deposit and next steps',
     subject: 'Next steps for your installation',
     body: `Hi {{first_name}},
 
-Thank you for signing. The next step is the deposit. Once it has arrived, our operations team will contact you to book the installation.
+Thank you for going ahead with Bluven. The next step is the deposit. Please send me the payment receipt or a screenshot of the transfer once it is done. Our operations team will then contact you to arrange the installation.
 
 If anything changes on your side in the meantime, please let me know.
 
@@ -139,6 +153,10 @@ export async function ensureReferenceData(db: Db): Promise<void> {
   }
   for (const [i, [key, label]] of LOST_REASONS.entries()) {
     await db.lostReason.upsert({ where: { key }, update: {}, create: { id: newId('lrs'), key, label, sortOrder: (i + 1) * 10 } });
+  }
+  // Only into an empty list: a lead source a manager retired or renamed does not come back.
+  if ((await db.leadOrigin.count()) === 0) {
+    for (const [i, [key, label]] of LEAD_ORIGINS.entries()) await db.leadOrigin.create({ data: { id: newId('lor'), key, label, sortOrder: (i + 1) * 10 } });
   }
   for (const [key, name, kind] of SOURCES) {
     await db.leadSource.upsert({ where: { key }, update: {}, create: { id: newId('src'), key, name, kind } });

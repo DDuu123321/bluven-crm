@@ -73,7 +73,7 @@ export default async function UnassignedPage({ searchParams }: { searchParams: P
               <SubmitButton pendingLabel="Assigning…">Assign</SubmitButton>
               <FormMessage className="flex-1" />
             </div>
-            <Table head={['', 'Lead', 'Contact', 'Address', 'Interested in', 'Source', 'Received']}>
+            <Table head={['', 'Lead', 'Contact', 'Address', 'Interested in', 'Came in through', 'Received']}>
               {result.rows.map((o) => {
                 const details = o.leadDetails as LeadDetails;
                 return (

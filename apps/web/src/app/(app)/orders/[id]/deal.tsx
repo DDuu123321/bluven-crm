@@ -17,13 +17,16 @@ import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal,
 import { Alert, Badge, Card, CardBody, CardHeader, Dl, EmptyState, Input, Label, Select, Table, Td, Textarea, buttonClass, cx } from '@/components/ui';
 import { fmtDate, fmtDateTime, inputDate, inputDateTime } from '@/lib/fmt';
 import { pylonDesignLink } from '@/lib/pylon-link';
-import { deleteQuoteAction, linkPylonAction, refreshPylonAction, unlinkPylonAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
+import { acceptQuoteAction, deleteQuoteAction, linkPylonAction, refreshPylonAction, unlinkPylonAction, updateQuoteAction, voidContractAction, withdrawDepositAction } from './actions';
 
 const fileInput =
   'block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50';
 
 type Deal = Awaited<ReturnType<typeof getOrderDeal>>;
 type Quote = Deal['quotes'][number];
+
+/** A version the customer has seen is history: its figures and its file stay as they are. */
+const gone = (q: Quote): boolean => !!q.sentAt || q.isAccepted;
 
 function QuoteFields({ q, idPrefix }: { q?: Quote; idPrefix: string }) {
   return (
@@ -79,7 +82,9 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
   const accepted = quotes.find((q) => q.isAccepted);
   const openDeposit = deposits.find((d) => d.status === 'PENDING' || d.status === 'CONFIRMED');
   const pastDeposits = deposits.filter((d) => d.status === 'REJECTED' || d.status === 'WITHDRAWN');
-  const suggestedDeposit = accepted?.depositCents ?? (accepted?.totalCents ? Math.round((accepted.totalCents * defaultDepositPercent) / 100) : null);
+  // The version the deposit is for: the accepted one, or the only one. With several and none chosen yet, nothing is suggested.
+  const paidFor = accepted ?? (quotes.length === 1 ? quotes[0] : undefined);
+  const suggestedDeposit = paidFor?.depositCents ?? (paidFor?.totalCents ? Math.round((paidFor.totalCents * defaultDepositPercent) / 100) : null);
   const address = formatAddress(order.property);
   const pylonConnected = !!getConfig().pylon.apiToken;
   const pylonLink = address
@@ -91,8 +96,8 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
       {/* ------------------------------------------------------------------ quotes */}
       <Card>
         <CardHeader
-          title="Quotes"
-          description="Each version is kept. Recording a version does not change the stage; marking it as sent to the customer does."
+          title="Proposals"
+          description="Each version is kept. The first one starts the design stage; sending one to the customer makes the order “Proposal sent”."
           actions={
             <>
               {manager && order.pylonProjectId && (
@@ -148,7 +153,7 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 <span className="text-xs text-slate-400">Add the address to design in Pylon</span>
               )}
               {editable && (
-                <Modal trigger="Add quote version" title="Add a quote version" variant="primary" description="Enter the figures from the Pylon proposal and attach the file you send to the customer.">
+                <Modal trigger="Add quote version" title="Add a quote version" variant="primary" description="Enter the figures from the Pylon proposal and attach the file you send to the customer. Check that the terms and conditions are in it before it goes out.">
                   <ActionForm endpoint={`${api}/quotes`} className="space-y-4">
                     <QuoteFields idPrefix="new-quote" />
                     <div>
@@ -169,7 +174,7 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
           }
         />
         {quotes.length === 0 ? (
-          <EmptyState title="No quote yet">Design the system in Pylon, then record the version you send to the customer here.</EmptyState>
+          <EmptyState title="No proposal yet">Design the system in Pylon, then record the version you send to the customer here.</EmptyState>
         ) : (
           <Table head={['Version', 'System', 'Total', 'Deposit', 'File', 'Status', '']}>
             {quotes.map((q) => (
@@ -199,14 +204,25 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 </Td>
                 <Td>
                   <div className="flex flex-wrap gap-1">
-                    {q.isAccepted && <Badge tone="green">Signed by customer</Badge>}
+                    {q.isAccepted && <Badge tone="green">Accepted by customer</Badge>}
                     {q.sentAt ? <Badge tone="violet" title={fmtDateTime(q.sentAt)}>Sent {fmtDate(q.sentAt)}</Badge> : <Badge>Not sent</Badge>}
                   </div>
                 </Td>
                 <Td className="text-right">
-                  {editable && !q.sentAt && !q.isAccepted && (
+                  {editable && (
                     <div className="flex flex-wrap justify-end gap-1.5">
-                      <Modal trigger="Mark as sent" title={`Quote v${q.version} was sent to the customer`} size="sm" variant="primary" description="This moves the order to Quoted.">
+                      {!q.isAccepted && (
+                        <ActionButton
+                          action={acceptQuoteAction.bind(null, q.id)}
+                          confirm={`Mark v${q.version} as the version the customer is going ahead with? It is the one operations will work from, and it can no longer be edited.`}
+                          size="sm"
+                          variant={accepted ? 'ghost' : 'secondary'}
+                        >
+                          Customer accepted
+                        </ActionButton>
+                      )}
+                      {!q.sentAt && !q.isAccepted && (
+                      <Modal trigger="Mark as sent" title={`Quote v${q.version} was sent to the customer`} size="sm" variant="primary" description="This moves the order to Proposal sent.">
                         <ActionForm endpoint={`/api/quotes/${q.id}/sent`} className="space-y-4">
                           <div>
                             <Label htmlFor={`sent-${q.id}`}>When was it sent?</Label>
@@ -227,11 +243,17 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                           </div>
                         </ActionForm>
                       </Modal>
+                      )}
+                      {(gone(q) ? !q.document : true) && (
                       <Modal
                         trigger={q.document ? 'Replace file' : 'Attach file'}
                         title={`The file of quote v${q.version}`}
                         size="sm"
-                        description="The PDF you will send to the customer, for example the quote pages cut from the Pylon proposal. Attach it to an e-mail from the Email tab and the version is recorded as sent when the e-mail goes out."
+                        description={
+                          gone(q)
+                            ? 'The proposal as it went to the customer. Operations get it with the order.'
+                            : 'The PDF you will send to the customer, for example the quote pages cut from the Pylon proposal. Attach it to an e-mail from the Email tab and the version is recorded as sent when the e-mail goes out.'
+                        }
                       >
                         <ActionForm endpoint={`/api/quotes/${q.id}/file`} className="space-y-4">
                           <div>
@@ -246,19 +268,24 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                           </div>
                         </ActionForm>
                       </Modal>
-                      <Modal trigger="Edit" title={`Edit quote v${q.version}`} size="sm">
-                        <ActionForm action={updateQuoteAction.bind(null, q.id)} keepValues className="space-y-4">
-                          <QuoteFields q={q} idPrefix={`edit-${q.id}`} />
-                          <FormMessage />
-                          <div className="flex justify-end gap-2">
-                            <CancelButton />
-                            <SubmitButton>Save</SubmitButton>
-                          </div>
-                        </ActionForm>
-                      </Modal>
-                      <ActionButton action={deleteQuoteAction.bind(null, q.id)} confirm={`Delete quote v${q.version}?`} size="sm" variant="ghost">
-                        Delete
-                      </ActionButton>
+                      )}
+                      {!gone(q) && (
+                        <>
+                          <Modal trigger="Edit" title={`Edit quote v${q.version}`} size="sm">
+                            <ActionForm action={updateQuoteAction.bind(null, q.id)} keepValues className="space-y-4">
+                              <QuoteFields q={q} idPrefix={`edit-${q.id}`} />
+                              <FormMessage />
+                              <div className="flex justify-end gap-2">
+                                <CancelButton />
+                                <SubmitButton>Save</SubmitButton>
+                              </div>
+                            </ActionForm>
+                          </Modal>
+                          <ActionButton action={deleteQuoteAction.bind(null, q.id)} confirm={`Delete quote v${q.version}?`} size="sm" variant="ghost">
+                            Delete
+                          </ActionButton>
+                        </>
+                      )}
                     </div>
                   )}
                 </Td>
@@ -271,7 +298,10 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
       <div className="grid gap-4 lg:grid-cols-2">
         {/* ---------------------------------------------------------------- contract */}
         <Card>
-          <CardHeader title="Signed contract" description="However the customer signed, by email or on the Pylon web proposal, the signed copy is archived here." />
+          <CardHeader
+            title="Signed copy"
+            description="Optional. If the customer signed something, by e-mail or on the Pylon web proposal, the signed copy is kept here. The deposit and the push to operations do not wait for it."
+          />
           <CardBody className="space-y-4">
             {contract ? (
               <>
@@ -290,10 +320,10 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 />
                 {editable && (
                   <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3">
-                    <Modal trigger="Replace contract" title="Replace the signed contract" size="sm" description="The current contract is kept in the history and no longer counts.">
+                    <Modal trigger="Replace" title="Replace the signed copy" size="sm" description="The current one is kept in the history and no longer counts.">
                       <ContractForm api={api} quotes={quotes} defaultQuoteId={contract.quoteId ?? quotes[0]?.id} today={inputDate(now)} replace idPrefix="replace-contract" />
                     </Modal>
-                    <Modal trigger="Remove" title="Remove the signed contract" size="sm" variant="danger" description="The order goes back to the stage before signing. The file stays in the history.">
+                    <Modal trigger="Remove" title="Remove the signed copy" size="sm" variant="danger" description="The file stays in the history. The stage of the order does not change.">
                       <ActionForm action={voidContractAction.bind(null, contract.id)} className="space-y-4">
                         <div>
                           <Label htmlFor="void-reason">Why is it being removed?</Label>
@@ -303,7 +333,7 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                         <FormMessage />
                         <div className="flex justify-end gap-2">
                           <CancelButton />
-                          <SubmitButton variant="danger">Remove contract</SubmitButton>
+                          <SubmitButton variant="danger">Remove signed copy</SubmitButton>
                         </div>
                       </ActionForm>
                     </Modal>
@@ -311,9 +341,9 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 )}
               </>
             ) : !editable ? (
-              <p className="text-sm text-slate-500">No contract has been archived.</p>
+              <p className="text-sm text-slate-500">No signed copy has been filed.</p>
             ) : quotes.length === 0 ? (
-              <Alert tone="slate">Add the quote the customer accepted first. The contract is archived against a quote version so operations know exactly what was sold.</Alert>
+              <p className="text-sm text-slate-500">A signed copy is filed against a quote version. There is none yet.</p>
             ) : (
               <ContractForm api={api} quotes={quotes} defaultQuoteId={quotes.find((q) => q.sentAt)?.id ?? quotes[0]!.id} today={inputDate(now)} idPrefix="contract" />
             )}
@@ -322,7 +352,10 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
 
         {/* ----------------------------------------------------------------- deposit */}
         <Card>
-          <CardHeader title="Deposit" description="You submit the proof of payment; finance confirms that the money has arrived. The balance is collected by operations after installation." />
+          <CardHeader
+            title="Deposit"
+            description="When the customer has paid, record it here with the proof of payment. Operations confirm that the money has arrived when they accept the order; the balance is collected after installation."
+          />
           <CardBody className="space-y-4">
             {openDeposit ? (
               <>
@@ -330,11 +363,12 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                   rows={[
                     [
                       'Status',
-                      openDeposit.status === 'CONFIRMED' ? <Badge key="s" tone="green">Confirmed by finance</Badge> : <Badge key="s" tone="amber">Waiting for finance</Badge>,
+                      openDeposit.status === 'CONFIRMED' ? <Badge key="s" tone="green">Received</Badge> : <Badge key="s" tone="amber">Recorded, to be confirmed by operations</Badge>,
                     ],
                     ['Amount', formatCents(openDeposit.amountCents, openDeposit.currency)],
                     ['Paid by', DEPOSIT_METHOD_LABEL[openDeposit.method]],
-                    ['Submitted', `${fmtDateTime(openDeposit.submittedAt)}${openDeposit.submittedBy ? ` by ${openDeposit.submittedBy.name}` : ''}`],
+                    ['For', accepted ? `Quote v${accepted.version}${accepted.totalCents !== null ? `, ${formatCents(accepted.totalCents, accepted.currency)}` : ''}` : null],
+                    ['Recorded', `${fmtDateTime(openDeposit.submittedAt)}${openDeposit.submittedBy ? ` by ${openDeposit.submittedBy.name}` : ''}`],
                     [
                       'Proof',
                       openDeposit.proofDocument ? (
@@ -350,8 +384,6 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                     ...(openDeposit.note ? [['Your note', openDeposit.note] as [string, string]] : []),
                     ...(openDeposit.status === 'CONFIRMED'
                       ? ([
-                          ['Received', `${formatCents(openDeposit.receivedAmountCents, openDeposit.currency)} on ${formatDateOnly(openDeposit.receivedOn)}`],
-                          ['Bank reference', openDeposit.bankReference],
                           ['Confirmed', `${fmtDateTime(openDeposit.decidedAt)}${openDeposit.decidedBy ? ` by ${openDeposit.decidedBy.name}` : ''}`],
                         ] as [string, string][])
                       : []),
@@ -359,18 +391,34 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 />
                 {staff && openDeposit.status === 'PENDING' && (
                   <div className="border-t border-slate-100 pt-3">
-                    <ActionButton action={withdrawDepositAction.bind(null, openDeposit.id)} confirm="Withdraw this submission? You can submit a corrected one afterwards.">
-                      Withdraw submission
+                    <ActionButton action={withdrawDepositAction.bind(null, openDeposit.id)} confirm="Withdraw this record? The order goes back to the stage before the deposit, and you can record a corrected one afterwards.">
+                      Withdraw
                     </ActionButton>
                   </div>
                 )}
               </>
             ) : !editable ? (
               <p className="text-sm text-slate-500">No deposit has been recorded.</p>
-            ) : !contract ? (
-              <Alert tone="slate">Archive the signed contract first, then record the deposit.</Alert>
             ) : (
               <ActionForm endpoint={`${api}/deposit`} className="space-y-4">
+                {quotes.length > 1 && (
+                  <div>
+                    <Label htmlFor="deposit-quote">Proposal the customer accepted</Label>
+                    <Select id="deposit-quote" name="quoteId" required defaultValue={accepted?.id ?? ''}>
+                      <option value="" disabled>
+                        Choose a version
+                      </option>
+                      {quotes.map((q) => (
+                        <option key={q.id} value={q.id}>
+                          v{q.version} · {formatCents(q.totalCents, q.currency) || 'no price'}
+                          {q.title ? ` · ${q.title}` : ''}
+                        </option>
+                      ))}
+                    </Select>
+                    <FieldError name="quoteId" />
+                  </div>
+                )}
+                {quotes.length === 0 && <Alert tone="slate">There is no quote version on this order yet. You can record the deposit now; the proposal the customer accepted has to be on file before the order goes to operations.</Alert>}
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
                     <Label htmlFor="deposit-amount">Amount paid ($)</Label>
@@ -393,22 +441,22 @@ export async function DealTab({ ctx, header, editable, staff, manager }: { ctx: 
                 </div>
                 <div>
                   <Label htmlFor="deposit-note" optional>
-                    Note for finance
+                    Note
                   </Label>
-                  <Textarea id="deposit-note" name="note" rows={2} placeholder="Payer name or reference to look for" />
+                  <Textarea id="deposit-note" name="note" rows={2} placeholder="Payer name or reference to look for in the account" />
                 </div>
                 <FormMessage />
-                <SubmitButton pendingLabel="Submitting…">Submit to finance</SubmitButton>
+                <SubmitButton pendingLabel="Recording…">Record deposit</SubmitButton>
               </ActionForm>
             )}
 
             {pastDeposits.length > 0 && (
               <div className="border-t border-slate-100 pt-3">
-                <p className="mb-1.5 text-xs font-medium text-slate-500">Earlier submissions</p>
+                <p className="mb-1.5 text-xs font-medium text-slate-500">Earlier records</p>
                 <ul className="space-y-1.5 text-sm">
                   {pastDeposits.map((d) => (
                     <li key={d.id} className={cx('rounded-md px-3 py-2', d.status === 'REJECTED' ? 'bg-red-50 text-red-800' : 'bg-slate-50 text-slate-600')}>
-                      {formatCents(d.amountCents, d.currency)} · {d.status === 'REJECTED' ? `rejected by ${d.decidedBy?.name ?? 'finance'}` : 'withdrawn'} on {fmtDate(d.decidedAt)}
+                      {formatCents(d.amountCents, d.currency)} · {d.status === 'REJECTED' ? `not accepted by ${d.decidedBy?.name ?? 'operations'}` : 'withdrawn'} on {fmtDate(d.decidedAt)}
                       {d.status === 'REJECTED' && d.decisionNote && <p className="mt-0.5 whitespace-pre-wrap">{d.decisionNote}</p>}
                     </li>
                   ))}
@@ -427,7 +475,7 @@ function ContractForm({ api, quotes, defaultQuoteId, today, replace, idPrefix }:
     <ActionForm endpoint={`${api}/contract`} className="space-y-4">
       {replace && <input type="hidden" name="replace" value="true" />}
       <div>
-        <Label htmlFor={`${idPrefix}-files`}>Signed contract</Label>
+        <Label htmlFor={`${idPrefix}-files`}>Signed copy</Label>
         <input id={`${idPrefix}-files`} name="files" type="file" multiple required accept=".pdf,image/*" className={fileInput} />
         <p className="mt-1 text-xs text-slate-500">A PDF, or photos of each signed page.</p>
         <FieldError name="files" />
@@ -454,7 +502,7 @@ function ContractForm({ api, quotes, defaultQuoteId, today, replace, idPrefix }:
       <FormMessage />
       <div className="flex justify-end gap-2">
         <CancelButton />
-        <SubmitButton pendingLabel="Archiving…">{replace ? 'Replace contract' : 'Archive contract'}</SubmitButton>
+        <SubmitButton pendingLabel="Filing…">{replace ? 'Replace signed copy' : 'File signed copy'}</SubmitButton>
       </div>
     </ActionForm>
   );

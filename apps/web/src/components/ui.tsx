@@ -165,14 +165,15 @@ export function Alert({ tone = 'blue', title, children }: { tone?: Tone; title?:
 
 const STAGE_TONE: Record<OrderStage, Tone> = {
   NEW: 'blue',
-  CONTACTED: 'blue',
-  QUOTED: 'violet',
-  SIGNED: 'violet',
-  DEPOSIT_PENDING: 'amber',
-  DEPOSIT_CONFIRMED: 'green',
+  FOLLOW_UP: 'blue',
+  DESIGN: 'violet',
+  PROPOSAL_SENT: 'violet',
+  DEPOSIT_PAID: 'green',
   PUSHED: 'amber',
   RETURNED: 'red',
-  HANDED_OVER: 'green',
+  IN_PROGRESS: 'amber',
+  INSTALLED: 'amber',
+  COMPLETED: 'green',
 };
 
 export function StageBadge({ stage, sideState }: { stage: OrderStage; sideState?: SideState }) {

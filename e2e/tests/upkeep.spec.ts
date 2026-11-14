@@ -42,7 +42,7 @@ test('a manager adds an e-mail template and a salesperson writes from it', async
   await dialog.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(manager.page.getByRole('cell', { name: 'Site visit', exact: true })).toBeVisible();
-  await shot(manager.page, '18-email-templates');
+  await shot(manager.page, '21-email-templates');
   await manager.context.close();
 
   const { context, page } = await signIn(browser, 'sam');
@@ -59,6 +59,10 @@ test('a manager adds an e-mail template and a salesperson writes from it', async
   await page.getByRole('link', { name: 'Rex Retain' }).click();
   await page.waitForURL(/\/orders\/ord_/);
   orderUrl = page.url().split('?')[0]!;
+  // Writing to the customer is work on the job, so the job is opened first.
+  await page.getByLabel('Lead source').selectOption({ label: 'Referral from a customer' });
+  await page.getByRole('button', { name: 'Open job' }).click();
+  await expect(page.locator('h1')).toContainText('Following up');
   await page.goto(`${orderUrl}?tab=email`);
   await page.getByRole('button', { name: 'Write an email' }).click();
   const compose = page.getByRole('dialog');
@@ -79,7 +83,7 @@ test('notifications are filtered by kind, and the daily summary is each personâ€
   await expect(page.getByText(/has been assigned to you/).first()).toBeVisible();
   await expect(page.getByText(/email from/i)).toHaveCount(0);
   await expect(filter.getByRole('link', { name: /Pylon/ })).toHaveCount(0);
-  await shot(page, '19-notifications');
+  await shot(page, '22-notifications');
 
   const summary = page.getByLabel('Send me one summary each morning instead of an e-mail for every notification');
   await expect(summary).not.toBeChecked();
@@ -102,11 +106,14 @@ test('the report shows twelve months and idle orders by one measure, and exports
   const thisMonth = new Intl.DateTimeFormat('en-AU', { month: 'short', year: 'numeric', timeZone: 'Australia/Sydney' }).format(new Date());
   await expect(months.locator('tbody tr').last()).toContainText(thisMonth);
   // Three tiers of the same count, each a link to exactly the orders it counts.
-  for (const [label, href] of [['Idle 5+ days', '/orders?idle=1'], ['Idle 10+ days', '/orders?idle=2'], ['Idle 15+ days', '/orders?idle=3']] as const) {
+  for (const [label, href] of [['Idle 5+ days', '/orders?idle=1'], ['Idle 8+ days', '/orders?idle=2'], ['Idle 10+ days', '/orders?idle=3']] as const) {
     await expect(page.getByRole('link', { name: label })).toHaveAttribute('href', href);
   }
-  await expect(page.getByRole('columnheader', { name: 'Days to sign' })).toBeVisible();
-  await shot(page, '20-report');
+  await expect(page.getByRole('columnheader', { name: 'Days to deposit' })).toBeVisible();
+  // Where customers came from, as the salespeople recorded it.
+  const bySource = page.locator('section').filter({ has: page.getByRole('heading', { name: 'By lead source' }) });
+  await expect(bySource.getByRole('link', { name: 'Referral from a customer' })).toHaveAttribute('href', /\/orders\?view=all&origin=lor_/);
+  await shot(page, '23-report');
 
   const download = page.waitForEvent('download');
   await page.getByRole('link', { name: 'Export orders (CSV)' }).click();
@@ -114,8 +121,8 @@ test('the report shows twelve months and idle orders by one measure, and exports
   expect(file.suggestedFilename()).toMatch(/^bluven-orders-\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}\.csv$/);
   const csv = await (await context.request.get(await page.getByRole('link', { name: 'Export orders (CSV)' }).getAttribute('href').then((h) => h!))).text();
   const lines = csv.replace(/^ï»¿/, '').trim().split('\r\n');
-  expect(lines[0]).toContain('"Order","Customer","Address","Source","Salesperson","Stage"');
-  expect(lines.some((l) => l.includes('"Rex Retain","4 Archive Ave, Hornsby NSW 2077","Bluven website","Sam Sales","New"'))).toBe(true);
+  expect(lines[0]).toContain('"Order","Customer","Address","Lead source","Lead source note","Came in through","Salesperson","Stage"');
+  expect(lines.some((l) => l.includes('"Rex Retain","4 Archive Ave, Hornsby NSW 2077","Referral from a customer","","Bluven website","Sam Sales","Following up"'))).toBe(true);
   // The export is on record.
   await page.goto('/audit?action=report.export');
   await expect(page.getByText(/Exported \d+ orders? with enquiries from/).first()).toBeVisible();
@@ -151,7 +158,7 @@ test('documents near the end of their retention period wait for a decision', asy
   await expect(card).toContainText('1 document reaches the end of its retention period on');
   await expect(card).toContainText('old-bill.pdf');
   await expect(card).toContainText('Nothing is deleted until someone decides.');
-  await shot(manager.page, '21-retention');
+  await shot(manager.page, '24-retention');
   await card.getByRole('button', { name: 'Keep for another year' }).click();
   await expect(manager.page.locator('#retention')).toHaveCount(0);
   await expect(manager.page.getByText(/Its documents are kept until at least/)).toBeVisible();

@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { getOrderHandoff, type Ctx, type OrderHeader } from '@bluven/core';
+import { getOrderHandoff, isWithOperations, type Ctx, type OrderHeader } from '@bluven/core';
 import { assistantConfigured, getAssistantSettings, storedBrief } from '@bluven/integrations';
 import { BriefCard } from '@/components/assistant';
 import { ActionForm, FormMessage, SubmitButton } from '@/components/client';
@@ -11,8 +11,12 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
   const { order } = header;
   const { checklist, packages } = await getOrderHandoff(ctx, order.id);
   const base = `/orders/${order.id}`;
-  const withOps = order.stage === 'PUSHED' || order.stage === 'HANDED_OVER';
-  const canPush = staff && editable && checklist.complete && order.sideState === 'NONE' && (order.stage === 'DEPOSIT_CONFIRMED' || order.stage === 'RETURNED');
+  const accepted = isWithOperations(order.stage);
+  const withOps = order.stage === 'PUSHED' || accepted;
+  const canPush = staff && editable && checklist.complete && order.sideState === 'NONE' && (order.stage === 'DEPOSIT_PAID' || order.stage === 'RETURNED');
+  // The e-mails that go to the customer once operations has the order need an address somebody has confirmed.
+  const addresses = withOps ? [] : await ctx.db.customerEmail.findMany({ where: { customerId: order.customerId }, select: { email: true, unconfirmed: true } });
+  const noConfirmedAddress = !withOps && !addresses.some((a) => !a.unconfirmed);
   const labelFor = new Map(checklist.items.map((i) => [i.key, i.label]));
   const latest = packages[0];
   const assistant = assistantConfigured();
@@ -24,8 +28,8 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <Card>
         <CardHeader
-          title="Checklist"
-          description="Everything operations needs before they can take the order."
+          title="The folder"
+          description="What has to be on file before the order can go to operations: the proposal the customer accepted, the proof of the deposit, the bill and the photos."
           actions={checklist.complete ? <Badge tone="green">Complete</Badge> : <Badge tone="amber">{checklist.items.filter((i) => !i.ok).length} to go</Badge>}
         />
         <ul className="divide-y divide-slate-100">
@@ -59,11 +63,24 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
 
       <div className="space-y-4">
         <Card>
-          <CardHeader title="Send to operations" description="Operations cannot see this order until you push it. They either accept it or return it with a reason." />
+          <CardHeader
+            title="Send to operations"
+            description="Operations cannot see this order until you push it. When they accept it they confirm that the deposit has arrived, and the customer gets a welcome e-mail. They send an order back only when they cannot sort something out without you."
+          />
           <CardBody>
             {withOps ? (
-              <Alert tone={order.stage === 'HANDED_OVER' ? 'green' : 'amber'}>
-                {order.stage === 'HANDED_OVER' ? `Accepted by operations on ${fmtDateTime(order.handedOverAt)}.` : `Pushed on ${fmtDateTime(order.pushedAt)}. Waiting for operations to accept or return it.`}
+              <Alert tone={accepted ? 'green' : 'amber'}>
+                {accepted ? (
+                  <>
+                    Accepted by operations on {fmtDateTime(order.handedOverAt)}.{' '}
+                    <Link href={`${base}?tab=operations`} className="font-medium underline">
+                      See how the job stands
+                    </Link>
+                    .
+                  </>
+                ) : (
+                  `Pushed on ${fmtDateTime(order.pushedAt)}. Waiting for operations to accept it.`
+                )}
               </Alert>
             ) : !staff || !editable ? (
               <p className="text-sm text-slate-500">This order cannot be pushed in its current state.</p>
@@ -81,11 +98,18 @@ export async function HandoffTab({ ctx, header, editable, staff }: { ctx: Ctx; h
                     placeholder="Preferred install times, access, pets, anything promised to the customer, anything unusual about the site"
                   />
                 </div>
-                {!checklist.complete && <Alert tone="amber">Complete the checklist to enable the push.</Alert>}
+                {!checklist.complete && <Alert tone="amber">Complete the folder to enable the push.</Alert>}
+                {noConfirmedAddress && (
+                  <Alert tone="amber">
+                    {addresses.length > 0
+                      ? `Nobody has confirmed that ${addresses[0]!.email} is the customer’s address. Confirm it on the Overview tab, or the welcome e-mail will not go out when operations accepts.`
+                      : 'The customer has no e-mail address on record, so the welcome e-mail cannot go out when operations accepts. Add one on the Overview tab if they have one.'}
+                  </Alert>
+                )}
                 {checklist.complete && order.sideState === 'ON_HOLD' && <Alert tone="amber">Take the order off hold before pushing it.</Alert>}
                 <FormMessage />
                 <div className="flex flex-wrap gap-2">
-                  <SubmitButton name="intent" value="push" pendingLabel="Sending…" disabled={!canPush} title={canPush ? undefined : 'Complete the checklist first'}>
+                  <SubmitButton name="intent" value="push" pendingLabel="Sending…" disabled={!canPush} title={canPush ? undefined : 'Complete the folder first'}>
                     {order.stage === 'RETURNED' ? 'Push to operations again' : 'Push to operations'}
                   </SubmitButton>
                   <SubmitButton name="intent" value="save" variant="secondary">

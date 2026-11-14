@@ -267,12 +267,12 @@ describe('intake tokens', () => {
 describe('configuration', () => {
   it('lets managers shape the handoff checklist through document types', async () => {
     const w = await makeWorld();
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const keys = async () => (await getHandoffChecklist(db, orderId)).items.map((i) => i.key);
-    expect(await keys()).toEqual(['address', 'contract', 'deposit', 'doc:electricity_bill', 'doc:install_location', 'doc:meter_box']);
+    expect(await keys()).toEqual(['address', 'quote', 'deposit', 'doc:electricity_bill', 'doc:install_location', 'doc:meter_box']);
 
     const roof = await createDocumentType(as(w.manager), { label: 'Roof photos', description: '', scope: 'PROPERTY', isRequiredForHandoff: true, retentionYears: 2, neverAutoDelete: false, sortOrder: 55, isActive: true });
-    expect(await keys()).toEqual(['address', 'contract', 'deposit', 'doc:electricity_bill', 'doc:install_location', 'doc:roof_photos', 'doc:meter_box']);
+    expect(await keys()).toEqual(['address', 'quote', 'deposit', 'doc:electricity_bill', 'doc:install_location', 'doc:roof_photos', 'doc:meter_box']);
     await updateDocumentType(as(w.manager), { typeId: roof.id, label: 'Roof photos', description: '', scope: 'PROPERTY', isRequiredForHandoff: false, retentionYears: 2, neverAutoDelete: false, sortOrder: 55, isActive: true });
     expect(await keys()).not.toContain('doc:roof_photos');
 
@@ -304,7 +304,7 @@ describe('audit log', () => {
 
   it('records before and after values of an edit', async () => {
     const w = await makeWorld();
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await updateCustomer(as(w.sam, w.clock), { orderId, firstName: 'Jane', lastName: 'Smith-Jones', notes: 'Prefers email.', phones: ['0412 345 678', '02 9123 4567'], emails: ['jane@example.com'] });
     const entry = await db.auditLog.findFirstOrThrow({ where: { action: 'customer.update', orderId } });
     expect(entry.before).toEqual({ lastName: 'Smith', notes: '', phones: ['0412 345 678'] });

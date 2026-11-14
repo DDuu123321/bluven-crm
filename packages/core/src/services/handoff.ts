@@ -1,18 +1,21 @@
-// Handoff to operations: checklist, push, accept, return.
+// Handoff to operations: what has to be in the folder, the push, and operations accepting the
+// order or, as the exception, sending it back.
 import type { DbOrTx, Prisma, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
-import { STAGE_LABEL, can, formatAddress, formatCents, formatDateOnly, fullName } from '../domain';
+import { STAGE_LABEL, can, formatAddress, formatCents, fullName, isWithOperations } from '../domain';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
+import { confirmDepositReceived } from './deposits';
+import { queueNotice } from './notices';
 import { managerIds, notifyRoles, notifyUsers } from './notify';
-import { lockOrder, lockOrderForEdit, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity } from './orders';
+import { lockOrder, lockOrderForStaff, lockOrderForWork, loadOrderState, orderHref, syncOrderStage, touchStaffActivity } from './orders';
 import { CURRENT_DOCUMENT } from './reference';
 import { completeSystemTasks } from './timeline';
 
 export interface ChecklistItem {
-  /** Stable key: "address", "contract", "deposit" or "doc:<type key>". */
+  /** Stable key: "address", "quote", "deposit" or "doc:<type key>". */
   key: string;
   label: string;
   ok: boolean;
@@ -27,14 +30,19 @@ export interface Checklist {
   complete: boolean;
 }
 
-/** Everything operations needs before an order can be pushed. Document items come from the configurable types. */
+/**
+ * Everything that has to be on file before an order can be pushed: the address, the proposal the
+ * customer accepted, the proof of the deposit, and a file in each folder that is marked as
+ * required (out of the box the electricity bill, the photos of where the system goes and the
+ * photos of the switchboard). Which folders are required is the managers' to set.
+ */
 export async function getHandoffChecklist(db: DbOrTx, orderId: string): Promise<Checklist> {
   const order = await db.order.findUniqueOrThrow({
     where: { id: orderId },
     select: {
       property: true,
-      contracts: { where: { voidedAt: null }, select: { signedOn: true }, take: 1 },
-      deposits: { where: { status: { in: ['PENDING', 'CONFIRMED'] } }, select: { status: true, amountCents: true, receivedAmountCents: true, receivedOn: true, currency: true } },
+      quotes: { orderBy: { version: 'desc' }, select: { version: true, isAccepted: true, totalCents: true, currency: true, documentId: true, webProposalUrl: true } },
+      deposits: { where: { status: { in: ['PENDING', 'CONFIRMED'] } }, orderBy: { submittedAt: 'desc' }, select: { status: true, amountCents: true, method: true, currency: true } },
     },
   });
   const items: ChecklistItem[] = [];
@@ -48,25 +56,29 @@ export async function getHandoffChecklist(db: DbOrTx, orderId: string): Promise<
     detail: addressOk ? formatAddress(p) : 'Street, suburb, state and postcode are all needed.',
   });
 
-  const contract = order.contracts[0];
+  const accepted = order.quotes.find((q) => q.isAccepted);
+  const acceptedHasFile = !!accepted && (!!accepted.documentId || !!accepted.webProposalUrl);
   items.push({
-    key: 'contract',
-    label: 'Signed contract',
-    ok: !!contract,
-    detail: contract ? `Signed ${formatDateOnly(contract.signedOn)}` : 'Not archived yet.',
+    key: 'quote',
+    label: 'Proposal the customer accepted',
+    ok: acceptedHasFile,
+    detail: accepted
+      ? acceptedHasFile
+        ? `Version ${accepted.version}${accepted.totalCents !== null ? `, ${formatCents(accepted.totalCents, accepted.currency)}` : ''}`
+        : `Version ${accepted.version} has no file yet. Attach the proposal as it went to the customer.`
+      : order.quotes.length > 0
+        ? 'Say which version the customer accepted.'
+        : 'No quote on record yet.',
   });
 
-  const confirmed = order.deposits.find((d) => d.status === 'CONFIRMED');
-  const pending = order.deposits.find((d) => d.status === 'PENDING');
+  const deposit = order.deposits[0];
   items.push({
     key: 'deposit',
-    label: 'Deposit confirmed by finance',
-    ok: !!confirmed,
-    detail: confirmed
-      ? `${formatCents(confirmed.receivedAmountCents ?? confirmed.amountCents, confirmed.currency)} received ${formatDateOnly(confirmed.receivedOn)}`
-      : pending
-        ? 'Submitted. Waiting for finance to confirm.'
-        : 'Not submitted yet.',
+    label: 'Proof of the deposit',
+    ok: !!deposit,
+    detail: deposit
+      ? `${formatCents(deposit.amountCents, deposit.currency)}, ${deposit.method === 'GATEWAY' ? 'paid through Pylon' : deposit.method === 'FINANCE' ? 'finance approval on file' : 'payment proof on file'}`
+      : 'Not recorded yet.',
   });
 
   const requiredTypes = await db.documentType.findMany({
@@ -110,8 +122,10 @@ export interface HandoffSnapshot {
     notes: string;
   };
   quote: { version: number; title: string; dcWatts: number | null; storageWh: number | null; totalCents: number | null; depositCents: number | null; currency: string; documentId: string | null } | null;
+  /** A signed contract, where one was filed. It is not required. */
   contract: { signedOn: string; documentId: string; source: string } | null;
-  deposit: { amountCents: number; receivedAmountCents: number | null; receivedOn: string | null; method: string; bankReference: string; confirmedBy: string | null; confirmedAt: string | null; currency: string } | null;
+  /** The deposit as sales recorded it. That the money has arrived is confirmed by operations when they accept. */
+  deposit: { amountCents: number; receivedAmountCents: number | null; receivedOn: string | null; method: string; bankReference: string; confirmedBy: string | null; confirmedAt: string | null; currency: string; note?: string } | null;
   documents: { id: string; typeKey: string; typeLabel: string; fileName: string; sizeBytes: number; takenAt: string | null; uploadedAt: string; reused: boolean }[];
   checklist: ChecklistItem[];
 }
@@ -126,7 +140,7 @@ async function buildSnapshot(tx: Tx, orderId: string, notes: string, now: Date):
       property: true,
       quotes: { where: { isAccepted: true }, take: 1 },
       contracts: { where: { voidedAt: null }, take: 1 },
-      deposits: { where: { status: 'CONFIRMED' }, take: 1, include: { decidedBy: { select: { name: true } } } },
+      deposits: { where: { status: { in: ['PENDING', 'CONFIRMED'] } }, orderBy: { submittedAt: 'desc' }, take: 1, include: { decidedBy: { select: { name: true } } } },
       documents: { where: CURRENT_DOCUMENT, include: { type: true }, orderBy: [{ type: { sortOrder: 'asc' } }, { createdAt: 'asc' }] },
     },
   });
@@ -166,6 +180,7 @@ async function buildSnapshot(tx: Tx, orderId: string, notes: string, now: Date):
           confirmedBy: d.decidedBy?.name ?? null,
           confirmedAt: d.decidedAt?.toISOString() ?? null,
           currency: d.currency,
+          note: d.note,
         }
       : null,
     documents: o.documents.map((doc) => ({
@@ -186,7 +201,7 @@ async function buildSnapshot(tx: Tx, orderId: string, notes: string, now: Date):
 export async function updateHandoffNotes(ctx: Ctx, input: { orderId: string; notes: string }): Promise<void> {
   const notes = input.notes.trim().slice(0, 5000);
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, input.orderId);
+    const order = await lockOrderForWork(tx, ctx, input.orderId);
     const current = await tx.order.findUniqueOrThrow({ where: { id: order.id }, select: { handoffNotes: true } });
     if (current.handoffNotes === notes) return;
     await tx.order.update({ where: { id: order.id }, data: { handoffNotes: notes } });
@@ -203,20 +218,20 @@ export async function updateHandoffNotes(ctx: Ctx, input: { orderId: string; not
   });
 }
 
-/** Sends the order to operations. Requires a confirmed deposit and a complete checklist. */
+/** Sends the order to operations. Requires the deposit to be on record and the folder to be complete. */
 export async function pushOrder(ctx: Ctx, input: { orderId: string; notes?: string }): Promise<{ version: number }> {
   return inTx(ctx.db, async (tx) => {
     const order = await lockOrderForStaff(tx, ctx, input.orderId);
     if (order.sideState === 'ON_HOLD') throw new ConflictError('Take the order off hold before pushing it to operations.');
     if (order.sideState !== 'NONE') throw new ConflictError(`This order is ${order.sideState === 'LOST' ? 'marked as lost' : 'cancelled'}.`);
     if (order.stage === 'PUSHED') throw new ConflictError('This order is already with operations.');
-    if (order.stage === 'HANDED_OVER') throw new ConflictError('This order has already been handed over.');
+    if (isWithOperations(order.stage)) throw new ConflictError('Operations has already accepted this order.');
     const checklist = await getHandoffChecklist(tx, order.id);
     if (!checklist.complete) {
       const missing = checklist.items.filter((i) => !i.ok).map((i) => i.label);
       throw new ValidationError(`Not ready to push yet. Still missing: ${missing.join(', ')}.`);
     }
-    if (order.stage !== 'DEPOSIT_CONFIRMED' && order.stage !== 'RETURNED') {
+    if (order.stage !== 'DEPOSIT_PAID' && order.stage !== 'RETURNED') {
       throw new ConflictError(`An order in stage “${STAGE_LABEL[order.stage]}” cannot be pushed.`);
     }
 
@@ -273,24 +288,34 @@ function requireOps(ctx: Ctx) {
   return ctx.actor;
 }
 
-async function lockPendingPackage(tx: Tx, orderId: string) {
-  await lockOrder(tx, orderId);
-  const order = await loadOrderState(tx, orderId);
-  if (!order || !order.firstPushedAt) throw new NotFoundError('Order not found.');
-  const pkg = await tx.handoffPackage.findFirst({ where: { orderId, decision: 'PENDING' } });
-  if (!pkg) throw new ConflictError('This order is not waiting for a decision from operations.');
-  return { order, pkg };
-}
-
-/** Operations takes the order on. This is where the sales side ends. */
-export async function acceptHandoff(ctx: Ctx, input: { orderId: string }): Promise<void> {
+/**
+ * Operations takes the order on, and in doing so confirms that the deposit has arrived: they
+ * are the ones who can see the account. The first time an order is accepted the customer gets
+ * the welcome e-mail and the record operations works in is made; finance is told about the
+ * deposit. This is where the sale is made.
+ */
+export async function acceptHandoff(ctx: Ctx, input: { orderId: string; depositReceived: boolean }): Promise<void> {
   const actor = requireOps(ctx);
+  if (!input.depositReceived) {
+    throw new ValidationError('Confirm that the deposit has arrived before you accept. If it has not, the order waits here, or goes back to sales.', {
+      depositReceived: 'Check the account first.',
+    });
+  }
   await inTx(ctx.db, async (tx) => {
-    const { order, pkg } = await lockPendingPackage(tx, input.orderId);
+    await lockOrder(tx, input.orderId);
+    const order = await loadOrderState(tx, input.orderId);
+    if (!order || !order.firstPushedAt) throw new NotFoundError('Order not found.');
+    if (order.sideState !== 'NONE') throw new ConflictError(`This order is ${order.sideState === 'CANCELLED' ? 'cancelled' : 'not active'}.`);
+    const pkg = await tx.handoffPackage.findFirst({ where: { orderId: order.id, decision: 'PENDING' } });
+    if (!pkg) throw new ConflictError('This order is not waiting for a decision from operations.');
     const now = nowOf(ctx);
     await tx.handoffPackage.update({ where: { id: pkg.id }, data: { decision: 'ACCEPTED', decidedById: actor.id, decidedAt: now } });
     await tx.order.update({ where: { id: order.id }, data: { handedOverAt: now } });
+    const first = !(await tx.opsJob.findUnique({ where: { orderId: order.id }, select: { orderId: true } }));
+    if (first) await tx.opsJob.create({ data: { orderId: order.id, createdAt: now, updatedById: actor.id } });
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'HANDOFF', summary: 'Accepted by operations', payload: { handoffId: pkg.id } });
+    await confirmDepositReceived(tx, ctx, order);
+    await completeSystemTasks(tx, ctx, order.id, ['RETURNED']);
     await syncOrderStage(tx, ctx, order.id);
     await audit(tx, ctx, {
       action: 'handoff.accept',
@@ -305,19 +330,34 @@ export async function acceptHandoff(ctx: Ctx, input: { orderId: string }): Promi
     await notifyUsers(tx, ctx, [order.ownerId, ...(await managerIds(tx))], {
       type: 'handoff.accepted',
       title: `${order.orderNo} was accepted by operations`,
+      body: 'The deposit is confirmed. You can follow the installation on the order’s page.',
       href: orderHref(order.id),
       orderId: order.id,
     });
+    // Once per order: a customer whose order came back and was accepted again has been welcomed.
+    if (first) await queueNotice(tx, ctx, order.id, 'WELCOME');
   });
 }
 
-/** Operations sends the order back with a reason. Sales fixes it and pushes again. */
+/**
+ * Operations sends the order back to sales with a reason. This is for the cases operations
+ * cannot settle themselves: the customer cannot be reached, or something needs the salesperson.
+ * A file that is missing is asked for by operations directly. An order can come back before it
+ * is accepted and after, until the installation is done.
+ */
 export async function returnHandoff(ctx: Ctx, input: { orderId: string; reason: string; missing?: string[] }): Promise<void> {
   const actor = requireOps(ctx);
   const reason = input.reason.trim().slice(0, 2000);
-  if (!reason) throw new ValidationError('Say what needs to be fixed.', { reason: 'Give a reason.' });
+  if (!reason) throw new ValidationError('Say why sales is needed.', { reason: 'Give a reason.' });
   await inTx(ctx.db, async (tx) => {
-    const { order, pkg } = await lockPendingPackage(tx, input.orderId);
+    await lockOrder(tx, input.orderId);
+    const order = await loadOrderState(tx, input.orderId);
+    if (!order || !order.firstPushedAt) throw new NotFoundError('Order not found.');
+    if (order.sideState !== 'NONE') throw new ConflictError(`This order is ${order.sideState === 'CANCELLED' ? 'cancelled' : 'not active'}.`);
+    const pkg = await tx.handoffPackage.findFirst({ where: { orderId: order.id }, orderBy: { version: 'desc' } });
+    const accepted = pkg?.decision === 'ACCEPTED';
+    if (accepted && order.stage !== 'IN_PROGRESS') throw new ConflictError('The installation is done. This order can no longer go back to sales.');
+    if (!pkg || (pkg.decision !== 'PENDING' && !accepted)) throw new ConflictError('This order is not with operations.');
     const now = nowOf(ctx);
     const known = new Set((pkg.snapshot as unknown as HandoffSnapshot).checklist?.map((i) => i.key) ?? []);
     const missing = [...new Set(input.missing ?? [])].filter((k) => known.has(k));
@@ -335,7 +375,7 @@ export async function returnHandoff(ctx: Ctx, input: { orderId: string; reason: 
         id: newId('tsk'),
         orderId: order.id,
         assigneeId: order.ownerId,
-        title: 'Returned by operations: fix and push again',
+        title: 'Returned by operations: sort it out and push again',
         notes: reason,
         dueAt: now,
         kind: 'RETURNED',
@@ -343,7 +383,8 @@ export async function returnHandoff(ctx: Ctx, input: { orderId: string; reason: 
         createdAt: now,
       },
     });
-    await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'HANDOFF', summary: 'Returned by operations', body: reason, payload: { handoffId: pkg.id, missing } });
+    const summary = accepted ? 'Returned by operations after they had accepted it' : 'Returned by operations';
+    await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'HANDOFF', summary, body: reason, payload: { handoffId: pkg.id, missing } });
     await syncOrderStage(tx, ctx, order.id);
     await audit(tx, ctx, {
       action: 'handoff.return',
@@ -351,8 +392,8 @@ export async function returnHandoff(ctx: Ctx, input: { orderId: string; reason: 
       entityId: pkg.id,
       orderId: order.id,
       customerId: order.customerId,
-      summary: `${order.orderNo}: returned by operations`,
-      before: { decision: 'PENDING' },
+      summary: `${order.orderNo}: ${summary.charAt(0).toLowerCase()}${summary.slice(1)}`,
+      before: { decision: pkg.decision },
       after: { decision: 'RETURNED', reason, missing },
     });
     await notifyUsers(tx, ctx, [order.ownerId, ...(await managerIds(tx))], {

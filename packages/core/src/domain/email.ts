@@ -304,21 +304,48 @@ export type TemplateField = keyof typeof TEMPLATE_FIELDS;
  * is not a known field, is left as it is written, so the person sending sees that something is
  * still to be filled in.
  */
-export function fillTemplate(text: string, values: Partial<Record<TemplateField, string>>): string {
+export function fillTemplate<Field extends string = TemplateField>(text: string, values: Partial<Record<Field, string>>): string {
   return text.replace(/\{\{\s*([a-z_]+)\s*\}\}/gi, (whole, name: string) => {
     // Only what was put into `values`: a name such as "constructor" is on every object, and is not a field.
     const key = name.toLowerCase();
-    const value = Object.hasOwn(values, key) ? values[key as TemplateField] : undefined;
+    const value = Object.hasOwn(values, key) ? (values as Record<string, string | undefined>)[key] : undefined;
     return typeof value === 'string' && value.trim() ? value.trim() : whole;
   });
 }
 
 /** The names in double braces that are not known fields, for telling the person writing a template. */
-export function unknownTemplateFields(text: string): string[] {
+export function unknownTemplateFields(text: string, fields: Readonly<Record<string, string>> = TEMPLATE_FIELDS): string[] {
   const found = new Set<string>();
   for (const m of text.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/g)) {
     const name = m[1]!.toLowerCase();
-    if (!Object.hasOwn(TEMPLATE_FIELDS, name)) found.add(m[1]!);
+    if (!Object.hasOwn(fields, name)) found.add(m[1]!);
   }
   return [...found];
 }
+
+/** The fields of a set that a text still shows in braces: the ones `fillTemplate` had no value for. */
+export function unfilledTemplateFields(text: string, fields: Readonly<Record<string, string>>): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/gi)) {
+    if (Object.hasOwn(fields, m[1]!.toLowerCase())) found.add(m[1]!.toLowerCase());
+  }
+  return [...found];
+}
+
+/**
+ * What the e-mails the CRM sends to customers by itself can refer to: the welcome when
+ * operations accepts an order, the dates of the installation, and the thank-you that asks for
+ * the balance.
+ */
+export const NOTICE_FIELDS = {
+  first_name: 'The customer’s first name',
+  full_name: 'The customer’s full name',
+  address: 'The address of the installation',
+  order_no: 'The order number',
+  salesperson: 'The name of the customer’s salesperson',
+  install_date: 'The day of the installation (dates e-mail)',
+  delivery: 'A sentence on how and when the equipment arrives (dates e-mail)',
+  installer: 'The installer, or “one of our accredited installers” while none is named (dates e-mail)',
+  balance_days: 'The number of working days the customer has to pay the balance (thank-you e-mail)',
+} as const;
+export type NoticeField = keyof typeof NOTICE_FIELDS;

@@ -149,7 +149,7 @@ export async function pullBluvenLeads(ctx: Ctx, opts: BluvenPullOptions): Promis
     state.lastRunAt = now.toISOString();
 
     try {
-      if (!source.isActive) throw new PullError('The "Bluven website" lead source is switched off in the CRM.');
+      if (!source.isActive) throw new PullError('The "Bluven website" intake channel is switched off in the CRM.');
       for (let round = 0; round < MAX_ROUNDS; round++) {
         const page = await fetchPage(opts, state.since);
         const fresh = page.filter((i) => typeof i.externalId === 'string' && !state!.seen.includes(i.externalId) && !Number.isNaN(timeOf(i)));
@@ -198,7 +198,7 @@ export async function pullBluvenLeads(ctx: Ctx, opts: BluvenPullOptions): Promis
           type: 'intake.pull_failing',
           title: 'Leads from the Bluven website are not arriving',
           body: `${e.message}\nNothing is lost: the website keeps the leads and they will come in once the connection works again.`,
-          href: '/settings/lead-sources',
+          href: '/settings/intake-channels',
         });
       }
     }

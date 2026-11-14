@@ -14,7 +14,7 @@ const ROLE_HELP: Record<Role, string> = {
   MANAGER: 'Sees every order, assigns leads, configures the checklist.',
   FINANCE: 'Confirms or rejects deposits.',
   OPS: 'Accepts or returns orders pushed by sales.',
-  ADMIN: 'Manages users, lead sources and system rules.',
+  ADMIN: 'Manages users, intake channels and system rules.',
 };
 
 function RoleBoxes({ selected }: { selected: readonly string[] }) {

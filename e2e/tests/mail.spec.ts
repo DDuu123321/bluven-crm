@@ -49,6 +49,11 @@ test('a salesperson connects their own mailbox', async ({ browser }) => {
   await page.waitForURL(/\/orders\/ord_/);
   orderUrl = page.url().split('?')[0]!;
 
+  // The job is opened first: until then nothing is recorded on the lead or written from it.
+  await page.getByLabel('Lead source').selectOption({ label: 'Bluven website' });
+  await page.getByRole('button', { name: 'Open job' }).click();
+  await expectStage(page, 'Following up');
+
   // Without a mailbox the Email tab says so and offers the way to connect one.
   await openTab(page, 'Email');
   await expect(page.getByText('Your mailbox is not connected')).toBeVisible();
@@ -89,8 +94,8 @@ test('writes to the customer from the order, with a file of the order attached',
   await expect(dialog).toBeHidden();
   await expect(page.getByText(SUBJECT).first()).toBeVisible();
   await expect(page.getByText('written in the CRM')).toBeVisible();
-  // Writing to the customer is first contact.
-  await expectStage(page, 'Contacted');
+  // Writing to the customer is following up: the stage stays where it is.
+  await expectStage(page, 'Following up');
 
   const sent = await sentByCrm();
   expect(sent).toHaveLength(1);
@@ -145,7 +150,7 @@ test('the customer’s answer arrives with its attachment, which is filed into t
   await message.getByLabel('Folder for AGL bill Oct.pdf').selectOption({ label: 'Electricity bill' });
   await message.getByRole('button', { name: 'File', exact: true }).click();
   await expect(message.getByText('Filed as Electricity bill')).toBeVisible();
-  await shot(page, '13-email');
+  await shot(page, '16-email');
   await openTab(page, 'Documents');
   await expect(folder(page, 'Electricity bill').getByText('AGL bill Oct.pdf').first()).toBeVisible();
 
@@ -244,7 +249,7 @@ test('the owner decides how much of a mailbox is kept, and an address from the w
 test('a quote version gets its file, goes out by e-mail, and is recorded as sent by that', async ({ browser }) => {
   const { context, page } = await signIn(browser, 'sam');
   await page.goto(orderUrl);
-  await openTab(page, 'Quote, contract & deposit');
+  await openTab(page, 'Proposal & deposit');
   // As a version arrives from Pylon: the figures, and no file.
   await page.getByRole('button', { name: 'Add quote version' }).click();
   const add = page.getByRole('dialog');
@@ -274,8 +279,8 @@ test('a quote version gets its file, goes out by e-mail, and is recorded as sent
   await compose.getByRole('button', { name: 'Send' }).click();
   await expect(compose).toBeHidden();
   expect((await sentByCrm()).at(-1)).toMatchObject({ subject: 'Your quote', attachments: ['Quote - Mia Mailer.pdf'] });
-  await openTab(page, 'Quote, contract & deposit');
+  await openTab(page, 'Proposal & deposit');
   await expect(page.getByText('Not sent')).toHaveCount(0);
-  await expectStage(page, 'Quoted');
+  await expectStage(page, 'Proposal sent');
   await context.close();
 });

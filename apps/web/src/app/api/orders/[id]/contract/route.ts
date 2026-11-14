@@ -1,8 +1,8 @@
-import { archiveContract, cleanupStaged, requireEditableOrder, type StagedFile } from '@bluven/core';
+import { archiveContract, cleanupStaged, requireWorkableOrder, type StagedFile } from '@bluven/core';
 import { bool, dateOnly, files, str } from '@/lib/form';
 import { authenticate, errorResponse, json, readForm, stageFiles } from '@/lib/http';
 
-/** Archives the signed contract (one or more files) against the quote version the customer signed. */
+/** Files the signed copy (one or more files) against the quote version the customer signed. An order does not need one. */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
   const auth = await authenticate(request);
   if (auth instanceof Response) return auth;
@@ -10,7 +10,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   let staged: StagedFile[] = [];
   try {
     // Who may do this is settled before the upload is read, so a refused request costs nothing.
-    await requireEditableOrder(auth.ctx, id);
+    await requireWorkableOrder(auth.ctx, id);
     const form = await readForm(request);
     staged = await stageFiles(files(form, 'files'));
     await archiveContract(auth.ctx, {

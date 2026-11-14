@@ -2,19 +2,26 @@ import { existsSync, readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   FileTooLargeError,
+  acceptHandoff,
+  archiveContract,
   changeDocumentType,
+  confirmFinalPayment,
   deleteDocument,
   detectContentType,
   getStorage,
   listReusableDocuments,
+  markJobDone,
   markLost,
   openDocument,
+  openJob,
+  parseDateOnly,
   pushOrder,
+  returnHandoff,
   reuseDocuments,
   stageUpload,
   uploadDocument,
 } from '../src';
-import { as, docType, pdf, png, resetDb, stream, testDb } from './helpers';
+import { as, docType, leadOrigin, pdf, png, resetDb, staged, stream, testDb } from './helpers';
 import { makeWorld, orderAt, type World } from './setup-order';
 
 const db = testDb();
@@ -31,7 +38,7 @@ async function upload(orderId: string, key: string, name: string, body: Buffer, 
 
 describe('documents', () => {
   it('stores the file under the customer / property / order path with a thumbnail for images', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const image = await png(5);
     const { id } = await upload(orderId, 'meter_box', '../../etc/Meter Box 01.PNG', image);
     const doc = await db.document.findUniqueOrThrow({ where: { id }, include: { order: true } });
@@ -44,7 +51,7 @@ describe('documents', () => {
   });
 
   it('keeps order-level files off the property', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const { id } = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     const doc = await db.document.findUniqueOrThrow({ where: { id } });
     expect(doc.propertyId).toBeNull();
@@ -53,7 +60,7 @@ describe('documents', () => {
   });
 
   it('rejects the same file twice in the same folder and leaves no stray files', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const body = pdf('same');
     await upload(orderId, 'electricity_bill', 'bill.pdf', body);
     await expect(upload(orderId, 'electricity_bill', 'bill-copy.pdf', body)).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('bill.pdf') });
@@ -65,14 +72,14 @@ describe('documents', () => {
   });
 
   it('refuses quote, contract and deposit files through the general uploader', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     for (const key of ['signed_contract', 'deposit_proof', 'quote']) {
-      await expect(upload(orderId, key, 'x.pdf', pdf(key))).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('Quote, contract & deposit') });
+      await expect(upload(orderId, key, 'x.pdf', pdf(key))).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('Proposal & deposit') });
     }
   });
 
   it('replaces a file with a new version and hides the old one from the checklist', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const v1 = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('v1'));
     const v2 = await upload(orderId, 'electricity_bill', 'bill-new.pdf', pdf('v2'), { replacesId: v1.id });
     const current = await db.document.findMany({ where: { orderId, deletedAt: null, replacedBy: { is: null } } });
@@ -83,8 +90,9 @@ describe('documents', () => {
   });
 
   it('deletes softly and protects files that back a contract or deposit', async () => {
-    const { orderId } = await orderAt(w, 'DEPOSIT_PENDING');
+    const { orderId, quoteId } = await orderAt(w, 'DEPOSIT_PAID');
     const sam = as(w.sam, w.clock);
+    await archiveContract(sam, { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09'), files: [await staged(pdf('signed'), 'signed.pdf')] });
     const contract = await db.contract.findFirstOrThrow({ where: { orderId } });
     const deposit = await db.deposit.findFirstOrThrow({ where: { orderId } });
     await expect(deleteDocument(sam, { documentId: contract.documentId })).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('contract') });
@@ -100,7 +108,7 @@ describe('documents', () => {
   });
 
   it('moves a file between ordinary types', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const { id } = await upload(orderId, 'other', 'photo.png', await png(8));
     await changeDocumentType(as(w.sam, w.clock), { documentId: id, typeId: (await docType('meter_box')).id });
     const doc = await db.document.findUniqueOrThrow({ where: { id }, include: { order: true, type: true } });
@@ -163,7 +171,7 @@ describe('documents', () => {
   });
 
   it('reports a file on somebody else\'s order exactly like one that does not exist', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const { id } = await upload(orderId, 'other', 'notes.txt', Buffer.from('hello'));
     const alex = as(w.alex, w.clock);
     const missing = await deleteDocument(alex, { documentId: 'doc_does_not_exist' }).catch((e: Error) => e.message);
@@ -174,7 +182,7 @@ describe('documents', () => {
   });
 
   it('will not move a file into a folder that already holds the same file', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const image = await png(21);
     await upload(orderId, 'meter_box', 'meter.png', image);
     const stray = await upload(orderId, 'other', 'meter-copy.png', image);
@@ -185,7 +193,7 @@ describe('documents', () => {
   });
 
   it('offers site photos from an earlier order on the same property for reuse', async () => {
-    const first = await orderAt(w, 'ASSIGNED');
+    const first = await orderAt(w, 'OPENED');
     const sam = as(w.sam, w.clock);
     const meter = await upload(first.orderId, 'meter_box', 'meter.png', await png(21));
     await upload(first.orderId, 'install_location', 'wall.png', await png(22));
@@ -196,6 +204,7 @@ describe('documents', () => {
     // Same customer, same address, later enquiry: a second order on the same property, owned by Sam.
     const second = await orderAt(w, 'NEW');
     expect((await db.order.findUniqueOrThrow({ where: { id: second.orderId } })).ownerId).toBe(w.sam.id);
+    await openJob(sam, { orderId: second.orderId, leadOriginId: (await leadOrigin('bluven_website')).id });
 
     const offered = await listReusableDocuments(sam, second.orderId);
     // Property photos are offered, the bill is not: each order needs its own.
@@ -227,5 +236,60 @@ describe('documents', () => {
     expect(detectContentType('sheet.xlsx', Buffer.from('PK\u0003\u0004'))).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(() => getStorage().absolutePath('../outside')).toThrow();
     expect(() => getStorage().absolutePath('a/../../b')).toThrow();
+  });
+});
+
+describe('the folder while operations has the order', () => {
+  const add = async (who: World['ops'], orderId: string, key: string, name: string, extra: { replacesId?: string } = {}) =>
+    uploadDocument(as(who, w.clock), { orderId, typeId: (await docType(key)).id, fileName: name, body: stream(pdf(`${name} ${orderId}`)), ...extra });
+
+  it('is theirs to add to from the push until the job is closed, and what sales filed stays as it is', async () => {
+    const { orderId } = await orderAt(w, 'READY');
+    // Before the push operations cannot even see the order.
+    await expect(add(w.ops, orderId, 'meter_box', 'early.pdf')).rejects.toMatchObject({ code: 'not_found' });
+    await pushOrder(as(w.sam, w.clock), { orderId });
+
+    // Pushed: the salesperson's folder is closed, and operations can add what they got from the customer.
+    await expect(add(w.sam, orderId, 'meter_box', 'late.pdf')).rejects.toMatchObject({ code: 'conflict' });
+    const before = (await db.order.findUniqueOrThrow({ where: { id: orderId } })).lastStaffActivityAt;
+    w.clock.advanceMinutes(30);
+    const mine = await add(w.ops, orderId, 'meter_box', 'meter-box-door-open.pdf');
+    expect(await db.document.findUniqueOrThrow({ where: { id: mine.id }, include: { type: true } })).toMatchObject({ uploadedById: w.ops.id, type: { key: 'meter_box' }, propertyId: expect.any(String) });
+    expect(await db.activity.count({ where: { orderId, type: 'DOCUMENT', actorId: w.ops.id } })).toBe(1);
+    // It is not the salesperson's activity: the idle clock is theirs alone.
+    expect((await db.order.findUniqueOrThrow({ where: { id: orderId } })).lastStaffActivityAt).toEqual(before);
+    // Proposal, contract and deposit files are records of the sale, whoever asks.
+    await expect(add(w.ops, orderId, 'deposit_proof', 'proof.pdf')).rejects.toMatchObject({ code: 'validation' });
+
+    // They replace and remove what they put there themselves, and nothing else.
+    const fromSales = await db.document.findFirstOrThrow({ where: { orderId, type: { key: 'meter_box' }, uploadedById: w.sam.id } });
+    await expect(add(w.ops, orderId, 'meter_box', 'instead.pdf', { replacesId: fromSales.id })).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('added by sales') });
+    await expect(deleteDocument(as(w.ops, w.clock), { documentId: fromSales.id })).rejects.toMatchObject({ code: 'forbidden' });
+    const better = await add(w.ops, orderId, 'meter_box', 'meter-box-sharper.pdf', { replacesId: mine.id });
+    await deleteDocument(as(w.ops, w.clock), { documentId: better.id });
+    expect(await db.document.count({ where: { orderId, type: { key: 'meter_box' }, deletedAt: null, supersededAt: null, replacedBy: { is: null } } })).toBe(1);
+    // Moving files between folders stays with sales.
+    await expect(changeDocumentType(as(w.ops, w.clock), { documentId: fromSales.id, typeId: (await docType('other')).id })).rejects.toMatchObject({ code: 'forbidden' });
+
+    // Back with sales: the folder is the salesperson's again.
+    await returnHandoff(as(w.ops, w.clock), { orderId, reason: 'Customer cannot be reached.' });
+    await expect(add(w.ops, orderId, 'other', 'note.pdf')).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('back with sales') });
+    await add(w.sam, orderId, 'other', 'from-sales.pdf');
+    await pushOrder(as(w.sam, w.clock), { orderId });
+
+    // Accepted, and after the installation: approvals, certificates, photos of the finished job.
+    await acceptHandoff(as(w.ops, w.clock), { orderId, depositReceived: true });
+    await add(w.ops, orderId, 'approvals', 'connection-approval.pdf');
+    await expect(add(w.sam, orderId, 'other', 'too-late.pdf')).rejects.toMatchObject({ code: 'conflict' });
+    await markJobDone(as(w.ops, w.clock), { orderId });
+    await add(w.ops, orderId, 'installation_photos', 'finished.pdf');
+    // A manager who is not in operations reads the folder and does not add to it now.
+    await expect(add(w.manager, orderId, 'other', 'manager.pdf')).rejects.toMatchObject({ code: 'conflict' });
+
+    // Closed: the folder is a record.
+    await confirmFinalPayment(as(w.fin, w.clock), { orderId });
+    await expect(add(w.ops, orderId, 'approvals', 'after.pdf')).rejects.toMatchObject({ code: 'conflict', message: 'This job is closed.' });
+    // Finance never adds files.
+    await expect(add(w.fin, orderId, 'other', 'fin.pdf')).rejects.toMatchObject({ code: 'forbidden' });
   });
 });
