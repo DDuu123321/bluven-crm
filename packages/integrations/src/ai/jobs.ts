@@ -6,7 +6,7 @@ import { pendingAttachments, readAttachment } from './attachments';
 import { pendingBills, readBill } from './bills';
 import { pendingBriefs, writeHandoffBrief } from './brief';
 import { AiError, type AiModel } from './model';
-import { AUTOMATIC_REQUESTS_PER_ORDER_PER_DAY, automaticAllowanceLeft, automaticRequestsByOrder, dueSubjects, getAssistantSettings, servicePause, type AiKind } from './runs';
+import { AUTOMATIC_REQUESTS_PER_ORDER_PER_DAY, automaticAllowanceLeft, automaticRequestsByOrder, closeAbandonedRuns, dueSubjects, getAssistantSettings, servicePause, type AiKind } from './runs';
 import { summariseOrder } from './summary';
 
 export interface AssistantWork {
@@ -62,6 +62,8 @@ export async function runAssistantWork(ctx: Ctx, model: AiModel, limits = { brie
   return withJobLock(ctx.db, LOCK_KEY, async () => {
     const settings = await getAssistantSettings(ctx.db);
     const result: AssistantWork = { briefs: 0, attachments: 0, bills: 0, summaries: 0, failed: 0, allowanceUsedUp: false, setupProblem: null, serviceDown: null };
+    // Requests a stopped server left open are closed first, so that their items come up again.
+    await closeAbandonedRuns(ctx.db, nowOf(ctx));
     // A wrong key, or a service that is down, fails every request the same way: wait for it to
     // pass rather than try each item in turn and hold the failure against it.
     const pause = await servicePause(ctx.db, nowOf(ctx));
