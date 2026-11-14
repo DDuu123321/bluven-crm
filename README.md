@@ -7,8 +7,11 @@ lead intake and duplicate detection → assignment → follow-up (timeline, task
 signed contract (designed in Pylon) → deposit confirmed by finance → handoff to operations, with a
 return loop when something is missing.
 
-**Status:** Phase 1 (the sales side without email sync and AI) is built and tested. Zoho Mail sync
-(Phase 2) and AI summaries (Phase 3) are designed but not built yet.
+**Status:** Phases 1 to 3 and most of Phase 4 are built and tested: the sales side, customer
+e-mail through Zoho Mail, the AI assistant, document retention, the report and e-mail templates.
+Zoho Mail and the assistant have only been run against local stand-ins, never against the real
+services. Not built: creating Pylon projects through the API, converting HEIC photos, and a
+layout for phones.
 
 ## Documentation
 
@@ -157,7 +160,7 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `APP_URL` | Public address of the CRM, no trailing slash. Used in links and for the secure-cookie decision | `http://localhost:3000` |
 | `APP_TIMEZONE` | Business time zone for dates on screen and date-only fields | `Australia/Sydney` |
 | `STORAGE_DIR` | Directory for uploaded files | `./data/storage` |
-| `MAX_UPLOAD_MB` | Largest single upload | `500` |
+| `MAX_UPLOAD_MB` | Largest single file on the Documents tab. Quote files, signed contracts and deposit proofs go through forms with a fixed limit of 60 MB and ten files per submission | `500` |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_NAME`, `SEED_ADMIN_PASSWORD` | First administrator, created by `pnpm db:seed` when no user exists | none |
 | `BLUVEN_LEADS_URL`, `BLUVEN_LEADS_KEY` | Collect new leads from the Bluven website's CMS once a minute (`GET /api/crm/leads` there). The key equals `CRM_SYNC_KEY` on the CMS | off |
 | `BLUVEN_LEADS_SINCE` | First run only: also take over leads created since this time, as history | from now |
@@ -170,7 +173,9 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 | `AI_MODEL` | The model the assistant uses | `claude-opus-5-5` |
 | `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quotes and contracts are entered by hand | off |
 | `PYLON_WEBHOOK_SECRET` | Optional: lets Pylon deliver the same events within seconds through `/api/webhooks/pylon` | off |
-| `DATABASE_URL_TEST`, `DATABASE_URL_E2E` | Databases for `pnpm test` and `pnpm e2e` | see `.env.example` |
+| `DATABASE_URL_TEST` | Database for `pnpm test` | see `.env.example` |
+| `DATABASE_URL_E2E`, `E2E_PORT` | Database and port for `pnpm e2e`, so two checkouts can run it side by side | `bluven_e2e` on the local server, `3100` |
+| `ANTHROPIC_BASE_URL` | Another address for the model's API: a gateway in front of it, or a stand-in in tests | Anthropic's own |
 
 ## HTTP API
 

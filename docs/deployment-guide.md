@@ -1,7 +1,7 @@
 # Bluven CRM 部署与上线指南
 
 版本：v1.3
-日期：2026-11-13
+日期：2026-11-14
 读者：负责安装、上线和日常维护系统的人
 
 ---
@@ -41,7 +41,7 @@ CRM 不放在 `www.bluven.com.au/某个路径` 下面，原因有两个：网站
 - 两种方式用的镜像都在 Docker 里构建并运行过：数据库迁移、登录、接线索、上传与缩略图、从网站拉线索、备份、恢复、命令行重置密码。
 - 方式 B 的整套 Compose（含 Caddy 的 HTTPS）在本机完整跑过。
 - 方式 A 用的单容器镜像在本机按 Railway 的条件跑过（平台指定端口、磁盘属主为 root、外部 Postgres）。**但没有在 Railway 平台本身部署过**，第 2 节的页面步骤是按 Railway 2026 年 11 月的官方文档写的，按钮名称可能略有出入。
-- Pylon 已用真实账号只读验证过（见第 6 节）。正式域名的证书签发没有做过。客户邮件（第 7 节）是对着一个替身 Zoho 服务测的，没有连过真实的 Zoho 账号。AI 助手（第 8 节）是对着一个替身模型服务测的，没有用真实密钥调用过。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
+- Pylon 已用真实账号只读验证过（见第 6 节）。正式域名的证书签发没有做过。客户邮件（第 7 节）是对着一个替身 Zoho 服务测的，没有连过真实的 Zoho 账号；限速、会话编号和撤销授权这几处是按 Zoho 2026 年 11 月的官方文档写的，Zoho 被要求慢一点时到底怎么回答，文档没有写，只能等真实使用时确认。AI 助手（第 8 节）是对着一个替身模型服务测的，没有用真实密钥调用过。从网站拉线索是对着一个按网站代码写的替身接口测的，没有连过真实的 `cms.bluven.com.au`；邮件中继同样是对着替身测的。
 
 ### 先在自己电脑上看一看（演示数据）
 
@@ -223,7 +223,7 @@ cp deploy/env.production.example .env
 | `SEED_ADMIN_NAME` | 管理员姓名 |
 | `SEED_ADMIN_PASSWORD` | 临时密码，至少 10 位。第一次登录时系统会要求改掉 |
 
-其余项见第 4、6、7 节。
+其余项见第 4、6、7、8、9 节。
 
 启动：
 
@@ -252,10 +252,12 @@ cd /opt/bluven-crm
 ./deploy/backup.sh            # 备份到 ./backups，默认保留 14 天
 ```
 
+默认只保留 14 天的备份。被误删的资料 30 天后才从磁盘上移除，要保证那时还找得回来，备份至少留 45 天：在命令前加上 `KEEP_DAYS=45`，下面 cron 里的那一行同样加上。
+
 建议用 cron 每晚跑一次：
 
 ```
-15 2 * * *  cd /opt/bluven-crm && ./deploy/backup.sh >> backups/backup.log 2>&1
+15 2 * * *  cd /opt/bluven-crm && KEEP_DAYS=45 ./deploy/backup.sh >> backups/backup.log 2>&1
 ```
 
 **备份文件留在同一台服务器上是不够的。** 再用 rsync 或云存储工具把 `backups` 目录同步到别处。
@@ -391,7 +393,7 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 4. 点 Create。页面给出 Client ID 和 Client Secret。
 5. 把这两个值填进 `ZOHO_CLIENT_ID` 和 `ZOHO_CLIENT_SECRET`。方式 A 填在 Railway 的 Variables，保存后自动生效。方式 B 填在服务器的 `.env`，然后执行 `docker compose up -d`。
 
-回到 CRM 的 Administration → Email，"Zoho application" 应显示 Configured。这个页面上也写着要填的回调地址，以它为准。
+回到 CRM 的 Administration → Email，"Client id and secret" 应显示 Entered。这只表示两个值已经填上，填得对不对要等第一个人连接邮箱时才知道。这个页面上也写着要填的回调地址，以它为准。
 
 第 3 步的回调地址必须和 CRM 的正式地址一字不差，所以要等 CRM 已经在 `https://crm.bluven.com.au` 上能打开之后再做。
 
@@ -401,24 +403,38 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 
 1. 登录 CRM，点右上角自己的名字，选 Mailbox。
 2. 点 Connect Zoho Mail。浏览器会跳到 Zoho 的登录页，用**自己的**邮箱登录，点 Accept。
-3. 跳回 CRM，页面显示 Connected。最近两周和客户的邮件会在几分钟内出现在各自的订单里。
+3. 跳回 CRM，页面显示 Connected。最近两周和自己客户的邮件会陆续出现在各自的订单里，邮件多的话要十几分钟。
 
-经理在 Administration → Email 能看到谁已经连接、最近一次读取的时间和状态，也可以替别人断开。
+同一页下面有一栏 **What is kept from this mailbox**，决定这个邮箱里哪些邮件会进 CRM，只有邮箱主人自己能改：
+
+- **Customers I work with**（默认）：只保存和自己客户的往来。自己的客户是指订单现在或曾经分配给自己的客户，以及自己从 CRM 里写过信的客户。别的销售的客户写到这个邮箱里的信不保存。
+- **Every customer in the CRM**：保存和所有客户的往来。只适合几个人共用的邮箱，例如 sales@。选了之后，任何一位客户资料上的地址和这个邮箱的往来，负责那张订单的人都能看到。
+
+经理在 Administration → Email 能看到谁已经连接、各人选的保留范围、最近一次读取的时间和状态，也可以替别人断开，但不能替别人改保留范围。
 
 ### 7.3 它读什么，不读什么
 
-- **只保存和 CRM 里已有客户往来的邮件。** 判断依据是客户资料上的邮箱地址。邮箱里的其他邮件一概不保存。
+- **只保存和客户往来的邮件。** 判断依据是客户资料上的邮箱地址，并且这位客户得是邮箱主人自己的客户（见 7.2 的保留范围）。此外只保存已经在跟进的会话里的后续来信，例如客户换了一个地址回信。邮箱里的其他邮件一概不保存，也不会被打开。
 - 读取收件箱、已发送和自己建的文件夹。不删除、不移动、不标记已读。
-- 每分钟读一次。新客户的邮箱地址录进 CRM 之后，会回头把最近两周和这个地址的往来补进来。
-- 客户来信时，订单的负责销售会在 CRM 里收到一条通知。
+- 各个邮箱轮流读，一轮接一轮。收件箱和已发送每一轮都读；自己建的文件夹每一轮读一个，轮着来，最多 20 个。邮箱不多时客户来信一两分钟内出现，邮箱多或者正在补读旧邮件时会慢一些。
+- 新客户的邮箱地址录进 CRM，或者一张订单新分配给某位销售之后，半小时内会回头把最近两周的往来补进来。每个文件夹最多往回看 5000 封。
+- 客户来信时，订单的负责销售会在 CRM 里收到一条通知。这类通知只在系统内显示，不另发邮件。
+- 客户同时有几张进行中的订单时，系统不替人决定这封信属于哪一张：它出现在这位客户各张订单 Email 页的 **Not on an order yet** 里，负责销售会收到一条通知去认领。认领之前，这封信不进任何订单的时间线，AI 也不处理它的附件。
+- **"是谁发的"不听邮件自己说的。** 只有已发送文件夹里的邮件，以及本人从那里挪到自建文件夹里的邮件，才算销售发出的；收件箱里一封自称是本人发的信不算。发件地址不在客户资料上，或者这个地址是随网站表单进来、还没有人确认过的，邮件上方会有黄色提示，回复时也不会默认发给这个地址。
 - 邮件带的附件跟着邮件保存。销售在订单的 Email 页给附件选一个资料类型，点 File，它就进了订单的资料；签字合同可以直接归档为合同。
-- 销售从订单里发信时，可以勾选订单里已有的资料作为附件，单封合计不超过 20 MB。收件人里至少要有一个是客户资料上的地址，防止把客户的资料发错人。
+- 销售从订单里发信时，可以勾选订单里已有的资料作为附件，单封合计不超过 20 MB。收件人里至少要有一个是客户资料上已确认的地址，防止把客户的资料发错人。
+- 同一位客户一天之内发来的附件累计超过 250 MB 后，后面的附件不再保存，留在邮箱里看。一时取不到的附件，系统会在之后几个小时里再试三次。
 - 运营能在自己的订单页上看这些邮件，只读。财务看不到。
 - 销售随时可以自己断开。已经在订单里的邮件保留。
 
 ### 7.4 要知道的几件事
 
-- **不要随意重新生成 Client Secret。** 各人邮箱的授权是用它加密保存的。换了之后原来的授权全部读不出来，所有人都要重新点一次 Connect。CRM 会在各人的 Mailbox 页和通知里提示。
+- **不要随意重新生成 Client Secret。** 各人邮箱的授权是用它加密保存的。换了之后原来的授权全部读不出来，所有人都要在 Mailbox 页重新点一次 Connect again。CRM 会在各人的 Mailbox 页和通知里提示。
+- **Zoho 限制请求频率。** Zoho 公布的上限是每分钟 30 次接口请求，超过后会被锁一段时间，多久不公开。CRM 读邮箱时把请求均匀隔开，所有邮箱合计默认每分钟最多 24 次，可用 `ZOHO_REQUESTS_PER_MINUTE` 调整。如果 Zoho 仍然要求慢一点，CRM 会全部暂停 10 分钟，再被要求就 20、40、60 分钟，Administration → Email 顶部会写明暂停到几点。暂停期间不丢邮件，恢复后接着读；从 CRM 发信不受影响。
+- 服务器上的 Zoho 设置本身不对时（Client ID、Client Secret 或数据中心地址），CRM 不会让大家重新连接，只是暂停读取，并在 Administration → Email 里写明原因。改对之后自动恢复。
+- 某个人不再是销售或经理，或者账号被停用，他的邮箱会在一分钟内自动断开，授权同时撤销。已经在订单里的邮件保留。
+- 断开邮箱时 CRM 会通知 Zoho 撤销授权。Zoho 没有确认时页面会提示：这时 CRM 手里已经没有授权了，想彻底放心可以到 Zoho 账号的 Connected Apps 里手动移除。
+- 个别邮件读不了时不影响其他邮件。系统试三次后放弃，把它列在本人的 Mailbox 页和 Administration → Email 里，邮件本身还在邮箱里。
 - 某个人改了 Zoho 密码、在 Zoho 里撤销了授权、或者账号被停用，他的邮箱会显示 Needs connecting again，本人重新连接一次即可。其他人不受影响。
 - 一个邮箱只能被一个 CRM 用户连接。
 - 如果公司的 Zoho 账号不在澳大利亚数据中心，另外设置 `ZOHO_ACCOUNTS_URL` 和 `ZOHO_MAIL_URL`，例如 `https://accounts.zoho.com` 和 `https://mail.zoho.com`，并到对应数据中心的 API console 登记。
@@ -445,11 +461,11 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 
 AI 用的是 Anthropic 的接口，按用量付费，需要一个密钥：
 
-1. 打开 `https://console.anthropic.com`，用公司邮箱注册并登录。
+1. 打开 `https://platform.claude.com`，用公司邮箱注册并登录。旧地址 `console.anthropic.com` 会自动跳到这里。
 2. 在 Billing 里绑定付款方式或预充值。没有余额时接口会拒绝请求。
 3. 在 API Keys 里新建一个密钥，名称写 `bluven-crm`。**密钥只在创建时显示一次**，当场复制。
 4. 把它填进 `ANTHROPIC_API_KEY`。方式 A 填在 Railway 的 Variables，保存后自动生效。方式 B 填在服务器的 `.env`，然后执行 `docker compose up -d`。
-5. 回到 CRM 的 Administration → AI assistant，"Key" 应显示 Configured。
+5. 回到 CRM 的 Administration → AI assistant，"Key" 应显示 Configured。这只表示密钥已经填上，对不对要等第一次请求才知道。
 
 密钥等同于钱包，只填在上面说的地方。不要发在聊天、邮件或代码里。泄露了就在 Anthropic 的控制台里删掉，再建一个新的。
 
@@ -468,7 +484,7 @@ Administration → AI assistant 页面上有四个开关，只有管理员能改
 
 同一页还有两项设置：
 
-- **总结和简报用什么语言写**：English 或中文。回信草稿不看这个设置，它跟着客户来信的语言走。
+- **总结和简报用什么语言写**：English 或 Chinese (简体中文)。回信草稿不看这个设置，它跟着客户来信的语言走。
 - **24 小时内自动请求的上限**：默认 300。到了上限，自动的部分当天停下，第二天继续。销售点按钮的不计入。这是给无人值守的花费封顶用的。
 
 ### 8.3 大概花多少钱
@@ -483,20 +499,20 @@ Administration → AI assistant 页面列出最近 30 天每类功能的请求�
 
 ### 8.4 客户资料去了哪里
 
-- 每次只把**当前这一张订单**的资料发给模型：线索内容、备注、时间线、和这位客户的邮件、报价数字。读账单和看附件时，文件本身也会发过去。
-- 客户资料上登记的电话和邮箱不发。邮件正文或账单里如果本身带着电话、地址，那部分会随内容一起发出。
+- 每次只把**当前这一张订单**的资料发给模型，而且是这张订单的全部记录：客户姓名、安装地址、NMI 和零售商、线索内容、备注、时间线、和这位客户的邮件、报价和定金数字。读账单和看附件时，文件本身也会发过去。
+- 客户资料上登记的电话不发。登记的邮箱一般不发，但写回信草稿时，来信如果没有显示名，发件地址会随来信一起发出。邮件正文或账单里如果本身带着电话、地址，那部分也会随内容一起发出。
 - 其他客户的任何内容都不会发。
 - 客户写的内容在发给模型时会被标成"材料"，模型被要求不把它当成指令执行。
-- 这些内容是发到 Anthropic 在境外的服务器上处理的。公司的隐私政策里应当写明客户资料会交给这样的服务处理，拿不准就问一下法律顾问。Anthropic 的商业条款写明接口的输入输出默认不用于训练模型，具体以它官网的条款为准。
+- 这些内容是发到 Anthropic 在境外的服务器上处理的。公司的隐私政策里应当写明客户资料会交给这样的服务处理，拿不准就问一下法律顾问。Anthropic 的接口文档写明：留存的数据未经明确许可不会用于训练模型；提示和回答的内容默认不留存，个别型号例外，要留存 30 天。具体以它官网的条款为准。
 
 ### 8.5 要知道的几件事
 
 - **AI 会出错。** 总结、简报、账单数字都只是帮人省时间的初稿，用之前要对照时间线和原文件。页面上每一处都有这句提醒。
 - **它不替人做决定。** 回信草稿只填进输入框，要销售自己看过、改过、点 Send 才发出。附件只给出建议，归档要人点 File。识别成签字合同的附件也只是把 Signed contract 按钮标出来，合同归档仍然要人确认报价版本和签字日期。
-- **账单只填空的。** NMI 和零售商已经有值的不覆盖，页面会提示不一致，由销售决定用哪个。账单上的地址和订单地址对不上时什么都不填，并通知负责销售。
+- **账单只填空的，而且只在地址对得上时才填。** NMI 和零售商已经有值的不覆盖，页面会提示不一致，由销售决定用哪个。账单上的供电地址和订单地址对不上时什么都不填，并通知负责销售；账单上读不出地址、或者订单还没有地址时也不填，销售核对后在账单卡片上点 Use the bill’s 即可填上。
 - AI 填的值在房产信息里带着 from the bill 或 from the summary 的标记。有人手动改过之后标记消失，操作日志里两次都有记录。
 - 财务看不到总结、简报和账单读取结果。运营在订单推送之后能看，不能改。
-- 密钥失效或余额用完时，Administration → AI assistant 页面顶部会出现红色提示，自动的部分暂停，每 15 分钟重试一次，修好后自动补上。销售点按钮时会看到"请联系管理员"的提示。其他功能不受影响。
+- 密钥失效或余额用完时，自动的部分暂停，每 15 分钟试一次，修好后自动补上。暂停期间 Administration → AI assistant 页面顶部有红色提示。这个提示只在最近 15 分钟内有请求因为密钥或账户失败时才显示，所以日常检查以 "Requests that did not succeed" 一栏为准。销售点按钮时会看到"请联系管理员"的提示。其他功能不受影响。
 - 同一个文件连续失败四次，当天不再重试，避免白花钱。失败记录在同一页的 "Requests that did not succeed" 里，把那一栏的 Detail 发给开发者即可排查。
 
 说明：这部分是按 Anthropic 官方 SDK 和接口文档写的，自动测试对着的是一个替身模型服务。**还没有用真实密钥调用过，模型实际写出来的内容质量也没有评估过。** 开启后请先在一两张真实订单上试：写一次总结，传一张真实账单看读得对不对，推送一张订单看简报。发现读错或写得不合用，把订单号和页面内容发给开发者，调整提示词即可。
@@ -535,7 +551,9 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 
 `APP_TIMEZONE` 默认 `Australia/Sydney`，决定界面上的日期时间和"今天"是哪一天。
 
-`MAX_UPLOAD_MB` 是单个文件的上限，方式 B 默认 500。如果调大，同时把 `deploy/Caddyfile` 里的 `max_size` 调到比它略大。方式 A 建议保持 200，原因见 2.9。
+`MAX_UPLOAD_MB` 是资料页上传单个文件的上限，方式 B 默认 500。如果调大，同时把 `deploy/Caddyfile` 里的 `max_size` 调到比它略大。方式 A 建议保持 200，原因见 2.9。
+
+报价文件、签字合同和定金凭证走的是另一条上传通道，固定为一次提交合计不超过 60 MB、最多 10 个文件，不受 `MAX_UPLOAD_MB` 影响。
 
 ---
 
@@ -549,7 +567,7 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 | 后台任务 | 方式 A：Railway 的部署日志。方式 B：`docker compose logs --since 1h worker` | 有提醒、回池、新线索时才有日志，没有报错 |
 | Pylon 事件 | CRM 的 Administration → Pylon | 没有 Failed，最近收到事件的时间合理 |
 | 客户邮件 | CRM 的 Administration → Email | 每个邮箱都是 Working，Last read 在几分钟内 |
-| AI 助手 | CRM 的 Administration → AI assistant | 顶部没有红色提示，Failed 一栏是 0 或很少 |
+| AI 助手 | CRM 的 Administration → AI assistant | Failed 一栏是 0 或很少，"Requests that did not succeed" 里没有新的记录 |
 | 磁盘空间 | 方式 A：Railway 磁盘的用量。方式 B：`df -h` | 留有余量 |
 
 后台任务负责的事：从网站取线索、闲置 5 / 10 / 15 天的提醒和回池、暂缓到期自动恢复、待办到期提醒、通知邮件和每日摘要、处理 Pylon 事件、读取已连接的邮箱、AI 助手自动做的那几件事、资料到期提醒，以及把删除满 30 天的文件从磁盘上移除。**后台任务不在运行时这些都不会发生**，但不影响大家正常使用系统，恢复运行后会补上。
@@ -562,7 +580,7 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 确认 `crm` 这条 DNS 记录已生效。方式 A 看 Railway 的 Custom Domain 状态是否变绿，CNAME 和 TXT 两条记录是否都加了。方式 B 确认 80 和 443 端口对公网开放，然后看 `docker compose logs caddy`。
 
 **登录后马上又被退回登录页。**
-不是通过 HTTPS 访问，或者 `APP_URL`（方式 B 是 `CRM_DOMAIN`）没有填成 `https://` 开头的正式地址。系统只在 HTTPS 下发放登录凭证。
+请用 `https://` 开头的正式地址访问。`APP_URL` 以 `https://` 开头时，登录凭证只在 HTTPS 下有效，用 `http://` 打开就会登录不上。方式 A 的 `APP_URL` 写成 `https://crm.bluven.com.au`；方式 B 的 `CRM_DOMAIN` 只填域名 `crm.bluven.com.au`，不要带 `https://`，系统会自己加上。
 
 **Lead sources 页显示 Failing。**
 页面上会写原因。最常见的是两边的密钥不一致：CRM 的 `BLUVEN_LEADS_KEY` 必须和网站后台的 `CRM_SYNC_KEY` 完全相同。提示 "not switched on there" 说明网站后台那边还没设 `CRM_SYNC_KEY`。
@@ -587,28 +605,41 @@ cd /repo/packages/core && node --import tsx src/cli/reset-password.ts 管理员�
 同一个邮箱 5 分钟内输错 5 次，会暂停几分钟。之后每再错一次，账号锁定的时间加倍，最长 15 分钟。输对一次即恢复正常。着急的话请管理员在 Users 里重置密码，重置会同时解除锁定。已经登录的人不受影响。
 
 **上传大文件失败。**
-方式 A：文件要在 5 分钟内传完，换个快一点的网络，或者把视频压缩后再传。方式 B：检查 `MAX_UPLOAD_MB` 和 `deploy/Caddyfile` 里的 `max_size`，以及磁盘空间。
+方式 A：文件要在 5 分钟内传完，换个快一点的网络，或者把视频压缩后再传。方式 B：检查 `MAX_UPLOAD_MB` 和 `deploy/Caddyfile` 里的 `max_size`，以及磁盘空间。报价文件、合同和定金凭证被拒绝时，看是不是一次提交超过了 60 MB，这个上限是固定的。
 
 **收不到通知邮件。**
 方式 A 只能走邮件中继，直接填 `SMTP_URL` 是发不出去的。检查 `MAIL_RELAY_URL` 和 `MAIL_RELAY_KEY` 是否和网站后台的一致。系统内的通知不受影响。
 
 **连接邮箱时 Zoho 提示 Invalid Redirect Uri，或者跳回来显示出错。**
-Zoho 里登记的回调地址和 CRM 的地址不一致。到 `api-console.zoho.com.au` 打开那个 Client，把 Authorized Redirect URIs 改成 Administration → Email 页面上显示的那一串。提示 "already connected by another user" 说明这个邮箱已经被另一个 CRM 用户连接了。
+Zoho 自己的页面提示 Invalid Redirect Uri：登记的回调地址和 CRM 的地址不一致。到 `api-console.zoho.com.au` 打开那个 Client，把 Authorized Redirect URIs 改成 Administration → Email 页面上显示的那一串。
+
+跳回 CRM 之后的提示各有原因：
+
+- "Zoho does not accept the settings this server has for it"：`ZOHO_CLIENT_ID`、`ZOHO_CLIENT_SECRET` 填错，或者数据中心地址不对。重试没有用，要改服务器上的设置。
+- "Zoho did not accept the sign-in"：授权码过期或无效，重新点一次连接。
+- "Zoho asked us to wait"：短时间内试得太多，十分钟后再连。
+- "already connected by another user"：这个邮箱已经被另一个 CRM 用户连接了。
 
 **客户的邮件没有出现在订单里。**
-先看这封信的对方地址是不是写在客户资料上，不在的话在客户资料里补上，几分钟后会自动补进来。再看 Administration → Email 里这个销售的邮箱是不是 Working。超过两周以前的旧邮件不会被读取。
+按这个顺序看：
+
+- 对方地址是不是写在客户资料上。不在的话补上，半小时内会自动补进来。
+- 这位客户是不是邮箱主人自己的客户。默认只保存自己客户的邮件，别的销售的客户写来的信不保存（见 7.2）。
+- 这位客户是不是同时有几张进行中的订单。那样的信在订单 Email 页的 Not on an order yet 里等人认领。
+- Administration → Email 里这个销售的邮箱是不是 Working，页面顶部有没有暂停读取的提示，有没有列出读不了的邮件。
+- 超过两周以前的旧邮件不会被读取。在 Zoho 里归档过的邮件会读。
 
 **点了 Write a summary 或 Write a draft，提示助手没有设置好或暂时连不上。**
-提示 "not set up" 是还没填 `ANTHROPIC_API_KEY`。提示 "its key or its settings are wrong" 是密钥不对、被删了，或者 Anthropic 账户没有余额，到 Administration → AI assistant 看红色提示里的原因。提示 "could not be reached" 是对方服务暂时繁忙，过一会儿再点。
+页面上根本没有 Write a summary 或 Draft with AI 按钮：`ANTHROPIC_API_KEY` 没填，或者填了之后没有重新部署，这时 Administration → AI assistant 的 Key 显示 Missing。提示 "its key or its settings are wrong"：密钥不对或被删了、Anthropic 账户没有余额，或者 `AI_MODEL` 写了这把密钥用不了的型号，到 Administration → AI assistant 的 "Requests that did not succeed" 里看原因。提示 "could not be reached" 是对方服务暂时繁忙，过一会儿再点。
 
 **交接简报一直没出现。**
 先看 Administration → AI assistant 里"推送时写交接简报"的开关是不是开着、自动请求有没有到当天上限。后台任务没在运行时也不会写。运营和销售都可以在简报卡片上点 Write it now 立即生成。
 
 **资料被误删了。**
-删除后的 30 天内文件还在磁盘上，只是从订单里隐藏了，开发者可以在数据库里恢复。满 30 天后文件已经移除，只能从备份里找。所以备份至少要保留一个月以上。
+删除后的 30 天内文件还在磁盘上，只是从订单里隐藏了，开发者可以在数据库里恢复。满 30 天后文件已经移除，只能从备份里找。所以备份至少要保留一个月以上：`deploy/backup.sh` 默认只留 14 天，按 3.3 节用 `KEEP_DAYS=45` 运行。
 
 **每日摘要没收到。**
-摘要在早上 7 点之后发，只发给在 Notifications 页勾选了它的人，而且只在有未读通知时才发。它和普通通知邮件走同一条发信通道，先确认普通通知邮件能收到。
+摘要在早上 7 点之后发，只发给在 Notifications 页勾选了它的人。它列出上一次摘要之后新产生、还没读的通知，没有新的就不发。它和普通通知邮件走同一条发信通道，先确认普通通知邮件能收到。
 
 **想看某张订单谁改过什么。**
 经理打开订单的 History 标签页，或者在 Administration → Audit log 按订单号搜索，可以导出 CSV。
