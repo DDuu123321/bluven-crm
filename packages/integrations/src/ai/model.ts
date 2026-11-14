@@ -8,7 +8,7 @@ export type AiEffort = 'low' | 'medium' | 'high';
 export type AiImageType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
 /** One piece of what the model is given to read. */
-export type AiInput = { type: 'text'; text: string } | { type: 'image'; mediaType: AiImageType; data: Buffer } | { type: 'pdf'; data: Buffer; title?: string };
+export type AiInput = { type: 'text'; text: string } | { type: 'image'; mediaType: AiImageType; data: Buffer } | { type: 'pdf'; data: Buffer };
 
 export interface AiRequest {
   /** Who the model is and what it is to do. The same for every request of one kind. */
@@ -106,7 +106,8 @@ function toBlock(input: AiInput): Anthropic.Beta.BetaContentBlockParam {
     case 'image':
       return { type: 'image', source: { type: 'base64', media_type: input.mediaType, data: input.data.toString('base64') } };
     case 'pdf':
-      return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: input.data.toString('base64') }, ...(input.title ? { title: input.title } : {}) };
+      // No title: the name of a file is its sender's to choose, and it reaches the model in the text, inside the fence.
+      return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: input.data.toString('base64') } };
   }
 }
 

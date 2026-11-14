@@ -99,7 +99,7 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse((await readBody(req)).toString()) as {
       model: string;
       system?: string;
-      messages: { role: string; content: { type: string; text?: string; title?: string }[] }[];
+      messages: { role: string; content: { type: string; text?: string }[] }[];
       output_config?: { effort?: string; format?: { type: string } };
     };
     // The real service refuses these; so does the stand-in, so a regression shows up here.
@@ -109,7 +109,9 @@ const server = http.createServer(async (req, res) => {
     const blocks = body.messages.flatMap((m) => m.content);
     const text = blocks.map((b) => b.text ?? '').join('\n');
     const kind = kindOf(body.system ?? '');
-    seen.push({ kind, model: body.model, effort: body.output_config?.effort ?? null, files: blocks.filter((b) => b.type !== 'text').map((b) => `${b.type}:${b.title ?? ''}`), text });
+    // A file comes without its name. The name is in the text, between the marks put around everything that came from outside.
+    const fileName = /^File name: <<<(.*)>>>$/m.exec(text)?.[1] ?? '';
+    seen.push({ kind, model: body.model, effort: body.output_config?.effort ?? null, files: blocks.filter((b) => b.type !== 'text').map((b) => `${b.type}:${fileName}`), text });
     return send(200, {
       id: `msg_${seen.length}`,
       type: 'message',

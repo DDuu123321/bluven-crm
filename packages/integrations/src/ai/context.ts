@@ -16,7 +16,9 @@ import {
   formatKwh,
   fullName,
   getConfig,
+  readFieldSources,
   type LeadDetails,
+  type SourcedPropertyField,
 } from '@bluven/core';
 
 /** One timeline entry is cut at this length; a note this long is a pasted document, not a note. */
@@ -45,12 +47,49 @@ const ACTIVITY_WORD: Record<string, string> = {
   EMAIL_OUT: 'E-mail sent',
 };
 
+/**
+ * Takes the fence's own marks out of a text, so that nothing inside a fence can close it.
+ * Taking one mark out can bring the two halves of another together (">><<<>" turns into ">>>"),
+ * so this goes on until none is left. Characters that do not show on the page are dropped where
+ * they sit between angle brackets: they would keep a mark from being found here and leave it
+ * looking like one.
+ */
+function withoutFenceMarks(text: string): string {
+  let clean = text;
+  for (let before = ''; before !== clean; ) {
+    before = clean;
+    clean = clean.replace(/(?<=[<>])\p{Cf}+(?=[<>])/gu, '').replace(/<<<|>>>/g, '');
+  }
+  return clean;
+}
+
+/**
+ * What the system prompts say the fence holds. It is kept here, next to the code that puts the
+ * fence up, so that the two do not drift apart when another field is fenced.
+ */
+export const FENCED_TEXT =
+  'Text between <<< and >>> came from outside the company: what the customer wrote, their name and address as they gave them, the subjects of e-mails, the names of files, and what was read from their electricity bill.';
+
 /** Text that came from outside the company is fenced, so the model treats it as material and not as instructions. */
 export function quoted(text: string): string {
-  return `<<<\n${text.replace(/<<<|>>>/g, '').trim()}\n>>>`;
+  return `<<<\n${withoutFenceMarks(text).trim()}\n>>>`;
+}
+
+/**
+ * The same fence for a short value that stays on its line: a name, a subject, the name of a file.
+ * Line breaks become spaces, so the value cannot pass for further lines of the record, and no
+ * angle bracket of its own is left touching the fence.
+ */
+export function quotedLine(text: string): string {
+  return `<<<${withoutFenceMarks(text)
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s<]+|[\s>]+$/g, '')}>>>`;
 }
 
 const line = (label: string, value: string | null | undefined): string | null => (value && value.trim() ? `${label}: ${value.trim()}` : null);
+
+/** A line whose value came from outside the company. */
+const outsideLine = (label: string, value: string | null | undefined): string | null => (value && value.trim() ? `${label}: ${quotedLine(value)}` : null);
 
 function block(title: string, lines: (string | null | undefined)[]): string | null {
   const kept = lines.filter((l): l is string => !!l);
@@ -65,9 +104,9 @@ export function describeLeadDetails(details: LeadDetails): (string | null)[] {
     details.monthlyBill !== undefined ? `Monthly electricity bill as stated in the enquiry: $${details.monthlyBill}` : null,
     line('When they want it', details.timeline ? (TIMELINE_LABEL[details.timeline as keyof typeof TIMELINE_LABEL] ?? details.timeline) : null),
     line('Best time to contact', details.bestTime ? (BEST_TIME_LABEL[details.bestTime as keyof typeof BEST_TIME_LABEL] ?? details.bestTime) : null),
-    line('Household', details.householdSize),
-    line('Goals', details.goals),
-    line('Product preference', details.productPreference),
+    outsideLine('Household', details.householdSize),
+    outsideLine('Goals', details.goals),
+    outsideLine('Product preference', details.productPreference),
     details.notes ? `What they wrote in the enquiry form:\n${quoted(details.notes)}` : null,
   ];
 }
@@ -87,20 +126,59 @@ export interface BillFacts {
   addressMatch: string;
 }
 
+/**
+ * One bill on file. What it says in words was read from the customer's document, or is the
+ * name of the file, and is fenced. Figures and dates are not: they cannot say anything but
+ * what they are.
+ */
 export function describeBill(b: BillFacts): string {
   const parts = [
-    b.retailer && `retailer ${b.retailer}`,
-    b.nmi && `NMI ${b.nmi}`,
+    b.retailer && `retailer ${quotedLine(b.retailer)}`,
+    b.nmi && `NMI ${quotedLine(b.nmi)}`,
     b.periodFrom && b.periodTo && `billing period ${formatDateOnly(b.periodFrom)} to ${formatDateOnly(b.periodTo)}`,
     b.usageKwh !== null && `${b.usageKwh} kWh used in the period`,
     b.dailyKwh !== null && `${b.dailyKwh} kWh a day on average`,
     b.amountCents !== null && `${formatCents(b.amountCents)} for the period`,
-    b.tariff && `tariff: ${b.tariff}`,
+    b.tariff && `tariff: ${quotedLine(b.tariff)}`,
     b.exportKwh !== null && `${b.exportKwh} kWh exported to the grid (they already have solar)`,
     b.addressMatch === 'no' && 'the supply address on the bill is NOT the address of this order',
-    b.notes,
+    b.notes && `also noted: ${quotedLine(b.notes)}`,
   ].filter(Boolean);
-  return `From “${b.fileName}”: ${parts.join('; ')}.`;
+  return `From the file ${quotedLine(b.fileName)}: ${parts.join('; ')}.`;
+}
+
+/**
+ * Which parts of a timeline entry hold text from outside the company. Everything else on the
+ * timeline was written by staff or by the system itself.
+ */
+function outsideParts(a: { type: string; payload: unknown }): { summary: 'all' | 'name' | null; body: boolean } {
+  switch (a.type) {
+    // The summary line names the sender and gives the subject, and the text is the customer's.
+    case 'EMAIL_IN':
+      return { summary: 'all', body: true };
+    // The text is ours. The summary line still carries the customer's name and, in a reply, the customer's subject.
+    case 'EMAIL_OUT':
+      return { summary: 'all', body: false };
+    case 'LEAD':
+      return { summary: null, body: true };
+    // "Uploaded Electricity bill: scan.pdf", or a list of files below the line. The name of a file is whatever its sender called it.
+    case 'DOCUMENT':
+      return { summary: 'name', body: true };
+    // What was read from a bill: the name of the file, and below it what the bill says.
+    case 'SYSTEM': {
+      const fromBill = typeof a.payload === 'object' && a.payload !== null && 'billReadingId' in a.payload;
+      return { summary: fromBill ? 'name' : null, body: fromBill };
+    }
+    default:
+      return { summary: null, body: false };
+  }
+}
+
+/** The summary line of a timeline entry, with what came from outside fenced: all of it, or the name after the colon. */
+function summaryLine(summary: string, outside: 'all' | 'name' | null): string {
+  if (outside === 'all') return quotedLine(summary);
+  const colon = summary.indexOf(': ');
+  return outside === 'name' && colon >= 0 ? `${summary.slice(0, colon + 2)}${quotedLine(summary.slice(colon + 2))}` : summary;
 }
 
 /** Everything on record about one order, as plain text: the facts first, then the timeline oldest first. */
@@ -130,6 +208,9 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
   });
 
   const p = o.property;
+  // A property detail that nobody typed was read from a bill or picked out of the correspondence: it is fenced like its source.
+  const sources = readFieldSources(p.fieldSources);
+  const detail = (label: string, field: SourcedPropertyField): string | null => (sources[field] ? outsideLine(label, p[field]) : line(label, p[field]));
   const state = o.sideState === 'NONE' ? STAGE_LABEL[o.stage] : `${SIDE_STATE_LABEL[o.sideState]} (was at stage ${STAGE_LABEL[o.stage]})`;
   const docCounts = new Map<string, { n: number; sort: number }>();
   for (const d of o.documents) docCounts.set(d.type.label, { n: (docCounts.get(d.type.label)?.n ?? 0) + 1, sort: d.type.sortOrder });
@@ -147,15 +228,16 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
       lastHandoff?.decision === 'RETURNED' ? `Operations returned the order: ${lastHandoff.returnReason}` : null,
     ]),
     block('What the customer asked for', describeLeadDetails(o.leadDetails as LeadDetails)),
-    block('Customer', [`Name: ${fullName(o.customer)}`, line('Staff notes about the customer', o.customer.notes)]),
+    // The name and the address are as the customer gave them, on the website's form as likely as not.
+    block('Customer', [outsideLine('Name', fullName(o.customer)), line('Staff notes about the customer', o.customer.notes)]),
     block('Property', [
-      line('Address', formatAddress(p) || 'not known yet'),
-      line('Type', p.propertyType),
-      line('NMI', p.nmi),
-      line('Electricity retailer', p.retailer),
-      line('Supply', p.phase),
-      line('Roof', p.roofType),
-      line('Storeys', p.storeys),
+      outsideLine('Address', formatAddress(p)) ?? 'Address: not known yet',
+      detail('Type', 'propertyType'),
+      detail('NMI', 'nmi'),
+      detail('Electricity retailer', 'retailer'),
+      detail('Supply', 'phase'),
+      detail('Roof', 'roofType'),
+      detail('Storeys', 'storeys'),
       line('Site notes', p.notes),
     ]),
     block(
@@ -202,11 +284,12 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
   const entries = activities.map((a) => {
     const who = a.actor?.name ?? a.actorLabel ?? '';
     const kind = ACTIVITY_WORD[a.type];
-    const fromOutside = a.type === 'EMAIL_IN' || a.type === 'LEAD';
+    const outside = outsideParts(a);
     let body = a.body.trim();
     if (body.length > MAX_ENTRY_CHARS) body = `${body.slice(0, MAX_ENTRY_CHARS)}\n[the rest of this entry is not shown]`;
-    const head = `[${formatDateTime(a.occurredAt, tz)}] ${kind && !a.summary.startsWith('Email') ? `${kind} · ` : ''}${a.summary}${who && a.type !== 'EMAIL_IN' ? ` · by ${who}` : ''}`;
-    return body ? `${head}\n${fromOutside ? quoted(body) : body}` : head;
+    // An e-mail's summary says "Email from…" itself. Once it is inside the fence, the word in front of it is what says, in our own words, which way the e-mail went.
+    const head = `[${formatDateTime(a.occurredAt, tz)}] ${kind && (outside.summary === 'all' || !a.summary.startsWith('Email')) ? `${kind} · ` : ''}${summaryLine(a.summary, outside.summary)}${who && a.type !== 'EMAIL_IN' ? ` · by ${who}` : ''}`;
+    return body ? `${head}\n${outside.body ? quoted(body) : body}` : head;
   });
   let omitted = 0;
   let size = entries.reduce((sum, e) => sum + e.length + 2, 0);
