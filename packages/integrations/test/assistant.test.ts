@@ -1161,6 +1161,50 @@ describe('what the assistant used', () => {
     expect(estimateCostUsd('some-future-model', { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBeNull();
   });
 
+  it('holds one person to sixty requests an hour however many are sent at the same moment', async () => {
+    const { orderId } = await orderAt(w, 'QUOTED');
+    // A slow answer, so that all the requests are under way together.
+    const answer = model.run.bind(model);
+    model.run = async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return answer(request);
+    };
+    const results = await Promise.allSettled(Array.from({ length: 70 }, () => draftReply(sam(), { orderId, instruction: 'hello' }, model)));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(60);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(refused).toHaveLength(10);
+    for (const r of refused) expect(String(r.reason?.message)).toContain('asked the assistant a great deal');
+    // Exactly sixty reached the model, and each has its record with how it ended.
+    expect(model.requests).toHaveLength(60);
+    expect(await db.aiRun.groupBy({ by: ['status'], where: { userId: w.sam.id }, _count: { _all: true } })).toEqual([{ status: 'OK', _count: { _all: 60 } }]);
+    // Somebody else is not held back by it.
+    await draftReply(as(w.manager, w.clock), { orderId, instruction: 'hello' }, model);
+  });
+
+  it('counts a request that is still running as neither done nor failed, and closes one a stopped server left open', async () => {
+    const { orderId } = await orderAt(w, 'READY');
+    await pushOrder(sam(), { orderId });
+    const pkg = await db.handoffPackage.findFirstOrThrow({ where: { orderId } });
+    // The server stopped in the middle of writing the brief: the request is on record, its outcome is not.
+    await db.aiRun.create({ data: { id: 'air_open', kind: 'brief', orderId, subjectId: pkg.id, model: 'claude-opus-5-5', status: 'STARTED', createdAt: w.clock.now() } });
+    let usage = await getAssistantUsage(as(w.manager, w.clock));
+    expect(usage.byKind.find((k) => k.kind === 'brief')).toMatchObject({ requests: 1, failed: 0 });
+    expect(usage.recentFailures).toEqual([]);
+    // It counts towards the day's allowance like any request that was sent.
+    expect(usage.automaticLast24h).toBe(1);
+    expect(await mayAttempt(db, 'brief', pkg.id, w.clock.now())).toBe(true);
+
+    // A quarter of an hour later nothing can still be running. The next round closes the record
+    // as a failure of the service, and the brief, which was never written, comes up again.
+    w.clock.advanceMinutes(16);
+    const admin = await makeUser(['ADMIN'], 'Ada Admin');
+    await updateAssistantSettings(as(admin, w.clock), { ...(await getAssistantSettings(db)), readBills: false, autoSummary: false, readAttachments: false });
+    expect(await runAssistantWork(system(), model)).toMatchObject({ briefs: 1, failed: 0 });
+    expect(await db.aiRun.findUniqueOrThrow({ where: { id: 'air_open' } })).toMatchObject({ status: 'FAILED', failure: 'unavailable', error: expect.stringContaining('server stopped') });
+    usage = await getAssistantUsage(as(w.manager, w.clock));
+    expect(usage.byKind.find((k) => k.kind === 'brief')).toMatchObject({ requests: 2, failed: 1 });
+  });
+
   it('prices a request with a long prompt by the second price list of a model that has one', async () => {
     const tokens = (inputTokens: number, outputTokens: number, cacheReadTokens = 0) => ({ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens: 0 });
     // Up to 100,000 tokens of prompt: $0.10 in and $0.50 out per million.

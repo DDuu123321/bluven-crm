@@ -1042,6 +1042,9 @@ enum AiRunStatus {
   OK
   REFUSED
   FAILED
+  /// The request has been sent and its outcome is not known yet. The row is written before the
+  /// request so that requests made at the same moment are all counted.
+  STARTED
 }
 
 /// One request to the language model: what it was for, what it used and how it ended.

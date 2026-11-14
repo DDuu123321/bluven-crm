@@ -101,26 +101,40 @@ export function unusable(detail: string): AiError {
 
 /** The most requests one person can make with the assistant's buttons in an hour. Far more than work needs; a stuck key or a script stops here. */
 export const REQUESTS_PER_PERSON_PER_HOUR = 60;
+/** The first half of the lock under which one person's requests are counted. The second half is worked out from who it is. */
+const PERSON_LOCK_SPACE = 7607;
 
 /**
  * Sends one request, checks the answer and records the outcome. `parse` turns the raw answer
  * into the value the caller wants and throws (see `unusable`) when it cannot.
+ *
+ * The request is on record before it is sent, as STARTED, and the record is completed when the
+ * answer is in. For a person, counting the last hour's requests and adding this one happen
+ * under a lock of that person's own, so that requests sent at the same moment are counted one
+ * after another and the limit holds however they arrive.
  */
 export async function runAi<T>(ctx: Ctx, model: AiModel, meta: AiRunMeta, request: AiRequest, parse: (output: unknown) => T): Promise<{ value: T; model: string }> {
   const asker = actorId(ctx);
+  const id = newId('air');
+  const opening = { id, kind: meta.kind, orderId: meta.orderId ?? null, subjectId: meta.subjectId ?? null, userId: asker, model: model.name, status: 'STARTED' as const, createdAt: nowOf(ctx) };
   if (asker) {
-    const recent = await ctx.db.aiRun.count({ where: { userId: asker, createdAt: { gte: new Date(nowOf(ctx).getTime() - 3_600_000) } } });
-    if (recent >= REQUESTS_PER_PERSON_PER_HOUR) throw new ValidationError('You have asked the assistant a great deal in the last hour. Please try again a little later.');
+    await inTx(ctx.db, async (tx) => {
+      // Two numbers, not one: such locks cannot meet those of the background jobs and of the
+      // intake, which are taken by a single number. As text, because the function returns
+      // nothing, which the database client cannot read back.
+      await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(${PERSON_LOCK_SPACE}::int, hashtext(${asker}))::text AS "locked"`);
+      const recent = await tx.aiRun.count({ where: { userId: asker, createdAt: { gte: new Date(nowOf(ctx).getTime() - 3_600_000) } } });
+      if (recent >= REQUESTS_PER_PERSON_PER_HOUR) throw new ValidationError('You have asked the assistant a great deal in the last hour. Please try again a little later.');
+      await tx.aiRun.create({ data: opening });
+    });
+  } else {
+    await ctx.db.aiRun.create({ data: opening });
   }
   const started = Date.now();
   const record = async (status: 'OK' | 'REFUSED' | 'FAILED', usage: AiUsage, servedBy: string, failure: AiError | null) => {
-    await ctx.db.aiRun.create({
+    await ctx.db.aiRun.update({
+      where: { id },
       data: {
-        id: newId('air'),
-        kind: meta.kind,
-        orderId: meta.orderId ?? null,
-        subjectId: meta.subjectId ?? null,
-        userId: actorId(ctx),
         model: servedBy,
         status,
         inputTokens: usage.inputTokens,
@@ -130,7 +144,6 @@ export async function runAi<T>(ctx: Ctx, model: AiModel, meta: AiRunMeta, reques
         durationMs: Date.now() - started,
         failure: failure?.failure ?? null,
         error: failure ? (failure.detail || failure.message).slice(0, 1000) : null,
-        createdAt: nowOf(ctx),
       },
     });
   };
@@ -245,7 +258,22 @@ export async function servicePause(db: Db, now: Date): Promise<{ reason: 'setup'
   return last && last.status !== 'OK' ? { reason: 'unavailable', detail: last.error ?? 'The service could not be reached.' } : null;
 }
 
-/** How many more requests the background process may make now without passing the daily allowance. */
+const ABANDONED_AFTER_MS = 15 * MINUTE_MS;
+
+/**
+ * Completes the record of requests whose outcome was never written: the server stopped while
+ * they were running. No request takes a quarter of an hour, so one that is still open after
+ * that long is closed as a failure of the service, which is what it was from the item's side.
+ */
+export async function closeAbandonedRuns(db: Db, now: Date): Promise<number> {
+  const { count } = await db.aiRun.updateMany({
+    where: { status: 'STARTED', createdAt: { lt: new Date(now.getTime() - ABANDONED_AFTER_MS) } },
+    data: { status: 'FAILED', failure: 'unavailable', error: 'The server stopped while this request was running, so its outcome is not known.' },
+  });
+  return count;
+}
+
+/** How many more requests the background process may make now without passing the daily allowance. Requests that are still running count. */
 export async function automaticAllowanceLeft(db: Db, settings: AssistantSettings, now: Date): Promise<number> {
   const used = await db.aiRun.count({ where: { userId: null, createdAt: { gte: new Date(now.getTime() - DAY_MS) } } });
   return Math.max(0, settings.dailyAutomaticLimit - used);
@@ -354,7 +382,7 @@ export async function getAssistantUsage(ctx: Ctx, days = 30): Promise<AssistantU
       FROM "AiRun" WHERE "createdAt" >= ${since}
       GROUP BY 1, 2, 3, 4`),
     ctx.db.aiRun.count({ where: { userId: null, createdAt: { gte: new Date(now.getTime() - DAY_MS) } } }),
-    ctx.db.aiRun.findMany({ where: { status: { not: 'OK' }, createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 15 }),
+    ctx.db.aiRun.findMany({ where: { status: { in: ['FAILED', 'REFUSED'] }, createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 15 }),
   ]);
   const orderNos = new Map((await ctx.db.order.findMany({ where: { id: { in: failures.map((f) => f.orderId).filter((id): id is string => !!id) } }, select: { id: true, orderNo: true } })).map((o) => [o.id, o.orderNo]));
 
@@ -367,7 +395,8 @@ export async function getAssistantUsage(ctx: Ctx, days = 30): Promise<AssistantU
     for (const row of [byKind.get(g.kind as AiKind), total]) {
       if (!row) continue;
       row.requests += g.requests;
-      if (g.status !== 'OK') row.failed += g.requests;
+      // A request that is still running has neither succeeded nor failed.
+      if (g.status === 'FAILED' || g.status === 'REFUSED') row.failed += g.requests;
       row.inputTokens += usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
       row.outputTokens += usage.outputTokens;
       // One model without a known price makes the sum unknown rather than too low.
