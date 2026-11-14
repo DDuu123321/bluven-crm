@@ -93,6 +93,34 @@ describe('notification emails', () => {
     expect(await sendNotificationEmails(db, after(5000))).toEqual({ sent: 0, skipped: 0, failed: 0 });
   });
 
+  it('does not let messages that are waiting for their next attempt hold up the ones that are due', async () => {
+    const sam = await makeUser(['SALES']);
+    // An afternoon without a mail server: more failed messages than one round looks at, all waiting out their pause.
+    const failedAt = new Date(later.getTime() - 60_000);
+    await db.notification.createMany({
+      data: Array.from({ length: 230 }, (_, i) => ({
+        id: `ntf_waiting_${String(i).padStart(3, '0')}`,
+        userId: sam.id,
+        type: 't',
+        title: `Waiting ${i}`,
+        createdAt: new Date(created.getTime() - 3_600_000 + i * 1000),
+        emailStatus: 'PENDING' as const,
+        emailAttempts: 3,
+        emailLastAttemptAt: failedAt,
+        emailError: 'SMTP connection refused',
+      })),
+    });
+    // The server is back, and something new has happened since.
+    await notifyUsers(db, ctx(), [sam.id], { type: 't', title: 'New since the outage' });
+    expect(await sendNotificationEmails(db, later)).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(sent.map((m) => m.subject)).toEqual(['New since the outage']);
+    // The others follow when their pause is over (30 minutes after the third failure), oldest first.
+    expect(await sendNotificationEmails(db, new Date(failedAt.getTime() + 29 * 60_000))).toEqual({ sent: 0, skipped: 0, failed: 0 });
+    expect(await sendNotificationEmails(db, new Date(failedAt.getTime() + 30 * 60_000))).toEqual({ sent: 200, skipped: 0, failed: 0 });
+    expect(sent[1]!.subject).toBe('Waiting 0');
+    expect(await sendNotificationEmails(db, new Date(failedAt.getTime() + 31 * 60_000))).toEqual({ sent: 30, skipped: 0, failed: 0 });
+  });
+
   it('closes notifications out when no mail server is configured', async () => {
     setMailSender(null);
     const sam = await makeUser(['SALES']);
