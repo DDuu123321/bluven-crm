@@ -975,7 +975,28 @@ describe('what the assistant used', () => {
     w.clock.advanceMinutes(61);
     await draftReply(sam(), { orderId, instruction: 'hello' }, model);
 
-    expect(estimateCostUsd('claude-haiku-5-5', { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBeCloseTo(0.6, 6);
     expect(estimateCostUsd('some-future-model', { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBeNull();
+  });
+
+  it('prices a request with a long prompt by the second price list of a model that has one', async () => {
+    const tokens = (inputTokens: number, outputTokens: number, cacheReadTokens = 0) => ({ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens: 0 });
+    // Up to 100,000 tokens of prompt: $0.10 in and $0.50 out per million.
+    expect(estimateCostUsd('claude-haiku-5-5', tokens(100_000, 10_000))).toBeCloseTo(0.015, 9);
+    // One token more and the whole request is charged at $0.50 and $2.50. What was read from the cache is part of the prompt.
+    expect(estimateCostUsd('claude-haiku-5-5', tokens(100_001, 10_000))).toBeCloseTo(0.0750005, 9);
+    expect(estimateCostUsd('claude-haiku-5-5', tokens(60_000, 10_000, 60_000))).toBeCloseTo((60_000 * 0.5 + 60_000 * 0.05 + 10_000 * 2.5) / 1e6, 9);
+    // A model with one price list is not affected by the length.
+    expect(estimateCostUsd('claude-opus-5-5', tokens(300_000, 0))).toBeCloseTo(1.2, 9);
+    expect(estimateCostUsd('claude-opus-5-5', tokens(300_000, 0), { longPrompt: true })).toBeCloseTo(1.2, 9);
+
+    // Added up over many requests, the long ones are still charged at their own rate: two short
+    // requests and one long one must not be read as three short ones, nor as one long one.
+    const run = (id: string, inputTokens: number, outputTokens: number) => ({ id, kind: 'bill', model: 'claude-haiku-5-5', status: 'OK' as const, inputTokens, outputTokens, createdAt: w.clock.now() });
+    await db.aiRun.createMany({ data: [run('air_short_1', 40_000, 1_000), run('air_short_2', 40_000, 1_000), run('air_long', 150_000, 2_000)] });
+    const usage = await getAssistantUsage(as(w.manager, w.clock));
+    const expected = (80_000 * 0.1 + 2_000 * 0.5 + 150_000 * 0.5 + 2_000 * 2.5) / 1e6;
+    expect(usage.byKind.find((k) => k.kind === 'bill')).toMatchObject({ requests: 3, failed: 0, inputTokens: 230_000, outputTokens: 4_000 });
+    expect(usage.byKind.find((k) => k.kind === 'bill')!.costUsd).toBeCloseTo(expected, 9);
+    expect(usage.total.costUsd).toBeCloseTo(expected, 9);
   });
 });
