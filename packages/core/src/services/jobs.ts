@@ -54,8 +54,8 @@ export interface IdleRunResult {
 const RETURN_GRACE_DAYS = 2;
 
 /**
- * The 5 / 10 / 15 day rules: remind the salesperson, remind the managers, and take unsigned
- * orders back into the pool. Thresholds come from the settings.
+ * The idle rules: remind the salesperson, tell the managers, and take orders without a deposit
+ * back into the pool (after 5, 8 and 10 days unless the settings say otherwise).
  */
 export async function runIdleRules(base: Ctx | Db): Promise<IdleRunResult> {
   const ctx: Ctx = 'actor' in base ? base : systemCtx(base);
@@ -66,7 +66,7 @@ export async function runIdleRules(base: Ctx | Db): Promise<IdleRunResult> {
     const before = (days: number) => new Date(now.getTime() - days * 86_400_000);
     const graceMs = Math.min(RETURN_GRACE_DAYS, thresholds.returnToPoolDays - thresholds.remindOwnerDays) * 86_400_000;
     // Only orders something is due for. Orders that have had all their reminders and cannot be
-    // returned (signed ones) would otherwise fill the batch for ever and starve the rest.
+    // returned (ones with a deposit) would otherwise fill the batch for ever and starve the rest.
     const candidates = await ctx.db.order.findMany({
       where: {
         ownerId: { not: null },

@@ -6,6 +6,7 @@ import {
   CURRENT_DOCUMENT,
   SIDE_STATE_LABEL,
   STAGE_LABEL,
+  opsItems,
   TIMELINE_LABEL,
   formatAddress,
   formatCents,
@@ -189,7 +190,9 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
     include: {
       owner: { select: { name: true } },
       source: { select: { name: true } },
+      leadOrigin: { select: { label: true } },
       lostReason: { select: { label: true } },
+      opsJob: true,
       customer: true,
       property: true,
       quotes: { orderBy: { version: 'asc' } },
@@ -222,6 +225,8 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
       `Stage: ${state}`,
       line('Salesperson', o.owner?.name ?? 'not assigned yet'),
       `Enquiry received: ${formatDateTime(o.leadCreatedAt, tz)} through ${o.source.name}`,
+      // Chosen from our own list by the salesperson; only the remark next to it is free text.
+      o.leadOrigin ? `Lead source: ${o.leadOrigin.label}${o.leadOriginNote ? ` (${o.leadOriginNote})` : ''}` : null,
       o.sideState === 'LOST' ? line('Marked as lost because', [o.lostReason?.label, o.lostNote].filter(Boolean).join(': ')) : null,
       o.sideState === 'ON_HOLD' ? `On hold until ${formatDateOnly(o.onHoldUntil)}${o.onHoldNote ? `: ${o.onHoldNote}` : ''}` : null,
       o.sideState === 'CANCELLED' ? line('Cancelled because', o.cancelNote) : null,
@@ -259,16 +264,28 @@ export async function buildOrderContext(db: Db, orderId: string): Promise<OrderC
         return `Version ${q.version}${q.title ? ` “${q.title}”` : ''}: ${facts.join(', ')}.`;
       }),
     ),
-    block('Contract and deposit', [
-      o.contracts[0] ? `Contract signed on ${formatDateOnly(o.contracts[0].signedOn)}.` : 'No signed contract on file.',
+    block('Deposit', [
+      // A signed contract is not required. Where one was filed, it is worth knowing.
+      o.contracts[0] ? `A contract signed on ${formatDateOnly(o.contracts[0].signedOn)} is on file.` : null,
       ...o.deposits.map((d) => {
         const amount = formatCents(d.receivedAmountCents ?? d.amountCents, d.currency);
-        if (d.status === 'CONFIRMED') return `Deposit of ${amount} confirmed by finance${d.receivedOn ? `, received ${formatDateOnly(d.receivedOn)}` : ''}.`;
-        if (d.status === 'PENDING') return `Deposit of ${amount} submitted on ${formatDate(d.submittedAt, tz)}, waiting for finance to confirm.`;
-        if (d.status === 'REJECTED') return `A deposit submission of ${amount} was rejected by finance${d.decisionNote ? `: ${d.decisionNote}` : ''}.`;
+        if (d.status === 'CONFIRMED') return `Deposit of ${amount} received${d.receivedOn ? ` (confirmed by operations on ${formatDateOnly(d.receivedOn)})` : ''}.`;
+        if (d.status === 'PENDING') return `Deposit of ${amount} recorded by sales on ${formatDate(d.submittedAt, tz)}, with proof of payment. Operations confirms that it arrived when they accept the order.`;
+        if (d.status === 'REJECTED') return `A deposit record of ${amount} was rejected${d.decisionNote ? `: ${d.decisionNote}` : ''}.`;
         return null;
       }),
     ]),
+    block(
+      'What operations has arranged',
+      o.opsJob
+        ? [
+            ...opsItems(o.opsJob).map((i) => `${i.label}: ${i.detail}`),
+            o.jobDoneAt ? `Job done on ${formatDate(o.jobDoneAt, tz)}.` : null,
+            o.opsJob.rebateAppliedAt ? `Rebate applied for on ${formatDate(o.opsJob.rebateAppliedAt, tz)}.` : null,
+            o.completedAt ? `Final payment received${o.opsJob.finalAmountCents !== null ? ` (${formatCents(o.opsJob.finalAmountCents)})` : ''}: job closed on ${formatDate(o.completedAt, tz)}.` : null,
+          ]
+        : [],
+    ),
     block(
       'Documents on file',
       [...docCounts.entries()].sort((a, b) => a[1].sort - b[1].sort).map(([label, { n }]) => `${label}: ${n} file${n === 1 ? '' : 's'}`),

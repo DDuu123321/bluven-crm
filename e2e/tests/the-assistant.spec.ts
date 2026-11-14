@@ -64,7 +64,7 @@ test('a summary is written on request, and a detail it found is taken over into 
 
   // The property has no roof on record; the summary found one, and a person decides to use it.
   await expect(summary).toContainText('Roof: Tile');
-  await shot(page, '14-summary');
+  await shot(page, '17-summary');
   await summary.getByRole('button', { name: 'Use', exact: true }).click();
   await expect(summary.getByRole('button', { name: 'Use', exact: true })).toHaveCount(0);
   const property = card(page, 'Property');
@@ -81,6 +81,11 @@ test('a summary is written on request, and a detail it found is taken over into 
   expect(asked[0]!.text).not.toContain('ava.assist@example.com');
   expect(asked[0]!.text).not.toContain('0414');
   expect(asked[0]!.text).not.toContain('Mia Mailer');
+
+  // Sam takes the job up: from here on things can be filed on it and written from it.
+  await page.getByLabel('Lead source').selectOption({ label: 'Bluven website' });
+  await page.getByRole('button', { name: 'Open job' }).click();
+  await expect(page.locator('h1')).toContainText('Following up');
   await context.close();
 });
 
@@ -125,7 +130,7 @@ test('a bill sent by e-mail is recognised, filed with one click and read', async
   await expect(property).toContainText('41031234567');
   await expect(property).toContainText('from the bill');
   await expect(page.getByText('Electricity bill read: scan0001.pdf')).toBeVisible();
-  await shot(page, '15-bill');
+  await shot(page, '18-bill');
 
   const requests = await modelRequests();
   expect(requests.filter((r) => r.kind === 'attachment' && r.files.includes('document:scan0001.pdf'))).toEqual([expect.objectContaining({ effort: 'low' })]);
@@ -193,7 +198,7 @@ test('operations get a brief with the order', async ({ browser }) => {
   await expect(ops.page.locator('#summary').getByRole('button')).toHaveCount(0);
   await expect(ops.page.locator('#bills')).toContainText('41031234567');
   await expect(ops.page.locator('#bills').getByRole('button')).toHaveCount(0);
-  await shot(ops.page, '16-brief');
+  await shot(ops.page, '19-brief');
   // They can have the brief written again.
   await brief.getByRole('button', { name: 'Write again' }).click();
   await expect(brief.getByRole('button', { name: 'Write again' })).toBeEnabled();
@@ -241,6 +246,6 @@ test('the administrator decides what it does by itself, and managers see what it
   await expect(admin.page.getByLabel('Automatic requests in 24 hours, at most')).toHaveValue('150');
   await expect(admin.page.getByLabel('Summaries and briefs are written in')).toHaveValue('zh');
   await expect(admin.page.getByText('of at most 150')).toBeVisible();
-  await shot(admin.page, '17-assistant-settings');
+  await shot(admin.page, '20-assistant-settings');
   await admin.context.close();
 });

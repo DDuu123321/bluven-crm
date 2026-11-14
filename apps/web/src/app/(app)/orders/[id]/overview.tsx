@@ -24,7 +24,7 @@ import { completeTaskAction, createTaskAction } from '../../tasks/actions';
 import { confirmEmailAction, logActivityAction, movePropertyAction, readBillAction, summariseAction, summaryHintAction, updateCustomerAction, updatePropertyAction, billValueAction } from './actions';
 import { ActivityFields } from './activity-fields';
 
-export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean }) {
+export async function OverviewTab({ ctx, header, editable, staff, opened }: { ctx: Ctx; header: OrderHeader; editable: boolean; staff: boolean; opened: boolean }) {
   const { order } = header;
   const [timeline, tasks, summary, bills] = await Promise.all([getOrderTimeline(ctx, order.id), getOrderTasks(ctx, order.id), getOrderSummary(ctx, order.id), getOrderBills(ctx, order.id)]);
   const assistant = assistantConfigured();
@@ -55,7 +55,7 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <div className="space-y-4">
         <SummaryCard summary={summary} available={assistant} write={staff ? summariseAction.bind(null, order.id) : undefined} hintAction={editable ? summaryHintAction.bind(null, order.id) : undefined} />
-        {staff && (
+        {staff && opened && (
           <Card>
             <CardHeader title="Log activity" description="Calls and messages are not captured automatically. Record them here so the timeline tells the whole story." />
             <CardBody>
@@ -293,7 +293,7 @@ export async function OverviewTab({ ctx, header, editable, staff }: { ctx: Ctx; 
           <CardBody>
             <Dl
               rows={[
-                ['Source', `${order.source.name}${order.sourceDetail ? ` · ${order.sourceDetail}` : ''}`],
+                ['Came in through', `${order.source.name}${order.sourceDetail ? ` · ${order.sourceDetail}` : ''}`],
                 ['Received', fmtDateTime(order.leadCreatedAt)],
                 ['Interested in', details.components?.join(', ')],
                 ['Solar wanted', details.systemKw !== undefined ? `${details.systemKw} kW` : null],

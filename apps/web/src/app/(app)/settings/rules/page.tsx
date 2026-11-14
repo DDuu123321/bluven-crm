@@ -20,7 +20,7 @@ export default async function RulesPage() {
         <Card>
           <CardHeader
             title="Idle orders"
-            description="Counted from the last thing the salesperson or a manager did on the order. Customer emails and system reminders do not reset the clock. Time spent waiting for finance or operations is not counted."
+            description="Counted from the last thing the salesperson or a manager did on the order. Customer emails and system reminders do not reset the clock. Time an order spends with operations is not counted."
           />
           <CardBody className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-3">
@@ -49,11 +49,11 @@ export default async function RulesPage() {
                 <FieldError name="returnToPoolDays" />
               </div>
             </div>
-            <p className="text-xs text-slate-500">Only orders that have not been signed yet are returned to the pool automatically. Signed orders are never taken away from their salesperson: the reminders continue and a manager decides.</p>
+            <p className="text-xs text-slate-500">Only orders without a deposit are returned to the pool automatically. Once the deposit is paid an order is never taken away from its salesperson: the reminders continue and a manager decides.</p>
           </CardBody>
         </Card>
         <Card>
-          <CardHeader title="Deposit" description="Suggested when sales records a deposit and the quote does not state one." />
+          <CardHeader title="Deposit" description="Suggested when sales records a deposit and the proposal does not state one." />
           <CardBody>
             <Label htmlFor="defaultDepositPercent">Suggested deposit</Label>
             <div className="flex items-center gap-2">
@@ -66,7 +66,7 @@ export default async function RulesPage() {
         <Card>
           <CardHeader
             title="Keeping documents"
-            description="Counted from the day an order ended: handed over to operations, lost or cancelled. Nothing of an open order ever expires. Signed contracts, deposit proofs and every document type marked “never delete automatically” are kept for good."
+            description="Counted from the day an order ended: the job was closed with the final payment, or the order was lost or cancelled. Nothing of an open order ever expires. Signed contracts, deposit proofs and every document type marked “never delete automatically” are kept for good."
           />
           <CardBody className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">

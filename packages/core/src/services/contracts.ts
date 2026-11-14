@@ -1,5 +1,6 @@
 // The signed contract. Whether it arrived by email, was uploaded by hand or was signed on a Pylon
-// web proposal, it ends up as one Contract record that points at the archived file.
+// web proposal, it ends up as one Contract record that points at the archived file. An order does
+// not need one: the deposit is what shows that the customer is going ahead.
 import type { ContractSource, Document, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
@@ -9,7 +10,7 @@ import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
 import { attachStaged, cleanupStaged, finishImage, supersedeDocuments, type StagedFile } from './documents';
-import { lockOrderForEdit, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { lockOrderForWork, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 import { markQuoteSentInTx } from './quotes';
 import { DOC_TYPE } from './reference';
 import { completeSystemTasks } from './timeline';
@@ -74,8 +75,6 @@ export async function archiveContractInTx(tx: Tx, ctx: Ctx, order: OrderState, i
   await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true, id: { not: quote.id } }, data: { isAccepted: false } });
   await tx.quote.update({ where: { id: quote.id }, data: { isAccepted: true } });
   await tx.order.update({ where: { id: order.id }, data: { signedAt: input.signedOn! } });
-  // "Pylon shows this project as accepted: archive the contract" is now done.
-  await completeSystemTasks(tx, ctx, order.id, ['PYLON_ACCEPTED']);
 
   const summary = `Signed contract ${live ? 'replaced' : 'archived'} (signed ${formatDateOnly(input.signedOn)}, quote v${quote.version})`;
   await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'CONTRACT', summary, payload: { contractId: id, quoteId: quote.id } });
@@ -104,7 +103,7 @@ export async function archiveContract(ctx: Ctx, input: ArchiveContractInput): Pr
     errors.throwIfAny();
 
     const result = await inTx(ctx.db, async (tx) => {
-      const order = await lockOrderForEdit(tx, ctx, input.orderId);
+      const order = await lockOrderForWork(tx, ctx, input.orderId);
       return archiveContractInTx(tx, ctx, order, input);
     });
     for (const doc of result.documents) await finishImage(ctx, doc);
@@ -115,14 +114,17 @@ export async function archiveContract(ctx: Ctx, input: ArchiveContractInput): Pr
   }
 }
 
-/** Removes the contract from the order. The file stays in the folder history; the stage falls back. */
+/**
+ * Removes the signed copy from the order. The file stays in the folder history, and the stage is
+ * untouched: a contract is a file for the folder, not a step.
+ */
 export async function voidContract(ctx: Ctx, input: { contractId: string; reason: string }): Promise<void> {
   const reason = input.reason.trim().slice(0, 500);
   if (!reason) throw new ValidationError('Say why the contract is being removed.', { reason: 'Give a reason.' });
   const found = await ctx.db.contract.findUnique({ where: { id: input.contractId }, select: { orderId: true } });
   if (!found) throw new NotFoundError('Contract not found.');
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForEdit(tx, ctx, found.orderId, 'Contract');
+    const order = await lockOrderForWork(tx, ctx, found.orderId, 'Contract');
     const contract = await tx.contract.findUniqueOrThrow({ where: { id: input.contractId } });
     if (contract.voidedAt) return;
     const now = nowOf(ctx);
@@ -131,7 +133,8 @@ export async function voidContract(ctx: Ctx, input: { contractId: string; reason
       data: { voidedAt: now, voidedById: ctx.actor.kind === 'user' ? ctx.actor.id : null, voidReason: reason },
     });
     await supersedeDocuments(tx, ctx, order.id, DOC_TYPE.signedContract);
-    await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true }, data: { isAccepted: false } });
+    // The signed copy said which version the customer accepted. A deposit on record says so too, and stands.
+    if (order.deposit === 'NONE') await tx.quote.updateMany({ where: { orderId: order.id, isAccepted: true }, data: { isAccepted: false } });
     await tx.order.update({ where: { id: order.id }, data: { signedAt: null } });
     await addActivity(tx, ctx, { customerId: order.customerId, orderId: order.id, type: 'CONTRACT', summary: 'Signed contract removed', body: reason });
     await touchStaffActivity(tx, ctx, order);

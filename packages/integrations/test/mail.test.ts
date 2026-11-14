@@ -399,7 +399,7 @@ describe('connecting a mailbox', () => {
 
 describe('reading a mailbox', () => {
   it('puts mail with a known customer on their order and leaves everything else alone', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const fromJane = mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Question about the battery', html: '<p>Hi Sam,</p><p>Does the battery work in a blackout?</p><br><p>On Mon, 9 Nov 2026, Sam wrote:</p><blockquote>Hello</blockquote>' });
     mail.add({ from: who('newsletter@shop.example'), to: [who(SAM_MAIL)], subject: 'Sale!' });
@@ -423,7 +423,7 @@ describe('reading a mailbox', () => {
     expect(activity).toMatchObject({ summary: 'Email from Jane Smith: Question about the battery', body: 'Hi Sam,\n\nDoes the battery work in a blackout?', actorId: null, actorLabel: 'Jane Smith' });
     expect(await db.notification.findMany({ where: { userId: w.sam.id, type: 'mail.received' }, select: { emailStatus: true } })).toEqual([{ emailStatus: 'NONE' }, { emailStatus: 'NONE' }]);
     // A customer writing is not the salesperson working: the order stays where it was.
-    expect((await db.order.findUniqueOrThrow({ where: { id: orderId } })).stage).toBe('NEW');
+    expect(await db.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ stage: 'FOLLOW_UP', firstContactedAt: null });
 
     // Reading again stores nothing twice.
     w.clock.advanceMinutes(1);
@@ -432,7 +432,7 @@ describe('reading a mailbox', () => {
   });
 
   it('treats what the salesperson sent from their own mail program as work on the order', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     w.clock.advanceDays(1);
     const sentAt = new Date(w.clock.current.getTime() - 2 * 3_600_000);
@@ -443,13 +443,13 @@ describe('reading a mailbox', () => {
 
     expect((await run()).stored).toBe(2);
     const order = await db.order.findUniqueOrThrow({ where: { id: orderId } });
-    expect(order).toMatchObject({ stage: 'CONTACTED', firstContactedAt: sentAt, lastStaffActivityAt: sentAt, idleLevel: 0 });
+    expect(order).toMatchObject({ stage: 'FOLLOW_UP', firstContactedAt: sentAt, lastStaffActivityAt: sentAt, idleLevel: 0 });
     expect(await db.activity.findFirstOrThrow({ where: { orderId, type: 'EMAIL_OUT' }, orderBy: { occurredAt: 'desc' } })).toMatchObject({ summary: 'Email to Jane Smith: Your solar quote', actorId: w.sam.id });
     expect(await db.notification.count({ where: { type: 'mail.received' } })).toBe(0);
   });
 
   it('keeps attachments, and says so when one could not be kept', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const bill = pdf('electricity bill');
     mail.add({
@@ -476,7 +476,7 @@ describe('reading a mailbox', () => {
   });
 
   it('follows a conversation when the customer answers from another address, and offers to add it', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const first = mail.add({ folderId: 'f_sent', threadId: 'thread-9', from: who(SAM_MAIL), to: [JANE], time: new Date(w.clock.current.getTime() - 3_600_000) });
     await run();
@@ -496,7 +496,7 @@ describe('reading a mailbox', () => {
   });
 
   it('stores a message once however many mailboxes it reached', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     const alexMail = new FakeMail();
     alexMail.account = { accountId: 'acc_2', primaryAddress: 'alex@bluven.example', addresses: ['alex@bluven.example'], displayName: 'Alex' };
@@ -510,8 +510,8 @@ describe('reading a mailbox', () => {
   });
 
   it('leaves the order open when the customer has several, for a person to choose', async () => {
-    const first = await orderAt(w, 'ASSIGNED');
-    const second = await orderAt(w, 'ASSIGNED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
+    const first = await orderAt(w, 'OPENED');
+    const second = await orderAt(w, 'OPENED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
     expect(second.orderId).not.toBe(first.orderId);
     await connect();
     w.clock.advanceMinutes(30);
@@ -537,8 +537,8 @@ describe('reading a mailbox', () => {
     // The whole conversation moved, the reply counts as first contact, and the timeline follows.
     expect((await db.emailMessage.findMany()).every((m) => m.orderId === second.orderId)).toBe(true);
     expect(await db.activity.count({ where: { orderId: second.orderId, type: { in: ['EMAIL_IN', 'EMAIL_OUT'] } } })).toBe(2);
-    expect((await db.order.findUniqueOrThrow({ where: { id: second.orderId } })).stage).toBe('CONTACTED');
-    expect((await db.order.findUniqueOrThrow({ where: { id: first.orderId } })).stage).toBe('NEW');
+    expect((await db.order.findUniqueOrThrow({ where: { id: second.orderId } })).firstContactedAt).not.toBeNull();
+    expect((await db.order.findUniqueOrThrow({ where: { id: first.orderId } })).firstContactedAt).toBeNull();
     expect((await getOrderMail(sam(), first.orderId)).unplaced).toHaveLength(0);
     // The summary is now older than what is on the order: it reads as out of date and is rewritten.
     const arrived = await db.activity.findFirstOrThrow({ where: { orderId: second.orderId, type: 'EMAIL_IN' }, select: { createdAt: true } });
@@ -548,11 +548,11 @@ describe('reading a mailbox', () => {
   it('looks through recent mail again when a new customer address appears', async () => {
     await connect();
     mail.add({ from: who('new.lead@example.com', 'Nina New'), to: [who(SAM_MAIL)], subject: 'Enquiry before the lead existed', time: new Date(w.clock.current.getTime() - 86_400_000) });
-    await orderAt(w, 'ASSIGNED'); // so there is at least one customer address to mark as looked at
+    await orderAt(w, 'OPENED'); // so there is at least one customer address to mark as looked at
     expect((await run()).stored).toBe(0);
 
     w.clock.advanceMinutes(45);
-    const { orderId } = await orderAt(w, 'ASSIGNED', { firstName: 'Nina', lastName: 'New', email: 'new.lead@example.com', phone: '0499 111 222', address: '4 New St' });
+    const { orderId } = await orderAt(w, 'OPENED', { firstName: 'Nina', lastName: 'New', email: 'new.lead@example.com', phone: '0499 111 222', address: '4 New St' });
     w.clock.advanceMinutes(1);
     expect((await run()).stored).toBe(1);
     expect(await db.emailMessage.findFirstOrThrow()).toMatchObject({ subject: 'Enquiry before the lead existed', orderId });
@@ -564,7 +564,7 @@ describe('reading a mailbox', () => {
   });
 
   it('switches off a mailbox whose permission was withdrawn, tells its owner, and carries on with the others', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     const alexMail = new FakeMail();
     alexMail.account = { accountId: 'acc_2', primaryAddress: 'alex@bluven.example', addresses: ['alex@bluven.example'], displayName: 'Alex' };
@@ -601,7 +601,7 @@ async function alexMailbox(): Promise<FakeMail> {
 
 describe('whose mail is kept', () => {
   it('keeps mail from a mailbox only for customers its owner works with, unless the owner shares all of it', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const alexMail = await alexMailbox();
     // Sam puts the address of someone Alex corresponds with on his own customer's record.
@@ -635,7 +635,7 @@ describe('whose mail is kept', () => {
   });
 
   it('keeps reading for a customer the owner used to have, and for one they wrote to from the CRM', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     await assignOrders(as(w.manager, w.clock), { orderIds: [orderId], ownerId: w.alex.id });
     w.clock.advanceMinutes(2);
@@ -657,7 +657,7 @@ describe('whose mail is kept', () => {
   });
 
   it('treats an address that only came with a website enquiry as unconfirmed until a person says otherwise', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     // Somebody who knows Jane's phone number fills in the website form with an address of their own.
     w.clock.advanceMinutes(5);
@@ -702,7 +702,7 @@ describe('whose mail is kept', () => {
   });
 
   it('does not take a message’s own word for who it is from', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     // A stranger writes to Sam and copies the customer in.
     mail.add({ from: who('someone@elsewhere.example', 'Jane Smith'), to: [who(SAM_MAIL)], cc: [JANE], subject: 'About my quote' });
@@ -712,7 +712,7 @@ describe('whose mail is kept', () => {
     expect(await db.emailMessage.findMany()).toMatchObject([{ subject: 'About my quote', direction: 'IN', unknownSender: 'someone@elsewhere.example', orderId }]);
     expect((await getOrderMail(sam(), orderId)).emails[0]).toMatchObject({ unknownSender: 'someone@elsewhere.example', senderAwaitsConfirmation: false });
     // Nothing here is the salesperson's work on the order.
-    expect(await db.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ stage: 'NEW', firstContactedAt: null });
+    expect(await db.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ stage: 'FOLLOW_UP', firstContactedAt: null });
     expect(await db.activity.count({ where: { orderId, type: 'EMAIL_OUT' } })).toBe(0);
 
     // What the owner moved out of the sent folder into a folder of their own is still theirs.
@@ -725,7 +725,7 @@ describe('whose mail is kept', () => {
   });
 
   it('follows a conversation the way Zoho numbers it: no id on the first message, the first message’s id from then on', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const first = mail.add({ folderId: 'f_sent', threadId: null, from: who(SAM_MAIL), to: [JANE], subject: 'Your quote', time: new Date(w.clock.current.getTime() - 3_600_000) });
     await run();
@@ -739,8 +739,8 @@ describe('whose mail is kept', () => {
   });
 
   it('puts an answer to a message written in the CRM on the order it was written from', async () => {
-    await orderAt(w, 'ASSIGNED');
-    const ryde = await orderAt(w, 'ASSIGNED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
+    await orderAt(w, 'OPENED');
+    const ryde = await orderAt(w, 'OPENED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
     await connect();
     mail.reportSentHeader = true;
     const sent = await sendOrderEmail(sam(), { orderId: ryde.orderId, to: ['jane@example.com'], subject: 'About Ryde', body: 'Hello' }, { apiFor: () => mail });
@@ -768,7 +768,7 @@ describe('whose mail is kept', () => {
 
 describe('when reading does not go smoothly', () => {
   it('does not let one unreadable message hold up the rest, and gives up on it after three tries', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     const bad = mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Cannot be opened', time: new Date(w.clock.current.getTime() - 10 * 60_000) });
     mail.broken[bad.id] = 'bad';
@@ -792,7 +792,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('takes a failure that may be the service’s for what it is', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     const flaky = mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Flaky', time: new Date(w.clock.current.getTime() - 5 * 60_000) });
     mail.broken[flaky.id] = 'flaky';
@@ -820,7 +820,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('reads a backlog a little at a time, without losing its place', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     const account = await connect();
     for (let i = 0; i < 6; i++) mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: `Message ${i}`, time: new Date(w.clock.current.getTime() - (i + 1) * 60_000) });
     const rounds: number[] = [];
@@ -840,7 +840,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('stops everything for a while when Zoho says the CRM asks too often', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     const alexMail = await alexMailbox();
     const apiFor = (account: { address: string }) => (account.address === SAM_MAIL ? mail : alexMail);
@@ -873,7 +873,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('does not ask people to connect again when it is the server’s own Zoho settings that are wrong', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     // The hourly token has run out, and Zoho does not accept the client id when a new one is asked for.
     w.clock.advanceMinutes(61);
@@ -886,7 +886,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('tells the owner and the managers when a mailbox has not been readable for a while', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     mail.down = true;
     for (let i = 0; i < 31; i++) {
@@ -899,7 +899,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('disconnects the mailbox of someone who may no longer have one', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     await alexMailbox();
     await db.user.update({ where: { id: w.sam.id }, data: { roles: ['FINANCE'] } });
@@ -916,7 +916,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('fetches an attachment later that could not be fetched at first', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const message = mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'My bill', attachments: [{ id: 'a1', name: 'bill.pdf', body: 'unreachable' }] });
     await run();
@@ -943,7 +943,7 @@ describe('when reading does not go smoothly', () => {
   });
 
   it('gives up fetching an attachment after three more tries, and leaves it in the mailbox when one sender fills the day', async () => {
-    await orderAt(w, 'ASSIGNED');
+    await orderAt(w, 'OPENED');
     await connect();
     mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Photos', attachments: [{ id: 'a1', name: 'roof.png', body: 'unreachable' }] });
     await run();
@@ -967,7 +967,7 @@ describe('when reading does not go smoothly', () => {
 
 describe('writing to the customer', () => {
   it('sends from the salesperson’s own mailbox with files of the order, and records the quote as sent', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const quote = await createQuote(sam(), { orderId, title: '6.6 kW', dcWatts: 6600, storageWh: null, totalCents: 900_000, depositCents: 90_000, notes: '', file: await (await import('../../core/test/helpers')).staged(pdf('quote v1'), 'Quote.pdf') });
     const quoteDoc = (await db.quote.findUniqueOrThrow({ where: { id: quote.id } })).documentId!;
@@ -984,7 +984,7 @@ describe('writing to the customer', () => {
     expect(stored).toMatchObject({ direction: 'OUT', orderId, sentById: w.sam.id, providerMessageId: 'sent1', fromAddress: SAM_MAIL, toAddresses: ['jane@example.com'], bodyText: 'Hi Jane,\n\nThe quote is attached.\nSam' });
     expect(stored.attachments.map((a) => a.documentId).sort()).toEqual([quoteDoc, photo.id].sort());
     const order = await db.order.findUniqueOrThrow({ where: { id: orderId } });
-    expect(order.stage).toBe('QUOTED');
+    expect(order.stage).toBe('PROPOSAL_SENT');
     expect(order.firstContactedAt).not.toBeNull();
     expect(await db.quote.findUniqueOrThrow({ where: { id: quote.id } })).toMatchObject({ sentVia: 'EMAIL', sentAt: w.clock.current });
     expect(await db.activity.findFirstOrThrow({ where: { orderId, type: 'EMAIL_OUT' } })).toMatchObject({ summary: 'Email to Jane Smith: Your solar quote', actorId: w.sam.id });
@@ -998,7 +998,7 @@ describe('writing to the customer', () => {
   });
 
   it('answers a message in the mailbox it is in, and recognises its own mail when the provider gave no id', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await connect();
     const question = mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Question' });
     await run();
@@ -1016,8 +1016,8 @@ describe('writing to the customer', () => {
   });
 
   it('refuses what should not go out, before anything is sent', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
-    const other = await orderAt(w, 'ASSIGNED', { externalId: 'other', firstName: 'Omar', email: 'omar@example.com', phone: '0400 999 888', address: '1 Else St' });
+    const { orderId } = await orderAt(w, 'OPENED');
+    const other = await orderAt(w, 'OPENED', { externalId: 'other', firstName: 'Omar', email: 'omar@example.com', phone: '0400 999 888', address: '1 Else St' });
     const foreignDoc = await uploadDocument(sam(), { orderId: other.orderId, typeId: (await docType('other')).id, fileName: 'theirs.pdf', body: stream(pdf('theirs')) });
     const input = { orderId, to: ['jane@example.com'], subject: 'Hello', body: 'Hi' };
     const deps = { apiFor: () => mail };
@@ -1075,15 +1075,17 @@ describe('using what the customer sent', () => {
     await expect(archiveContractFromAttachment(sam(), { attachmentId: attachment.id, quoteId: null, signedOn: parseDateOnly('2026-11-09') })).rejects.toMatchObject({ fieldErrors: { quoteId: expect.any(String) } });
     const { contractId } = await archiveContractFromAttachment(sam(), { attachmentId: attachment.id, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09') });
     expect(await db.contract.findUniqueOrThrow({ where: { id: contractId } })).toMatchObject({ orderId, quoteId, source: 'EMAIL' });
-    expect((await db.order.findUniqueOrThrow({ where: { id: orderId } })).stage).toBe('SIGNED');
+    // The signed copy is filed and says which version the customer accepted. It is not a stage of its own.
+    expect((await db.order.findUniqueOrThrow({ where: { id: orderId } })).stage).toBe('PROPOSAL_SENT');
+    expect((await db.quote.findUniqueOrThrow({ where: { id: quoteId! } })).isAccepted).toBe(true);
     expect((await getOrderMail(sam(), orderId)).emails[0]!.attachments[0]!.documentLabel).toBe('Signed contract');
   });
 });
 
 describe('what is said to whom', () => {
   it('answers "not found" about an attachment of mail that is on no order to someone who may not see it', async () => {
-    await orderAt(w, 'ASSIGNED');
-    await orderAt(w, 'ASSIGNED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
+    await orderAt(w, 'OPENED');
+    await orderAt(w, 'OPENED', { address: '9 Other Rd', suburb: 'Ryde', postcode: '2112' });
     await connect();
     mail.add({ from: JANE, to: [who(SAM_MAIL)], subject: 'Which house?', attachments: [{ id: 'a1', name: 'bill.pdf', body: pdf('bill') }] });
     await run();

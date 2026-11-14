@@ -1,10 +1,11 @@
-// Pylon events: storing what arrives, and turning it into quotes, contracts and deposits.
+// Pylon events: storing what arrives, and turning it into quotes, signed copies and deposits.
 import { Prisma, type Db, type Document, type PylonEvent } from '@bluven/db';
 import {
   AppError,
   ConflictError,
   ValidationError,
   addActivity,
+  acceptQuoteInTx,
   archiveContractInTx,
   attachStaged,
   audit,
@@ -20,6 +21,7 @@ import {
   localDateString,
   lockOrder,
   managerIds,
+  markDesignStarted,
   markQuoteSentInTx,
   newId,
   notifyRoles,
@@ -27,8 +29,9 @@ import {
   nowOf,
   orderHref,
   parseDateOnly,
-  requireEditableOrder,
+  requireWorkableOrder,
   stageUpload,
+  syncOrderStage,
   upsertPylonQuote,
   withJobLock,
   type Ctx,
@@ -196,6 +199,12 @@ async function writeProjectLink(ctx: Ctx, orderId: string, projectId: string, ur
     return false;
   }
   await ctx.db.order.update({ where: { id: orderId }, data: { pylonProjectId: projectId, pylonProjectUrl: safeUrl ?? pylonProjectUrl(projectId), pylonSyncedAt: null } });
+  // A project in Pylon means that the design has started, whoever started it.
+  await inTx(ctx.db, async (tx) => {
+    await lockOrder(tx, orderId);
+    await markDesignStarted(tx, ctx, orderId);
+    await syncOrderStage(tx, ctx, orderId);
+  });
   // On the timeline too, so the salesperson sees it if somebody else started the project.
   await addActivity(ctx.db, ctx, { customerId: order.customerId, orderId, type: 'SYSTEM', summary: 'Linked to a project in Pylon', payload: { pylonProjectId: projectId, previous: order.pylonProjectId } });
   await audit(ctx.db, ctx, {
@@ -274,25 +283,24 @@ async function handleProject(ctx: Ctx, api: PylonApi | null, ev: ParsedEvent): P
     const applied = await archiveSignatureIfMissing(ctx, api, orderId, project);
     return { status: 'PROCESSED', note: applied ?? 'Project linked.', orderId };
   }
-  // Marked as sold in Pylon by hand, without a contract in the CRM: nudge the salesperson once.
+  // Marked as sold in Pylon by hand while the CRM has no deposit yet: nudge the salesperson once.
   if (!project.manuallySold) return { status: 'PROCESSED', note: 'Project linked.', orderId };
   return inTx(ctx.db, async (tx) => {
     const order = await lockedOrder(tx, orderId);
-    const contract = await tx.contract.findFirst({ where: { orderId, voidedAt: null }, select: { id: true } });
     const nudged = await tx.task.findFirst({ where: { orderId, kind: 'PYLON_ACCEPTED' }, select: { id: true } });
-    if (contract || nudged || editBlockReason(order)) return { status: 'PROCESSED' as const, note: 'Project linked.', orderId };
+    if (order.deposit !== 'NONE' || nudged || editBlockReason(order)) return { status: 'PROCESSED' as const, note: 'Project linked.', orderId };
     const now = nowOf(ctx);
     await tx.task.create({
-      data: { id: newId('tsk'), orderId, assigneeId: order.ownerId, title: 'Pylon shows this project as accepted: archive the signed contract', dueAt: now, kind: 'PYLON_ACCEPTED', remindedAt: now, createdAt: now },
+      data: { id: newId('tsk'), orderId, assigneeId: order.ownerId, title: 'Pylon shows this project as accepted: record the deposit once it is paid', dueAt: now, kind: 'PYLON_ACCEPTED', remindedAt: now, createdAt: now },
     });
     await notifyUsers(tx, ctx, order.ownerId ? [order.ownerId] : await managerIds(tx), {
       type: 'pylon.accepted',
-      title: `${order.orderNo}: accepted in Pylon, contract not archived yet`,
-      body: 'Archive the signed contract in the CRM so the order can move on.',
+      title: `${order.orderNo}: accepted in Pylon, no deposit recorded yet`,
+      body: 'Record the deposit with its proof of payment in the CRM once the customer has paid. The order can then go to operations.',
       href: `${orderHref(orderId)}?tab=deal`,
       orderId,
     });
-    return { status: 'PROCESSED' as const, note: 'Project marked as sold in Pylon; asked sales to archive the contract.', orderId };
+    return { status: 'PROCESSED' as const, note: 'Project marked as sold in Pylon; asked sales to record the deposit.', orderId };
   });
 }
 
@@ -386,20 +394,16 @@ async function applySigned(ctx: Ctx, api: PylonApi | null, orderId: string, ev: 
         return { note: 'Signed in Pylon for a different version than the contract on file; sales was asked to check.', documents: kept };
       }
       if (!staged) {
-        const now = nowOf(ctx);
-        if (!(await tx.task.findFirst({ where: { orderId, kind: 'PYLON_ACCEPTED', status: 'OPEN' }, select: { id: true } }))) {
-          await tx.task.create({
-            data: { id: newId('tsk'), orderId, assigneeId: order.ownerId, title: 'The customer accepted the Pylon proposal: archive the signed copy', dueAt: now, kind: 'PYLON_ACCEPTED', remindedAt: now, createdAt: now },
-          });
-        }
+        // No signed copy to file. Which version the customer accepted is known all the same.
+        await acceptQuoteInTx(tx, ctx, (await loadOrderState(tx, orderId))!, quote.quoteId);
         await notifyUsers(tx, ctx, tell, {
           type: 'pylon.accepted',
           title: `${order.orderNo}: the customer accepted the proposal in Pylon`,
-          body: 'Pylon did not provide a signed PDF. Archive the signed copy in the CRM.',
+          body: 'Pylon did not provide a signed PDF, so none was filed. The version is marked as the accepted one. Record the deposit once it is paid.',
           href: `${orderHref(orderId)}?tab=deal`,
           orderId,
         });
-        return { note: 'Accepted in Pylon without a signed PDF; asked sales to archive the contract.', documents: [] };
+        return { note: 'Accepted in Pylon without a signed PDF; the version was marked as accepted.', documents: [] };
       }
       const fresh = (await loadOrderState(tx, orderId))!;
       const archived = await archiveContractInTx(tx, ctx, fresh, { quoteId: quote.quoteId, signedOn, files: [staged], source: 'PYLON' });
@@ -463,7 +467,7 @@ async function handlePayment(ctx: Ctx, api: PylonApi | null, ev: ParsedEvent, ro
     status: 'PROCESSED',
     note:
       outcome === 'created'
-        ? `Gateway payment of ${what} recorded as a deposit awaiting finance.`
+        ? `Gateway payment of ${what} recorded as the deposit.`
         : outcome === 'deposit_exists'
           ? `Gateway payment of ${what} noted; a deposit was already on record.`
           : outcome === 'noted'
@@ -686,7 +690,7 @@ export interface PylonProjectPreview {
 }
 
 async function projectForLinking(ctx: Ctx, api: PylonApi | null, input: { orderId: string; ref: string }): Promise<PylonProject> {
-  const order = await requireEditableOrder(ctx, input.orderId);
+  const order = await requireWorkableOrder(ctx, input.orderId);
   const pylon = needApi(api);
   const projectId = parsePylonProjectRef(input.ref);
   if (!projectId) throw new ValidationError('That is not a Pylon project.', { ref: 'Paste the address of the project in Pylon, for example https://app.getpylon.com/library/…' });
@@ -734,7 +738,7 @@ export async function linkPylonProject(ctx: Ctx, api: PylonApi | null, input: { 
 
 /** Reads the linked project again, on request. Anyone who may work on the order can ask. */
 export async function refreshFromPylon(ctx: Ctx, api: PylonApi | null, input: { orderId: string }): Promise<PylonSyncResult> {
-  await requireEditableOrder(ctx, input.orderId);
+  await requireWorkableOrder(ctx, input.orderId);
   return syncPylonProject(ctx, needApi(api), input.orderId);
 }
 

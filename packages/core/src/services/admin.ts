@@ -1,5 +1,5 @@
-// Configuration: lead sources and their intake tokens, document types (the handoff checklist)
-// and lost reasons.
+// Configuration: the channels leads arrive through and their intake tokens, document types (the
+// handoff checklist), lost reasons, and the lead sources a salesperson chooses from.
 import { createHash, randomBytes } from 'node:crypto';
 import type { Db, DocScope, LeadSource, LeadSourceKind } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
@@ -21,7 +21,7 @@ function slug(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Lead sources and intake tokens
+// Intake channels (how leads get in) and their tokens
 // ---------------------------------------------------------------------------
 
 const TOKEN_OVERLAP_MS = 7 * 24 * 60 * 60 * 1000;
@@ -45,7 +45,7 @@ export async function createLeadSource(ctx: Ctx, input: { name: string; kind: st
   const id = newId('src');
   await inTx(ctx.db, async (tx) => {
     await tx.leadSource.create({ data: { id, key, name, kind: kind! } });
-    await audit(tx, ctx, { action: 'lead_source.create', entityType: 'LeadSource', entityId: id, summary: `Created lead source ${name}`, after: { key, name, kind } });
+    await audit(tx, ctx, { action: 'lead_source.create', entityType: 'LeadSource', entityId: id, summary: `Created intake channel ${name}`, after: { key, name, kind } });
   });
   return { id };
 }
@@ -61,7 +61,7 @@ export async function updateLeadSource(ctx: Ctx, input: { sourceId: string; name
     const change = diff({ name: source.name, isActive: source.isActive }, { name, isActive: input.isActive });
     if (!change) return;
     await tx.leadSource.update({ where: { id: source.id }, data: { name, isActive: input.isActive } });
-    await audit(tx, ctx, { action: 'lead_source.update', entityType: 'LeadSource', entityId: source.id, summary: `Updated lead source ${source.key}`, ...change });
+    await audit(tx, ctx, { action: 'lead_source.update', entityType: 'LeadSource', entityId: source.id, summary: `Updated intake channel ${source.key}`, ...change });
   });
 }
 
@@ -237,5 +237,45 @@ export async function updateLostReason(ctx: Ctx, input: { reasonId: string; labe
     if (!change) return;
     await tx.lostReason.update({ where: { id: reason.id }, data: next });
     await audit(tx, ctx, { action: 'lost_reason.update', entityType: 'LostReason', entityId: reason.id, summary: `Updated lost reason ${reason.key}`, ...change });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Lead sources (where a customer came from; what partners are paid by)
+// ---------------------------------------------------------------------------
+
+export async function createLeadOrigin(ctx: Ctx, input: { label: string }): Promise<{ id: string }> {
+  requireCap(ctx, 'config.manage');
+  const label = input.label.trim();
+  if (!label) throw new ValidationError('Enter a name.', { label: 'Enter a name.' });
+  if (label.length > 100) throw new ValidationError('Use at most 100 characters.', { label: 'Use at most 100 characters.' });
+  const key = slug(label);
+  if (!key) throw new ValidationError('Use letters or digits.', { label: 'Use letters or digits.' });
+  if (await ctx.db.leadOrigin.findUnique({ where: { key } })) throw new ValidationError('This lead source already exists.', { label: 'Already in use.' });
+  const id = newId('lor');
+  await inTx(ctx.db, async (tx) => {
+    const last = await tx.leadOrigin.findFirst({ orderBy: { sortOrder: 'desc' }, select: { sortOrder: true } });
+    await tx.leadOrigin.create({ data: { id, key, label, sortOrder: (last?.sortOrder ?? 0) + 10 } });
+    await audit(tx, ctx, { action: 'lead_origin.create', entityType: 'LeadOrigin', entityId: id, summary: `Created lead source “${label}”`, after: { key, label } });
+  });
+  return { id };
+}
+
+/** Renames a lead source, moves it in the list, or takes it out of the choices. Orders that carry it keep it. */
+export async function updateLeadOrigin(ctx: Ctx, input: { originId: string; label: string; isActive: boolean; sortOrder: number }): Promise<void> {
+  requireCap(ctx, 'config.manage');
+  const label = input.label.trim();
+  if (!label) throw new ValidationError('Enter a name.', { label: 'Enter a name.' });
+  await inTx(ctx.db, async (tx) => {
+    const origin = await tx.leadOrigin.findUnique({ where: { id: input.originId } });
+    if (!origin) throw new NotFoundError('Lead source not found.');
+    const next = { label: label.slice(0, 100), isActive: input.isActive, sortOrder: Number.isFinite(input.sortOrder) ? Math.trunc(input.sortOrder) : origin.sortOrder };
+    if (!next.isActive && origin.isActive && (await tx.leadOrigin.count({ where: { isActive: true } })) <= 1) {
+      throw new ConflictError('At least one lead source has to stay in use, or no job could be opened.');
+    }
+    const change = diff({ label: origin.label, isActive: origin.isActive, sortOrder: origin.sortOrder }, next);
+    if (!change) return;
+    await tx.leadOrigin.update({ where: { id: origin.id }, data: next });
+    await audit(tx, ctx, { action: 'lead_origin.update', entityType: 'LeadOrigin', entityId: origin.id, summary: `Updated lead source ${origin.key}`, ...change });
   });
 }

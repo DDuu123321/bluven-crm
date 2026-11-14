@@ -24,9 +24,9 @@ describe('ready-made e-mail texts', () => {
   });
 
   it('come with a few to start from, filled in for the order and the person writing', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const texts = await templatesForOrder(as(w.sam, w.clock), orderId);
-    expect(texts.map((t) => t.name)).toEqual(['First contact', 'Ask for the bill and photos', 'Follow up on a quote', 'After signing: deposit and next steps']);
+    expect(texts.map((t) => t.name)).toEqual(['First contact', 'Ask for the bill and photos', 'Follow up on a quote', 'Going ahead: deposit and next steps']);
     expect(texts[0]!.body).toContain('Hi Jane,');
     expect(texts[0]!.body).toContain('about solar for 12 Sample St, Parramatta NSW 2150.');
     expect(texts[0]!.body).toContain('Regards,\nSam\nBluven');
@@ -48,8 +48,8 @@ describe('ready-made e-mail texts', () => {
     await expect(createEmailTemplate(manager, { ...input, subject: 'For {{customer}}' })).rejects.toMatchObject({ fieldErrors: { subject: expect.stringContaining('{{first_name}}') } });
 
     const { id } = await createEmailTemplate(manager, input);
-    expect((await listEmailTemplates(manager)).map((t) => t.name)).toEqual(['Site visit', 'First contact', 'Ask for the bill and photos', 'Follow up on a quote', 'After signing: deposit and next steps']);
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    expect((await listEmailTemplates(manager)).map((t) => t.name)).toEqual(['Site visit', 'First contact', 'Ask for the bill and photos', 'Follow up on a quote', 'Going ahead: deposit and next steps']);
+    const { orderId } = await orderAt(w, 'OPENED');
     const mine = (await templatesForOrder(as(w.sam, w.clock), orderId))[0]!;
     expect(mine).toMatchObject({ name: 'Site visit', subject: 'Your site visit at 12 Sample St, Parramatta NSW 2150', body: 'Hi Jane,\n\nI will come by on [day].\n\nSam' });
 

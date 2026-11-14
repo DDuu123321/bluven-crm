@@ -191,7 +191,7 @@ function Message({ email, compose, filing, labels }: { email: EmailView; compose
                     <FormMessage className="py-1 text-xs" />
                   </ActionForm>
                   {filing.canArchive && (
-                    <Modal trigger="Signed contract…" title="Archive as the signed contract" size="sm" variant={suggestion?.contract ? 'primary' : 'secondary'} description={`“${a.fileName}” becomes the contract of this order.`}>
+                    <Modal trigger="Signed copy…" title="File as the signed copy" size="sm" variant={suggestion?.contract ? 'primary' : 'secondary'} description={`“${a.fileName}” becomes the signed copy of this order. It is optional: the deposit and the push to operations do not wait for it.`}>
                       <ActionForm action={archiveAttachmentAction.bind(null, a.id)} className="space-y-4">
                         <div>
                           <Label htmlFor={`sc-quote-${a.id}`}>Quote version the customer signed</Label>

@@ -2,14 +2,15 @@
 
 export const ORDER_STAGES = [
   'NEW',
-  'CONTACTED',
-  'QUOTED',
-  'SIGNED',
-  'DEPOSIT_PENDING',
-  'DEPOSIT_CONFIRMED',
+  'FOLLOW_UP',
+  'DESIGN',
+  'PROPOSAL_SENT',
+  'DEPOSIT_PAID',
   'PUSHED',
   'RETURNED',
-  'HANDED_OVER',
+  'IN_PROGRESS',
+  'INSTALLED',
+  'COMPLETED',
 ] as const;
 export type OrderStage = (typeof ORDER_STAGES)[number];
 
@@ -18,14 +19,29 @@ export type SideState = (typeof SIDE_STATES)[number];
 
 export const STAGE_LABEL: Record<OrderStage, string> = {
   NEW: 'New',
-  CONTACTED: 'Contacted',
-  QUOTED: 'Quoted',
-  SIGNED: 'Signed',
-  DEPOSIT_PENDING: 'Deposit pending',
-  DEPOSIT_CONFIRMED: 'Deposit confirmed',
+  FOLLOW_UP: 'Following up',
+  DESIGN: 'Design',
+  PROPOSAL_SENT: 'Proposal sent',
+  DEPOSIT_PAID: 'Deposit paid',
   PUSHED: 'Pushed to Ops',
   RETURNED: 'Returned by Ops',
-  HANDED_OVER: 'Handed over',
+  IN_PROGRESS: 'With operations',
+  INSTALLED: 'Installed, balance due',
+  COMPLETED: 'Completed',
+};
+
+/** What each stage means, in a sentence, for pages that explain where an order stands. */
+export const STAGE_HINT: Record<OrderStage, string> = {
+  NEW: 'Nobody has opened this job yet.',
+  FOLLOW_UP: 'The customer is being followed up.',
+  DESIGN: 'The customer wants a proposal: the system is being designed in Pylon.',
+  PROPOSAL_SENT: 'The proposal is with the customer. Keep following up until the deposit is paid.',
+  DEPOSIT_PAID: 'The deposit is paid. Complete the folder and push the order to operations.',
+  PUSHED: 'Waiting for operations to accept the order.',
+  RETURNED: 'Operations sent the order back. See their reason, then push it again.',
+  IN_PROGRESS: 'Operations is arranging the installation.',
+  INSTALLED: 'The job is done. Waiting for the final payment.',
+  COMPLETED: 'The final payment has arrived and the job is closed.',
 };
 
 export const SIDE_STATE_LABEL: Record<SideState, string> = {
@@ -37,48 +53,55 @@ export const SIDE_STATE_LABEL: Record<SideState, string> = {
 
 /** The facts a stage is derived from. */
 export interface StageFacts {
-  /** Staff have reached out at least once. */
-  contacted: boolean;
-  /** A quote has been sent to the customer. */
-  quoted: boolean;
-  /** A signed contract is archived and not voided. */
-  hasContract: boolean;
+  /** The salesperson has opened the job. */
+  opened: boolean;
+  /** The customer's intent is clear and the design has started. */
+  designing: boolean;
+  /** A proposal has been sent to the customer. */
+  proposalSent: boolean;
   /** State of the open deposit, if any. Rejected and withdrawn deposits count as NONE. */
   deposit: 'NONE' | 'PENDING' | 'CONFIRMED';
   /** Decision on the most recent handoff package. Withdrawn packages count as NONE. */
   handoff: 'NONE' | 'PENDING' | 'RETURNED' | 'ACCEPTED';
+  /** Operations has marked the installation as done. */
+  jobDone: boolean;
+  /** The final payment has arrived. */
+  completed: boolean;
 }
 
 /**
  * The single source of truth for an order's stage.
  *
  * Deriving the stage from facts (rather than nudging it forward event by event) keeps it correct
- * when events arrive out of order, when finance rejects a deposit, or when a contract is voided.
+ * when events arrive out of order, when a deposit record is withdrawn, or when operations sends
+ * an order back.
  */
 export function deriveStage(f: StageFacts): OrderStage {
-  if (f.handoff === 'ACCEPTED') return 'HANDED_OVER';
+  if (f.handoff === 'ACCEPTED') {
+    if (f.completed) return 'COMPLETED';
+    return f.jobDone ? 'INSTALLED' : 'IN_PROGRESS';
+  }
   if (f.handoff === 'PENDING') return 'PUSHED';
   if (f.handoff === 'RETURNED') return 'RETURNED';
-  if (f.hasContract) {
-    if (f.deposit === 'CONFIRMED') return 'DEPOSIT_CONFIRMED';
-    if (f.deposit === 'PENDING') return 'DEPOSIT_PENDING';
-    return 'SIGNED';
-  }
-  if (f.quoted) return 'QUOTED';
-  if (f.contacted) return 'CONTACTED';
-  return 'NEW';
+  // Nothing counts before the job has been opened. A design or a payment that reached the order
+  // from outside (Pylon knows the order by its number) waits there until someone takes the job up.
+  if (!f.opened) return 'NEW';
+  if (f.deposit !== 'NONE') return 'DEPOSIT_PAID';
+  if (f.proposalSent) return 'PROPOSAL_SENT';
+  return f.designing ? 'DESIGN' : 'FOLLOW_UP';
 }
 
 /** Position on the progress tracker. RETURNED shares a step with PUSHED. */
 export const STAGE_STEPS: { key: OrderStage; label: string }[] = [
   { key: 'NEW', label: 'New' },
-  { key: 'CONTACTED', label: 'Contacted' },
-  { key: 'QUOTED', label: 'Quoted' },
-  { key: 'SIGNED', label: 'Signed' },
-  { key: 'DEPOSIT_PENDING', label: 'Deposit pending' },
-  { key: 'DEPOSIT_CONFIRMED', label: 'Deposit confirmed' },
-  { key: 'PUSHED', label: 'With Ops' },
-  { key: 'HANDED_OVER', label: 'Handed over' },
+  { key: 'FOLLOW_UP', label: 'Following up' },
+  { key: 'DESIGN', label: 'Design' },
+  { key: 'PROPOSAL_SENT', label: 'Proposal sent' },
+  { key: 'DEPOSIT_PAID', label: 'Deposit paid' },
+  { key: 'PUSHED', label: 'Pushed' },
+  { key: 'IN_PROGRESS', label: 'With operations' },
+  { key: 'INSTALLED', label: 'Installed' },
+  { key: 'COMPLETED', label: 'Completed' },
 ];
 
 export function stageStepIndex(stage: OrderStage): number {
@@ -86,45 +109,43 @@ export function stageStepIndex(stage: OrderStage): number {
   return STAGE_STEPS.findIndex((s) => s.key === key);
 }
 
-const SALES_EDITABLE: ReadonlySet<OrderStage> = new Set([
-  'NEW',
-  'CONTACTED',
-  'QUOTED',
-  'SIGNED',
-  'DEPOSIT_PENDING',
-  'DEPOSIT_CONFIRMED',
-  'RETURNED',
-]);
+const SALES_EDITABLE: ReadonlySet<OrderStage> = new Set(['NEW', 'FOLLOW_UP', 'DESIGN', 'PROPOSAL_SENT', 'DEPOSIT_PAID', 'RETURNED']);
 
 /** Stages in which the sales side may still change the order's content. */
 export function isSalesEditableStage(stage: OrderStage): boolean {
   return SALES_EDITABLE.has(stage);
 }
 
-const IDLE_TRACKED: ReadonlySet<OrderStage> = new Set([
-  'NEW',
-  'CONTACTED',
-  'QUOTED',
-  'SIGNED',
-  'DEPOSIT_CONFIRMED',
-  'RETURNED',
-]);
+/** The stages after operations has accepted an order, for filters. */
+export const OPERATIONS_STAGES: OrderStage[] = ['IN_PROGRESS', 'INSTALLED', 'COMPLETED'];
 
-/** Stages in which the ball is in the salesperson's court. Waiting on finance or ops does not count. */
+/** Operations has accepted the order: the sale is made, and what happens next is theirs. */
+export function isWithOperations(stage: OrderStage): boolean {
+  return OPERATIONS_STAGES.includes(stage);
+}
+
+const IDLE_TRACKED: ReadonlySet<OrderStage> = SALES_EDITABLE;
+
+/** Stages in which the ball is in the salesperson's court. Waiting on operations does not count. */
 export function isIdleTrackedStage(stage: OrderStage): boolean {
   return IDLE_TRACKED.has(stage);
 }
 
-const AUTO_RETURN: ReadonlySet<OrderStage> = new Set(['NEW', 'CONTACTED', 'QUOTED']);
+const AUTO_RETURN: ReadonlySet<OrderStage> = new Set(['NEW', 'FOLLOW_UP', 'DESIGN', 'PROPOSAL_SENT']);
 
-/** Only orders that have not been signed yet are taken back into the pool automatically. */
+/** Only orders without a deposit are taken back into the pool automatically. */
 export function isAutoReturnStage(stage: OrderStage): boolean {
   return AUTO_RETURN.has(stage);
 }
 
-/** "In progress": not lost, not cancelled and not yet accepted by operations. */
+/** "In progress" for sales: not lost, not cancelled and not yet accepted by operations. */
 export function isOpenOrder(o: { stage: OrderStage; sideState: SideState }): boolean {
-  return o.sideState !== 'LOST' && o.sideState !== 'CANCELLED' && o.stage !== 'HANDED_OVER';
+  return o.sideState !== 'LOST' && o.sideState !== 'CANCELLED' && !isWithOperations(o.stage);
+}
+
+/** Still being worked on by anyone: not lost, not cancelled and not completed. */
+export function isActiveOrder(o: { stage: OrderStage; sideState: SideState }): boolean {
+  return o.sideState !== 'LOST' && o.sideState !== 'CANCELLED' && o.stage !== 'COMPLETED';
 }
 
 export type Check = { ok: true } | { ok: false; reason: string };
@@ -141,7 +162,7 @@ export interface SideStateInput {
 export function canMarkLost(o: SideStateInput): Check {
   if (o.sideState === 'LOST') return no('This order is already marked as lost.');
   if (o.sideState === 'CANCELLED') return no('This order has been cancelled.');
-  if (o.stage === 'PUSHED' || o.stage === 'HANDED_OVER') return no('This order is with operations.');
+  if (o.stage === 'PUSHED' || isWithOperations(o.stage)) return no('This order is with operations.');
   if (o.deposit !== 'NONE') {
     return no('A deposit has been recorded for this order. Cancel the order instead of marking it lost.');
   }
@@ -152,7 +173,7 @@ export function canMarkLost(o: SideStateInput): Check {
 export function canCancel(o: SideStateInput): Check {
   if (o.sideState === 'CANCELLED') return no('This order is already cancelled.');
   if (o.sideState === 'LOST') return no('This order is marked as lost.');
-  if (o.stage === 'HANDED_OVER') return no('This order has been handed over to operations.');
+  if (o.stage === 'INSTALLED' || o.stage === 'COMPLETED') return no('The installation is done. This order can no longer be cancelled.');
   if (o.deposit === 'NONE') {
     return no('No deposit has been recorded for this order. Mark it as lost instead of cancelling it.');
   }
@@ -161,7 +182,7 @@ export function canCancel(o: SideStateInput): Check {
 
 export function canHold(o: SideStateInput): Check {
   if (o.sideState !== 'NONE') return no(`This order is ${SIDE_STATE_LABEL[o.sideState].toLowerCase()}.`);
-  if (o.stage === 'PUSHED' || o.stage === 'HANDED_OVER') return no('This order is with operations.');
+  if (o.stage === 'PUSHED' || isWithOperations(o.stage)) return no('This order is with operations.');
   // Once an order has been to operations it is not parked: what they asked for gets fixed and it goes back.
   if (o.stage === 'RETURNED') return no('This order came back from operations. Fix what they asked for and push it again.');
   return ok;
@@ -187,8 +208,8 @@ export interface IdleThresholds {
 
 export const DEFAULT_IDLE_THRESHOLDS: IdleThresholds = {
   remindOwnerDays: 5,
-  remindManagerDays: 10,
-  returnToPoolDays: 15,
+  remindManagerDays: 8,
+  returnToPoolDays: 10,
 };
 
 export type IdleAction = 'NONE' | 'REMIND_OWNER' | 'REMIND_MANAGER' | 'RETURN_TO_POOL';
@@ -222,8 +243,8 @@ export function evaluateIdle(o: IdleInput, now: Date, t: IdleThresholds): IdleAc
 
 /**
  * How idle an order is, for every list and figure that shows it: 0 not idle, 1 past the day the
- * salesperson is reminded, 2 past the day the managers are told, 3 past the day an unsigned order
- * goes back to the pool. Counted from the last staff activity, whether or not a reminder has
+ * salesperson is reminded, 2 past the day the managers are told, 3 past the day an order without a
+ * deposit goes back to the pool. Counted from the last staff activity, whether or not a reminder has
  * gone out yet, so a figure never depends on when the reminder job last ran.
  */
 export type IdleTier = 0 | 1 | 2 | 3;

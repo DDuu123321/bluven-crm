@@ -107,6 +107,11 @@ export async function docType(key: string) {
   return testDb().documentType.findUniqueOrThrow({ where: { key } });
 }
 
+/** One of the lead sources a salesperson chooses from when opening a job. */
+export async function leadOrigin(key: string) {
+  return testDb().leadOrigin.findUniqueOrThrow({ where: { key } });
+}
+
 export async function source(key: string) {
   return testDb().leadSource.findUniqueOrThrow({ where: { key } });
 }

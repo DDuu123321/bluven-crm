@@ -7,6 +7,7 @@ export * from './zoho/client';
 export * from './mail/accounts';
 export * from './mail/sync';
 export * from './mail/messages';
+export * from './mail/notices';
 export * from './ai/model';
 export * from './ai/runs';
 export * from './ai/context';

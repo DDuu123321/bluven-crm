@@ -13,6 +13,7 @@ import {
   getSettings,
   idleTier,
   isManager,
+  isWithOperations,
   listPipelineOrders,
   listSalespeople,
   pipelineStageCounts,
@@ -28,9 +29,10 @@ import { requireSession } from '@/lib/session';
 export const metadata: Metadata = { title: 'Orders' };
 
 const VIEW_LABEL: Record<OrderListView, string> = {
-  active: 'In progress',
+  active: 'With sales',
   on_hold: 'On hold',
-  handed_over: 'Handed over',
+  operations: 'With operations',
+  completed: 'Completed',
   lost: 'Lost',
   cancelled: 'Cancelled',
   all: 'Everything',
@@ -46,20 +48,30 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   const stage = (ORDER_STAGES as readonly string[]).includes(one(sp.stage) ?? '') ? (one(sp.stage) as OrderStage) : null;
   const owner = manager ? (one(sp.owner) ?? null) : null;
   const sourceId = one(sp.source) ?? null;
+  const originId = one(sp.origin) ?? null;
   const q = one(sp.q) ?? '';
-  // 1: past the day the salesperson is reminded. 2: past the day the managers are told. 3: past the day an unsigned order goes back to the pool.
+  // 1: past the day the salesperson is reminded. 2: past the day the managers are told. 3: past the day an order without a deposit goes back to the pool.
   const idle = (['1', '2', '3'].includes(one(sp.idle) ?? '') ? Number(one(sp.idle)) : null) as 1 | 2 | 3 | null;
   const idleOnly = idle !== null;
   const page = Number(one(sp.page) ?? '1') || 1;
 
-  const [result, counts, salespeople, sources, settings] = await Promise.all([
-    listPipelineOrders(ctx, { view, stage, owner, sourceId, q, idle, page }),
+  const [result, counts, salespeople, sources, origins, settings] = await Promise.all([
+    listPipelineOrders(ctx, { view, stage, owner, sourceId, leadOriginId: originId, q, idle, page }),
     pipelineStageCounts(ctx, owner),
     manager ? listSalespeople(ctx.db) : Promise.resolve([]),
     ctx.db.leadSource.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+    ctx.db.leadOrigin.findMany({ orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }], select: { id: true, label: true, isActive: true } }),
     getSettings(ctx.db),
   ]);
-  const base = { view: view === 'active' ? undefined : view, stage: stage ?? undefined, owner: owner ?? undefined, source: sourceId ?? undefined, q: q || undefined, idle: idle ? String(idle) : undefined };
+  const base = {
+    view: view === 'active' ? undefined : view,
+    stage: stage ?? undefined,
+    owner: owner ?? undefined,
+    source: sourceId ?? undefined,
+    origin: originId ?? undefined,
+    q: q || undefined,
+    idle: idle ? String(idle) : undefined,
+  };
   const now = new Date();
   const idleFrom = [settings.idle.remindOwnerDays, settings.idle.remindManagerDays, settings.idle.returnToPoolDays] as const;
 
@@ -67,7 +79,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     <>
       <PageHeader
         title={manager ? 'All orders' : 'My orders'}
-        description={manager ? 'Every order that has a salesperson. New leads waiting for one are under Unassigned leads.' : 'The orders assigned to you.'}
+        description={manager ? 'Every order that has a salesperson, from the lead to the closed job. New leads waiting for a salesperson are under Unassigned leads.' : 'The leads and orders assigned to you, from the lead to the closed job.'}
         actions={
           <LinkButton href="/orders/new" variant="primary">
             New lead
@@ -111,11 +123,26 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             </div>
           )}
           <div>
+            <label htmlFor="origin" className="mb-1 block text-xs font-medium text-slate-600">
+              Lead source
+            </label>
+            <Select id="origin" name="origin" defaultValue={originId ?? ''}>
+              <option value="">Any</option>
+              {origins.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                  {o.isActive ? '' : ' (no longer offered)'}
+                </option>
+              ))}
+              <option value="none">Not recorded</option>
+            </Select>
+          </div>
+          <div>
             <label htmlFor="source" className="mb-1 block text-xs font-medium text-slate-600">
-              Source
+              Came in through
             </label>
             <Select id="source" name="source" defaultValue={sourceId ?? ''}>
-              <option value="">Any source</option>
+              <option value="">Any channel</option>
               {sources.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}
@@ -127,7 +154,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           <button type="submit" className={buttonClass('secondary')}>
             Apply
           </button>
-          {(q || owner || sourceId || stage || idleOnly || view !== 'active') && (
+          {(q || owner || sourceId || originId || stage || idleOnly || view !== 'active') && (
             <Link href="/orders" className="pb-2 text-xs text-slate-500 hover:text-slate-800">
               Clear filters
             </Link>
@@ -138,7 +165,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             <Chip href={withParams('/orders', { ...base, stage: undefined, page: undefined })} active={!stage && !idleOnly}>
               All stages
             </Chip>
-            {ORDER_STAGES.filter((s) => s !== 'HANDED_OVER').map((s) => (
+            {ORDER_STAGES.filter((s) => !isWithOperations(s)).map((s) => (
               <Chip key={s} href={withParams('/orders', { ...base, stage: s, idle: undefined, page: undefined })} active={stage === s} count={counts[s]}>
                 {STAGE_LABEL[s]}
               </Chip>
@@ -162,7 +189,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           </EmptyState>
         ) : (
           <>
-            <Table head={['Order', 'Contact', 'Address', 'Stage', ...(manager ? ['Salesperson'] : []), 'Source', 'Last activity', 'Next task']}>
+            <Table head={['Order', 'Contact', 'Address', 'Stage', ...(manager ? ['Salesperson'] : []), 'Lead source', 'Last activity', 'Next task']}>
               {result.rows.map((o) => (
                 <tr key={o.id} className="hover:bg-slate-50/60">
                   <Td>
@@ -178,11 +205,14 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <Td className="max-w-56 text-slate-600">{formatAddress(o.property) || <span className="text-slate-300">—</span>}</Td>
                   <Td>
                     <StageBadge stage={o.stage} sideState={o.sideState} />
-                    {o.returnCount > 0 && o.stage !== 'HANDED_OVER' && <div className="mt-1 text-xs text-slate-500">Returned {o.returnCount}×</div>}
+                    {o.returnCount > 0 && !isWithOperations(o.stage) && <div className="mt-1 text-xs text-slate-500">Returned {o.returnCount}×</div>}
                     {o.sideState === 'ON_HOLD' && o.onHoldUntil && <div className="mt-1 text-xs text-slate-500">until {fmtDate(o.onHoldUntil)}</div>}
                   </Td>
                   {manager && <Td className="text-slate-600">{o.owner?.name ?? <Badge tone="amber">Unassigned</Badge>}</Td>}
-                  <Td className="text-slate-600">{o.source.name}</Td>
+                  <Td className="text-slate-600">
+                    {o.leadOrigin?.label ?? <span className="text-slate-400">Not recorded</span>}
+                    <div className="text-xs text-slate-500">via {o.source.name}</div>
+                  </Td>
                   <Td className="text-slate-600">
                     <span title={fmtDateTime(o.lastStaffActivityAt)}>{relativeTime(o.lastStaffActivityAt, now)}</span>
                     {idleTier(o, now, settings.idle) > 0 && (

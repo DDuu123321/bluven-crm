@@ -1,171 +1,71 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { can, getConfig } from '@bluven/core';
-import { getBluvenPullState } from '@bluven/integrations';
-import { ActionButton, ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
-import { Badge, Card, CardBody, CardHeader, Checkbox, Input, Label, PageHeader, Select, Table, Td } from '@/components/ui';
-import { fmtDate, fmtDateTime } from '@/lib/fmt';
+import { can } from '@bluven/core';
+import { ActionForm, CancelButton, FieldError, FormMessage, Modal, SubmitButton } from '@/components/client';
+import { Badge, Card, Checkbox, Input, Label, PageHeader, Table, Td } from '@/components/ui';
 import { requireSession } from '@/lib/session';
-import { createLeadSourceAction, revokePreviousTokenAction, rotateTokenAction, updateLeadSourceAction } from '../actions';
-import { TokenButton } from './token-button';
+import { createLeadOriginAction, updateLeadOriginAction } from '../actions';
 
 export const metadata: Metadata = { title: 'Lead sources' };
 
-const KIND_LABEL = { BLUVEN: 'Bluven website', EXTERNAL: 'External system', CSV: 'File import', MANUAL: 'Manual entry' } as const;
-
-export default async function LeadSourcesPage() {
+export default async function LeadOriginsPage() {
   const { user, ctx } = await requireSession();
-  if (!can(user, 'admin.leadSources')) notFound();
-  const sources = await ctx.db.leadSource.findMany({ orderBy: [{ kind: 'asc' }, { name: 'asc' }], include: { _count: { select: { orders: true } } } });
-  const endpoint = `${getConfig().appUrl}/api/intake/leads`;
-  const now = new Date();
-  const website = getConfig().bluvenLeads;
-  const pulling = !!(website.url && website.key);
-  const pull = pulling ? await getBluvenPullState(ctx.db) : null;
-  // The worker asks once a minute. Several minutes of silence mean it is not running.
-  const stale = !!pull?.lastRunAt && now.getTime() - new Date(pull.lastRunAt).getTime() > 5 * 60_000;
+  if (!can(user, 'config.manage')) notFound();
+  const origins = await ctx.db.leadOrigin.findMany({ orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }], include: { _count: { select: { orders: true } } } });
 
   return (
     <>
       <PageHeader
         title="Lead sources"
-        description="Where leads come from. Systems that send leads automatically each get their own token, so one source can be switched off without affecting the others."
+        description="Where a customer came from. The salesperson chooses one from this list when opening a job, and can add who exactly in a note. Partners are paid by it, and the dashboard counts deposits by it. It is never worked out automatically."
         actions={
-          <Modal trigger="Add source" title="Add a lead source" variant="primary" size="md">
-            <ActionForm action={createLeadSourceAction} className="space-y-4">
+          <Modal trigger="Add lead source" title="Add a lead source" variant="primary" size="md">
+            <ActionForm action={createLeadOriginAction} className="space-y-4">
               <div>
-                <Label htmlFor="src-name">Name</Label>
-                <Input id="src-name" name="name" required placeholder="For example: Facebook campaign, Partner referrals" />
-                <FieldError name="name" />
-              </div>
-              <div>
-                <Label htmlFor="src-kind">How do the leads arrive?</Label>
-                <Select id="src-kind" name="kind" defaultValue="EXTERNAL">
-                  <option value="EXTERNAL">Sent by another system over the API</option>
-                  <option value="CSV">Uploaded as CSV files</option>
-                </Select>
-                <FieldError name="kind" />
-                <p className="mt-1.5 text-xs text-slate-500">
-                  Another company&rsquo;s system gets its own token and can only hand leads in. When one of its leads is a repeat of a customer you already have, it is told so but not which order, and the details it sent go on the timeline without
-                  changing the customer&rsquo;s contact details. Previews and history loads are reserved for the Bluven website.
-                </p>
+                <Label htmlFor="new-origin">Name</Label>
+                <Input id="new-origin" name="label" required maxLength={100} placeholder="For example the name of a partner" />
+                <FieldError name="label" />
               </div>
               <FormMessage />
               <div className="flex justify-end gap-2">
                 <CancelButton />
-                <SubmitButton>Add source</SubmitButton>
+                <SubmitButton>Add</SubmitButton>
               </div>
             </ActionForm>
           </Modal>
         }
       />
-
-      <Card className="mb-4">
-        <CardHeader
-          title={
-            <span className="flex flex-wrap items-center gap-2">
-              Bluven website
-              {!pulling ? <Badge>Not connected</Badge> : !pull ? <Badge tone="amber">Waiting for the first check</Badge> : pull.lastError ? <Badge tone="red">Failing</Badge> : stale ? <Badge tone="amber">Not checking</Badge> : <Badge tone="green">Connected</Badge>}
-            </span>
-          }
-          description="The CRM collects new quote requests and assessments from the website once a minute. The website keeps every lead, so nothing is lost while the CRM is offline."
-        />
-        <CardBody className="space-y-1.5 text-sm text-slate-600">
-          {!pulling ? (
-            <p>
-              To connect, set <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">BLUVEN_LEADS_URL</code> and <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">BLUVEN_LEADS_KEY</code> on
-              the CRM server, with the key equal to <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">CRM_SYNC_KEY</code> on the website. The steps are in docs/deployment-guide.md.
-            </p>
-          ) : (
-            <>
-              <p>
-                Collecting from <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">{new URL(website.url).host}</code>
-                {pull?.lastOkAt ? ` · last successful check ${fmtDateTime(new Date(pull.lastOkAt))}` : ''}
-                {pull?.lastLeadAt ? ` · last lead received ${fmtDateTime(new Date(pull.lastLeadAt))}` : ''}
-                {pull ? ` · ${pull.imported} lead${pull.imported === 1 ? '' : 's'} taken over so far` : ''}
-              </p>
-              {pull?.lastError && (
-                <p className="font-medium text-red-700">
-                  {pull.lastError} ({pull.consecutiveFailures} failed check{pull.consecutiveFailures === 1 ? '' : 's'} in a row)
-                </p>
-              )}
-              {!pull?.lastError && stale && <p className="font-medium text-amber-700">No check for more than five minutes. Is the worker process running?</p>}
-            </>
-          )}
-        </CardBody>
-      </Card>
-
-      <Card className="mb-4">
-        <CardHeader title="Sending leads to the CRM" description="For other systems, and as an alternative way for the website to hand leads over." />
-        <CardBody className="space-y-1.5 text-sm text-slate-600">
-          <p>
-            Endpoint: <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">POST {endpoint}</code>
-          </p>
-          <p>
-            Header: <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-900">Authorization: Bearer &lt;token&gt;</code>
-          </p>
-          <p>The full contract, including the fields, limits and retry rules, is in docs/bluven-lead-forwarding-spec.md in the repository.</p>
-        </CardBody>
-      </Card>
-
       <Card>
-        <Table head={['Source', 'Type', 'Leads', 'Token', 'Status', '']}>
-          {sources.map((s) => {
-            const api = s.kind === 'BLUVEN' || s.kind === 'EXTERNAL';
-            const overlap = s.prevTokenHash && s.prevTokenExpiresAt && s.prevTokenExpiresAt > now;
-            return (
-              <tr key={s.id}>
-                <Td>
-                  <div className="font-medium text-slate-900">{s.name}</div>
-                  <div className="font-mono text-xs text-slate-400">{s.key}</div>
-                </Td>
-                <Td className="text-slate-600">{KIND_LABEL[s.kind]}</Td>
-                <Td className="tabular-nums text-slate-600">{s._count.orders}</Td>
-                <Td className="text-slate-600">
-                  {!api ? (
-                    <span className="text-slate-300">not needed</span>
-                  ) : s.tokenHash ? (
-                    <>
-                      <span className="font-mono text-xs">…{s.tokenLast4}</span>
-                      <div className="text-xs text-slate-500">issued {fmtDate(s.tokenCreatedAt)}</div>
-                      {overlap && (
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700">
-                          Previous token valid until {fmtDateTime(s.prevTokenExpiresAt)}
-                          <ActionButton action={revokePreviousTokenAction.bind(null, s.id)} size="sm" variant="ghost" confirm="Stop accepting the previous token now?">
-                            Revoke now
-                          </ActionButton>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <Badge tone="amber">No token yet</Badge>
-                  )}
-                </Td>
-                <Td>{s.isActive ? <Badge tone="green">Active</Badge> : <Badge tone="red">Switched off</Badge>}</Td>
-                <Td>
-                  <div className="flex flex-wrap items-start justify-end gap-1.5">
-                    {api && <TokenButton action={rotateTokenAction.bind(null, s.id)} hasToken={!!s.tokenHash} sourceName={s.name} />}
-                    <Modal trigger="Edit" title={`Edit ${s.name}`} size="sm">
-                      <ActionForm action={updateLeadSourceAction.bind(null, s.id)} keepValues className="space-y-4">
-                        <div>
-                          <Label htmlFor={`src-${s.id}`}>Name</Label>
-                          <Input id={`src-${s.id}`} name="name" defaultValue={s.name} required />
-                          <FieldError name="name" />
-                        </div>
-                        <Checkbox name="isActive" defaultChecked={s.isActive} disabled={s.kind === 'MANUAL'} label="Active. Untick to stop accepting leads from this source; its token is refused at once." />
-                        {s.kind === 'MANUAL' && <input type="hidden" name="isActive" value="on" />}
-                        <FormMessage />
-                        <div className="flex justify-end gap-2">
-                          <CancelButton />
-                          <SubmitButton>Save</SubmitButton>
-                        </div>
-                      </ActionForm>
-                    </Modal>
-                  </div>
-                </Td>
-              </tr>
-            );
-          })}
+        <Table head={['Lead source', 'Orders', 'Status', '']}>
+          {origins.map((o) => (
+            <tr key={o.id} className={o.isActive ? '' : 'opacity-60'}>
+              <Td className="font-medium text-slate-900">{o.label}</Td>
+              <Td className="tabular-nums text-slate-600">{o._count.orders}</Td>
+              <Td>{o.isActive ? <Badge tone="green">In use</Badge> : <Badge>Hidden</Badge>}</Td>
+              <Td className="text-right">
+                <Modal trigger="Edit" title="Edit lead source" size="sm">
+                  <ActionForm action={updateLeadOriginAction.bind(null, o.id)} keepValues className="space-y-4">
+                    <div>
+                      <Label htmlFor={`origin-${o.id}`}>Name</Label>
+                      <Input id={`origin-${o.id}`} name="label" defaultValue={o.label} required maxLength={100} />
+                      <FieldError name="label" />
+                    </div>
+                    <div className="max-w-40">
+                      <Label htmlFor={`origin-sort-${o.id}`}>Position in the list</Label>
+                      <Input id={`origin-sort-${o.id}`} name="sortOrder" inputMode="numeric" defaultValue={o.sortOrder} />
+                      <FieldError name="sortOrder" />
+                    </div>
+                    <Checkbox name="isActive" defaultChecked={o.isActive} label="In use. Untick to take it out of the choices; orders that carry it keep it." />
+                    <FormMessage />
+                    <div className="flex justify-end gap-2">
+                      <CancelButton />
+                      <SubmitButton>Save</SubmitButton>
+                    </div>
+                  </ActionForm>
+                </Modal>
+              </Td>
+            </tr>
+          ))}
         </Table>
       </Card>
     </>

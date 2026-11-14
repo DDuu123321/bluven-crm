@@ -1,5 +1,5 @@
 // Document retention. Documents are kept for a number of years counted from the day their order
-// ended (handed over, lost or cancelled). An order that is still open has no end, and nothing of
+// ended (completed, lost or cancelled). An order that is still open has no end, and nothing of
 // it expires. Shortly before the end of the period the salesperson and the managers are asked to
 // choose: keep for another year, or delete. Deleting is a soft delete; the file leaves storage 30
 // days later. Contract and deposit files, and every document type an admin has marked "never
@@ -37,7 +37,7 @@ const EXEMPT_TYPE_KEYS = [DOC_TYPE.signedContract, DOC_TYPE.depositProof];
 const at = (date: Date): Prisma.Sql => Prisma.sql`(${date.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;
 
 /** When the order "o" ended, NULL while it is open. The SQL form of orderEndedAt(). */
-const ENDED = Prisma.sql`(CASE WHEN o."sideState" = 'LOST' THEN o."lostAt" WHEN o."sideState" = 'CANCELLED' THEN o."cancelledAt" WHEN o."stage" = 'HANDED_OVER' THEN o."handedOverAt" END)`;
+const ENDED = Prisma.sql`(CASE WHEN o."sideState" = 'LOST' THEN o."lostAt" WHEN o."sideState" = 'CANCELLED' THEN o."cancelledAt" WHEN o."stage" = 'COMPLETED' THEN o."completedAt" END)`;
 
 /** The document "d" of type "t" is one that retention applies to. */
 const UNDER_RETENTION = Prisma.sql`d."deletedAt" IS NULL AND NOT t."neverAutoDelete" AND t."key" NOT IN (${Prisma.join(EXEMPT_TYPE_KEYS)})`;
@@ -152,7 +152,7 @@ export async function getOrderRetention(ctx: Ctx, orderId: string): Promise<Orde
   const now = nowOf(ctx);
   const order = await ctx.db.order.findUniqueOrThrow({
     where: { id: orderId },
-    select: { stage: true, sideState: true, lostAt: true, cancelledAt: true, handedOverAt: true, retentionRemindedFor: true, retentionRemindedAt: true, retentionNudgedAt: true },
+    select: { stage: true, sideState: true, lostAt: true, cancelledAt: true, completedAt: true, retentionRemindedFor: true, retentionRemindedAt: true, retentionNudgedAt: true },
   });
   const endedAt = orderEndedAt(order);
   const base = { endedAt, reminderDays: s.reminderDays };
@@ -170,7 +170,7 @@ export interface RetentionOrderRow {
   customerName: string;
   ownerName: string | null;
   /** How the order ended. */
-  ended: 'LOST' | 'CANCELLED' | 'HANDED_OVER';
+  ended: 'LOST' | 'CANCELLED' | 'COMPLETED';
   endedAt: Date;
   /** The earliest end of a retention period among its documents. */
   deadline: Date;
@@ -200,7 +200,7 @@ export async function listRetentionOrders(ctx: Ctx): Promise<{ rows: RetentionOr
       sideState: true,
       lostAt: true,
       cancelledAt: true,
-      handedOverAt: true,
+      completedAt: true,
       retentionRemindedFor: true,
       retentionRemindedAt: true,
       retentionNudgedAt: true,
@@ -219,7 +219,7 @@ export async function listRetentionOrders(ctx: Ctx): Promise<{ rows: RetentionOr
       orderNo: o.orderNo,
       customerName: fullName(o.customer),
       ownerName: o.owner?.name ?? null,
-      ended: o.sideState === 'LOST' ? 'LOST' : o.sideState === 'CANCELLED' ? 'CANCELLED' : 'HANDED_OVER',
+      ended: o.sideState === 'LOST' ? 'LOST' : o.sideState === 'CANCELLED' ? 'CANCELLED' : 'COMPLETED',
       endedAt,
       deadline: a.deadline,
       past: a.deadline.getTime() <= now.getTime(),
@@ -398,7 +398,7 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
           sideState: true,
           lostAt: true,
           cancelledAt: true,
-          handedOverAt: true,
+          completedAt: true,
           retentionRemindedFor: true,
           retentionRemindedAt: true,
           retentionNudgedAt: true,
@@ -416,7 +416,7 @@ export async function processRetention(ctx: Ctx): Promise<RetentionProcessResult
       const day = formatDate(deadline, tz);
       const n = expiring.length;
       const one = n === 1;
-      const how = order.sideState === 'LOST' ? 'lost' : order.sideState === 'CANCELLED' ? 'cancelled' : 'handed over to operations';
+      const how = order.sideState === 'LOST' ? 'lost' : order.sideState === 'CANCELLED' ? 'cancelled' : 'completed';
       const context = `${fullName(order.customer)}, ${how} on ${formatDate(endedAt, tz)}.`;
 
       if (step === 'REMIND') {

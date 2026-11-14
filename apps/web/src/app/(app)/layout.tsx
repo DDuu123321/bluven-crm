@@ -26,14 +26,21 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       ],
     });
   }
-  if (can(user, 'finance.deposits')) sections.push({ title: 'Finance', items: [{ href: '/finance', label: 'Deposits', countKey: 'deposits', urgent: true }] });
-  if (can(user, 'ops.handoffs')) sections.push({ title: 'Operations', items: [{ href: '/ops', label: 'Incoming orders', countKey: 'handoffs', urgent: true }] });
+  if (can(user, 'finance.deposits')) sections.push({ title: 'Finance', items: [{ href: '/finance', label: 'Payments', countKey: 'finance', urgent: true }] });
+  if (can(user, 'ops.handoffs')) sections.push({ title: 'Operations', items: [{ href: '/ops', label: 'Orders and jobs', countKey: 'handoffs', urgent: true }] });
   sections.push({ items: [{ href: '/notifications', label: 'Notifications', countKey: 'notifications' }] });
   const admin = [
-    ...(can(user, 'config.manage') ? [{ href: '/settings/checklist', label: 'Handoff checklist' }, { href: '/settings/lost-reasons', label: 'Lost reasons' }, { href: '/settings/email-templates', label: 'Email templates' }] : []),
+    ...(can(user, 'config.manage')
+      ? [
+          { href: '/settings/lead-sources', label: 'Lead sources' },
+          { href: '/settings/checklist', label: 'Handoff checklist' },
+          { href: '/settings/lost-reasons', label: 'Lost reasons' },
+          { href: '/settings/email-templates', label: 'Email templates' },
+        ]
+      : []),
     ...(can(user, 'admin.users') ? [{ href: '/settings/users', label: 'Users' }] : []),
-    ...(can(user, 'admin.leadSources') ? [{ href: '/settings/lead-sources', label: 'Lead sources' }] : []),
-    ...(can(user, 'admin.settings') ? [{ href: '/settings/rules', label: 'Rules' }] : []),
+    ...(can(user, 'admin.leadSources') ? [{ href: '/settings/intake-channels', label: 'Intake channels' }] : []),
+    ...(can(user, 'admin.settings') ? [{ href: '/settings/rules', label: 'Rules' }, { href: '/settings/operations', label: 'Operations and customer e-mails' }] : []),
     ...(can(user, 'admin.pylon') ? [{ href: '/settings/pylon', label: 'Pylon' }] : []),
     ...(isManager(user) ? [{ href: '/settings/email', label: 'Email' }, { href: '/settings/assistant', label: 'AI assistant' }] : []),
     ...(can(user, 'audit.view') ? [{ href: '/audit', label: 'Audit log' }] : []),

@@ -1,7 +1,9 @@
 'use server';
 
 import {
+  NOTICE_KINDS,
   createDocumentType,
+  createLeadOrigin,
   createLeadSource,
   createLostReason,
   createUser,
@@ -9,10 +11,13 @@ import {
   revokePreviousIntakeToken,
   rotateIntakeToken,
   updateDocumentType,
+  updateLeadOrigin,
   updateLeadSource,
   updateLostReason,
+  updateOperationsSettings,
   updateSettings,
   updateUser,
+  type OperationsSettings,
 } from '@bluven/core';
 import { createEmailTemplate, deleteEmailTemplate, updateAssistantSettings, updateEmailTemplate } from '@bluven/integrations';
 import { INVALID_REQUEST, runAction, validArgs } from '@/lib/action';
@@ -78,7 +83,7 @@ export async function resetPasswordAction(userId: string, formData: FormData): P
   });
 }
 
-// ---- lead sources
+// ---- intake channels
 
 export async function createLeadSourceAction(formData: FormData): Promise<ActionResult> {
   if (!validArgs(formData)) return INVALID_REQUEST;
@@ -107,6 +112,41 @@ export async function revokePreviousTokenAction(sourceId: string): Promise<Actio
   if (!validArgs(sourceId)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
     await revokePreviousIntakeToken(ctx, { sourceId });
+  });
+}
+
+// ---- lead sources (where a customer came from; chosen when a job is opened)
+
+export async function createLeadOriginAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await createLeadOrigin(ctx, { label: str(formData, 'label') });
+  });
+}
+
+export async function updateLeadOriginAction(originId: string, formData: FormData): Promise<ActionResult> {
+  if (!validArgs(originId, formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    await updateLeadOrigin(ctx, { originId, label: str(formData, 'label'), isActive: bool(formData, 'isActive'), sortOrder: int(formData, 'sortOrder') ?? NaN });
+  });
+}
+
+// ---- operations and the e-mails to customers
+
+export async function updateOperationsAction(formData: FormData): Promise<ActionResult> {
+  if (!validArgs(formData)) return INVALID_REQUEST;
+  return runAction(async (ctx) => {
+    const notices = Object.fromEntries(
+      NOTICE_KINDS.map((kind) => [kind, { enabled: bool(formData, `${kind}.enabled`), subject: str(formData, `${kind}.subject`), body: String(formData.get(`${kind}.body`) ?? '') }]),
+    ) as OperationsSettings['notices'];
+    await updateOperationsSettings(ctx, {
+      // An empty field is not a number: it reaches the service as one it refuses, with the message on the field.
+      rebateReminderDays: int(formData, 'rebateReminderDays') ?? NaN,
+      balanceDays: int(formData, 'balanceDays') ?? NaN,
+      mailboxUserId: str(formData, 'mailboxUserId') || null,
+      notices,
+    });
+    return { message: 'Saved.' };
   });
 }
 

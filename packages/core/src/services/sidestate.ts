@@ -2,13 +2,13 @@
 import type { RefundStatus, Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { getConfig } from '../config';
-import { can, canCancel, canHold, canMarkLost, canRestore, canResume, formatDateOnly, hasRole, isManager, todayDateOnly } from '../domain';
+import { can, canCancel, canHold, canMarkLost, canRestore, canResume, formatDateOnly, hasRole, isManager, isOrderStaff, isWithOperations, orderViewFor, todayDateOnly } from '../domain';
 import { ConflictError, FieldErrors, ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
 import { managerIds, notifyRoles, notifyUsers } from './notify';
-import { lockOrder, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
+import { accessFacts, lockOrder, lockOrderForStaff, loadOrderState, orderHref, syncOrderStage, touchStaffActivity, type OrderState } from './orders';
 
 function ensure(check: { ok: true } | { ok: false; reason: string }): void {
   if (!check.ok) throw new ConflictError(check.reason);
@@ -176,6 +176,24 @@ export const REFUND_LABEL: Record<RefundStatus, string> = {
   REFUNDED: 'Refunded',
 };
 
+/**
+ * Who may cancel: the salesperson or a manager while the order is still theirs; once operations
+ * has accepted it, operations or a manager.
+ */
+async function lockOrderForCancel(tx: Tx, ctx: Ctx, orderId: string): Promise<OrderState> {
+  await lockOrder(tx, orderId);
+  const order = await loadOrderState(tx, orderId);
+  if (!order) throw new NotFoundError('Order not found.');
+  if (ctx.actor.kind !== 'user') return order;
+  if (!orderViewFor(ctx.actor, accessFacts(order))) throw new NotFoundError('Order not found.');
+  if (isWithOperations(order.stage)) {
+    if (!isManager(ctx.actor) && !can(ctx.actor, 'ops.handoffs')) throw new ForbiddenError('Operations has accepted this order. Only operations or a manager can cancel it now.');
+  } else if (!isOrderStaff(ctx.actor, order)) {
+    throw new ForbiddenError('Only the salesperson for this order or a manager can do this.');
+  }
+  return order;
+}
+
 export async function cancelOrder(ctx: Ctx, input: { orderId: string; note: string; refundStatus: string }): Promise<void> {
   const errors = new FieldErrors();
   const note = input.note.trim().slice(0, 2000);
@@ -185,7 +203,7 @@ export async function cancelOrder(ctx: Ctx, input: { orderId: string; note: stri
   errors.throwIfAny();
 
   await inTx(ctx.db, async (tx) => {
-    const order = await lockOrderForStaff(tx, ctx, input.orderId);
+    const order = await lockOrderForCancel(tx, ctx, input.orderId);
     ensure(canCancel(order));
     const now = nowOf(ctx);
     // If operations has it in their inbox, take it out.
@@ -198,6 +216,8 @@ export async function cancelOrder(ctx: Ctx, input: { orderId: string; note: stri
         body: note,
       });
     }
+    // Nothing more goes to the customer by itself.
+    await tx.customerNotice.updateMany({ where: { orderId: order.id, status: 'PENDING' }, data: { status: 'SKIPPED', nextAttemptAt: null, note: 'The order was cancelled before this went out.' } });
     await tx.order.update({
       where: { id: order.id },
       data: { sideState: 'CANCELLED', cancelledAt: now, cancelNote: note, refundStatus: refundStatus!, onHoldUntil: null },
@@ -222,13 +242,18 @@ export async function cancelOrder(ctx: Ctx, input: { orderId: string; note: stri
       before: { sideState: order.sideState },
       after: { sideState: 'CANCELLED', cancelNote: note, refundStatus },
     });
-    await notifyUsers(tx, ctx, await managerIds(tx), {
+    // Once operations has the order, its salesperson hears about the cancellation too, and so does operations.
+    const afterAcceptance = isWithOperations(order.stage);
+    await notifyUsers(tx, ctx, [...(await managerIds(tx)), ...(afterAcceptance ? [order.ownerId] : [])], {
       type: 'order.cancelled',
       title: `${order.orderNo} was cancelled after a deposit`,
       body: note,
       href: orderHref(order.id),
       orderId: order.id,
     });
+    if (afterAcceptance) {
+      await notifyRoles(tx, ctx, ['OPS'], { type: 'handoff.withdrawn', title: `${order.orderNo} was cancelled`, body: note, href: `/ops/orders/${order.id}`, orderId: order.id });
+    }
     if (refundStatus === 'PENDING') {
       await notifyRoles(tx, ctx, ['FINANCE'], {
         type: 'refund.pending',

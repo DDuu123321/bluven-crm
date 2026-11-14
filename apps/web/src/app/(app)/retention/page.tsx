@@ -8,7 +8,7 @@ import { requireSession } from '@/lib/session';
 
 export const metadata: Metadata = { title: 'Documents to review' };
 
-const ENDED: Record<string, string> = { LOST: 'Lost', CANCELLED: 'Cancelled', HANDED_OVER: 'Handed over' };
+const ENDED: Record<string, string> = { LOST: 'Lost', CANCELLED: 'Cancelled', COMPLETED: 'Completed' };
 
 export default async function RetentionPage() {
   const { user, ctx } = await requireSession();

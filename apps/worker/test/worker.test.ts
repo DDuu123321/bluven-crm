@@ -232,12 +232,12 @@ describe('the daily summary', () => {
     ]);
 
     // Once a day: what arrives later the same day waits for the next morning.
-    await notifyUsers(db, at(afterSeven), [sam.id], { type: 'deposit.confirmed', title: 'Deposit confirmed' });
+    await notifyUsers(db, at(afterSeven), [sam.id], { type: 'deposit.gateway', title: 'The customer paid the deposit through Pylon' });
     expect(await sendDailySummaries(db, new Date(afterSeven.getTime() + 3 * 3_600_000))).toEqual({ sent: 0, nothingToSay: 0, failed: 0 });
     expect(await sendNotificationEmails(db, new Date(afterSeven.getTime() + 3 * 3_600_000))).toMatchObject({ sent: 0 });
     expect(await sendDailySummaries(db, nextMorning)).toEqual({ sent: 1, nothingToSay: 0, failed: 0 });
     expect(sent[2]).toMatchObject({ subject: 'Bluven CRM: 1 notification waiting for you' });
-    expect(sent[2]!.text).toContain('Deposits\n- Deposit confirmed');
+    expect(sent[2]!.text).toContain('Deposits & payments\n- The customer paid the deposit through Pylon');
   });
 
   it('sends nothing when there is nothing unread, and tries again when sending fails', async () => {

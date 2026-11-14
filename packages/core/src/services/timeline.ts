@@ -2,7 +2,7 @@
 import type { Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { isManager, isOrderStaff } from '../domain';
-import { FieldErrors, ForbiddenError, NotFoundError, ValidationError } from '../errors';
+import { ConflictError, FieldErrors, ForbiddenError, NotFoundError, ValidationError } from '../errors';
 import { newId } from '../ids';
 import { addActivity } from './activity';
 import { audit } from './audit';
@@ -52,6 +52,8 @@ export async function logActivity(ctx: Ctx, input: LogActivityInput): Promise<{ 
 
   return inTx(ctx.db, async (tx) => {
     const order = await lockOrderForStaff(tx, ctx, input.orderId);
+    // Notes stay possible in every later state, but a lead nobody has opened is not being worked on yet.
+    if (!order.openedAt) throw new ConflictError('Open the job first. Until then it is only a lead.');
     const summary =
       type === 'NOTE'
         ? 'Note'

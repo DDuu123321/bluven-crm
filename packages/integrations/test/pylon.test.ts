@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { archiveContract, cancelOrder, markLost, parseDateOnly, pushOrder, systemCtx, unlinkPylonProject, type Ctx } from '@bluven/core';
+import { archiveContract, cancelOrder, markLost, parseDateOnly, pushOrder, submitDeposit, systemCtx, unlinkPylonProject, type Ctx } from '@bluven/core';
 import { as, makeUser, pdf, resetDb, staged, testDb } from '../../core/test/helpers';
 import { makeWorld, orderAt, type World } from '../../core/test/setup-order';
 import {
@@ -160,7 +160,7 @@ describe('storing events', () => {
 
 describe('processing events', () => {
   it('follows a web-proposal sale from design to deposit without anyone touching the CRM', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));
@@ -169,15 +169,16 @@ describe('processing events', () => {
     // ---- project created from the "Design in Pylon" link: linked by our order number
     await recordPylonEvent(db, event('solar_projects.created', { project_reference_number: orderNo, project_in_app_url: 'https://app.getpylon.com/projects/prj_1' }, { solar_project: 'prj_1' }), w.clock.current);
     expect(await processPylonEvents(ctx, pylon)).toEqual({ processed: 1, ignored: 0, retrying: 0, failed: 0 });
-    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', pylonProjectUrl: 'https://app.getpylon.com/projects/prj_1', stage: 'NEW' });
+    // A project in Pylon means that the design has started.
+    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', pylonProjectUrl: 'https://app.getpylon.com/projects/prj_1', stage: 'DESIGN' });
 
-    // ---- design created: a quote version appears, the stage does not move
+    // ---- design created: a quote version appears, and nothing has gone to the customer yet
     await recordPylonEvent(db, event('solar_designs.created', { project_reference_number: orderNo }, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
     await processPylonEvents(ctx, pylon);
     let quotes = await db.quote.findMany({ where: { orderId } });
     expect(quotes).toHaveLength(1);
     expect(quotes[0]).toMatchObject({ version: 1, pylonDesignId: 'des_1', dcWatts: 6600, storageWh: 13500, totalCents: 1_850_000, depositCents: 185_000, webProposalUrl: 'https://app.getpylon.com/p/abc', sentAt: null });
-    expect((await order(orderId)).stage).toBe('NEW');
+    expect((await order(orderId)).stage).toBe('DESIGN');
 
     // ---- design updated before it is sent: same version, new figures
     pylon.designs.set('des_1', design({ totalCents: 1_790_000, depositCents: 179_000 }));
@@ -194,7 +195,8 @@ describe('processing events', () => {
     await recordPylonEvent(db, event('web_proposals.signed', { customer_name: 'Jane Smith', customer_email: 'jane@example.com' }, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
     expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
     const o = await order(orderId);
-    expect(o.stage).toBe('SIGNED');
+    // A proposal the customer signed has been sent. The signed copy is filed; it is not a stage of its own.
+    expect(o.stage).toBe('PROPOSAL_SENT');
     expect(o.signedAt!.toISOString()).toBe('2026-11-10T00:00:00.000Z'); // 03:15 UTC is 10 Nov in Sydney
     const contract = await db.contract.findFirstOrThrow({ where: { orderId }, include: { document: true } });
     expect(contract).toMatchObject({ source: 'PYLON', quoteId: quotes[0]!.id, voidedAt: null });
@@ -206,9 +208,11 @@ describe('processing events', () => {
     // ---- the customer pays the deposit through the gateway
     await recordPylonEvent(db, event('gateway_payments.created', { purpose: 'deposit', amount: 179_000, currency: 'aud', receipt_url: 'https://pay.example/r/9' }, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
     await processPylonEvents(ctx, pylon);
-    expect((await order(orderId)).stage).toBe('DEPOSIT_PENDING');
+    expect((await order(orderId)).stage).toBe('DEPOSIT_PAID');
     expect(await db.deposit.findFirstOrThrow({ where: { orderId } })).toMatchObject({ method: 'GATEWAY', amountCents: 179_000, currency: 'AUD', status: 'PENDING', receiptUrl: 'https://pay.example/r/9' });
-    expect(await db.notification.count({ where: { userId: w.fin.id, type: 'deposit.submitted' } })).toBe(1);
+    // The salesperson hears that the customer has paid. Finance hears when operations has confirmed the money.
+    expect(await db.notification.count({ where: { userId: w.sam.id, type: 'deposit.gateway' } })).toBe(1);
+    expect(await db.notification.count({ where: { userId: w.fin.id } })).toBe(0);
 
     // Everything Pylon did is in the timeline, attributed to Pylon.
     const actors = await db.activity.findMany({ where: { orderId, actorLabel: 'Pylon' }, select: { summary: true }, orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }] });
@@ -223,7 +227,7 @@ describe('processing events', () => {
   });
 
   it('keeps the version the customer saw when the design changes afterwards', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo }));
     pylon.designs.set('des_1', design());
@@ -262,7 +266,7 @@ describe('processing events', () => {
   });
 
   it('does nothing when the customer signs in Pylon the very version already under contract', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo, isAccepted: true, esignaturePdfUrl: 'https://files.getpylon.com/esign/3.pdf' }));
     pylon.designs.set('des_1', design());
@@ -270,7 +274,8 @@ describe('processing events', () => {
     const sign = () => recordPylonEvent(db, event('web_proposals.signed', {}, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
     await sign();
     await processPylonEvents(ctx, pylon);
-    expect((await order(orderId)).stage).toBe('SIGNED');
+    expect((await order(orderId)).stage).toBe('PROPOSAL_SENT');
+    expect(await db.contract.count({ where: { orderId } })).toBe(1);
     // Pylon reports the signature a second time (a second signer, a re-send).
     await sign();
     await processPylonEvents(ctx, pylon);
@@ -279,15 +284,19 @@ describe('processing events', () => {
     expect(await db.document.count({ where: { orderId, type: { key: 'other' } } })).toBe(0);
   });
 
-  it('asks sales to archive the contract when Pylon has no signed PDF', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+  it('marks the version as the accepted one when Pylon has no signed PDF to file', async () => {
+    const { orderId } = await orderAt(w, 'OPENED');
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo, isAccepted: true }));
     pylon.designs.set('des_1', design());
     await recordPylonEvent(db, event('web_proposals.signed', {}, { solar_project: 'prj_1', solar_design: 'des_1' }), w.clock.current);
     await processPylonEvents(ctx, pylon);
-    expect((await order(orderId)).stage).toBe('QUOTED'); // seen by the customer, but no contract on file
-    expect(await db.task.findFirstOrThrow({ where: { orderId, kind: 'PYLON_ACCEPTED' } })).toMatchObject({ assigneeId: w.sam.id, status: 'OPEN' });
+    expect((await order(orderId)).stage).toBe('PROPOSAL_SENT'); // seen by the customer
+    // No signed copy is needed for the order to move on, so there is nothing to chase: the salesperson is told, and the version is marked.
+    expect(await db.contract.count({ where: { orderId } })).toBe(0);
+    expect(await db.quote.findFirstOrThrow({ where: { orderId } })).toMatchObject({ isAccepted: true, sentVia: 'PYLON' });
+    expect(await db.task.count({ where: { orderId, kind: 'PYLON_ACCEPTED' } })).toBe(0);
+    expect(await db.notification.findFirstOrThrow({ where: { userId: w.sam.id, type: 'pylon.accepted' } })).toMatchObject({ body: expect.stringContaining('Record the deposit') });
   });
 
   it('records a gateway payment that arrives before the signature', async () => {
@@ -297,7 +306,7 @@ describe('processing events', () => {
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));
     await recordPylonEvent(db, event('gateway_payments.created', { purpose: 'deposit', amount: 90_000, currency: 'aud' }, { solar_project: 'prj_1' }), w.clock.current);
     await processPylonEvents(ctx, pylon);
-    expect((await order(orderId)).stage).toBe('QUOTED');
+    expect((await order(orderId)).stage).toBe('DEPOSIT_PAID');
     expect(await db.deposit.count({ where: { orderId, status: 'PENDING' } })).toBe(1);
     expect((await order(orderId)).pylonProjectId).toBe('prj_1'); // linked by asking Pylon for the reference
   });
@@ -329,7 +338,7 @@ describe('processing events', () => {
   });
 
   it('retries with a growing delay while Pylon is unreachable, then gives up', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo }));
     pylon.designs.set('des_1', design());
@@ -370,22 +379,33 @@ describe('processing events', () => {
   });
 
   it('waits for the API token instead of failing', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const e = event('solar_designs.created', { project_reference_number: (await order(orderId)).orderNo }, { solar_project: 'prj_1', solar_design: 'des_1' });
     await recordPylonEvent(db, e, w.clock.current);
     expect(await processPylonEvents(ctx, null)).toMatchObject({ retrying: 1 });
     expect((await stored(e.data.id)).lastError).toBe('The Pylon API token is not configured.');
   });
 
-  it('nudges sales once when a project is marked as sold in Pylon without a contract', async () => {
+  it('nudges sales once to record the deposit when a project is marked as sold in Pylon', async () => {
     const { orderId } = await orderAt(w, 'QUOTED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo, isAccepted: true, manuallySold: true }));
     for (let i = 0; i < 2; i++) await recordPylonEvent(db, event('solar_projects.updated', { project_reference_number: orderNo }, { solar_project: 'prj_1' }), w.clock.current);
     await processPylonEvents(ctx, pylon);
-    expect(await db.task.count({ where: { orderId, kind: 'PYLON_ACCEPTED' } })).toBe(1);
+    const nudge = await db.task.findMany({ where: { orderId, kind: 'PYLON_ACCEPTED' } });
+    expect(nudge).toEqual([expect.objectContaining({ assigneeId: w.sam.id, status: 'OPEN', title: expect.stringContaining('record the deposit') })]);
     expect(await db.notification.count({ where: { userId: w.sam.id, type: 'pylon.accepted' } })).toBe(1);
+    // Recording the deposit is what it asked for.
+    await submitDeposit(as(w.sam, w.clock), { orderId, amountCents: 90_000, method: 'BANK_TRANSFER', files: [await staged(pdf('proof of the deposit'), 'transfer.pdf')] });
+    expect((await db.task.findUniqueOrThrow({ where: { id: nudge[0]!.id } })).status).toBe('DONE');
+    // And with a deposit on record there is nothing to nudge about.
+    const paid = await orderAt(w, 'DEPOSIT_PAID', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    const paidNo = (await order(paid.orderId)).orderNo;
+    pylon.projects.set('prj_2', project({ id: 'prj_2', referenceNumber: paidNo, isAccepted: true, manuallySold: true }));
+    await recordPylonEvent(db, event('solar_projects.updated', { project_reference_number: paidNo }, { solar_project: 'prj_2' }), w.clock.current);
+    await processPylonEvents(ctx, pylon);
+    expect(await db.task.count({ where: { orderId: paid.orderId, kind: 'PYLON_ACCEPTED' } })).toBe(0);
   });
 });
 
@@ -402,7 +422,7 @@ describe('events that cannot be applied', () => {
     await recordPylonEvent(db, e, w.clock.current);
     expect(await processPylonEvents(ctx, pylon)).toMatchObject({ ignored: 1, failed: 0 });
 
-    expect(await order(orderId)).toMatchObject({ sideState: 'LOST', stage: 'QUOTED' });
+    expect(await order(orderId)).toMatchObject({ sideState: 'LOST', stage: 'PROPOSAL_SENT' });
     expect(await db.contract.count({ where: { orderId } })).toBe(0);
     expect(await db.activity.count({ where: { orderId, summary: { contains: 'signed the proposal in Pylon' } } })).toBe(1);
     const told = await db.notification.findMany({ where: { type: 'pylon.signed_not_applied' } });
@@ -412,7 +432,7 @@ describe('events that cannot be applied', () => {
   });
 
   it('never loses sight of money that arrives for a closed order', async () => {
-    const { orderId } = await orderAt(w, 'DEPOSIT_PENDING');
+    const { orderId } = await orderAt(w, 'DEPOSIT_PAID');
     await cancelOrderAsSam(orderId);
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo }));
@@ -438,7 +458,7 @@ describe('events that cannot be applied', () => {
   });
 
   it('tells the administrators when an event is given up on', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const admin = await makeUser(['ADMIN'], 'Ada Admin');
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: (await order(orderId)).orderNo }));
@@ -454,7 +474,7 @@ describe('events that cannot be applied', () => {
 
 describe('which project belongs to which order', () => {
   it('does not hand an order to a second Pylon project that turns up with its number', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));
@@ -476,7 +496,7 @@ describe('which project belongs to which order', () => {
     ];
     for (const e of foreign) await recordPylonEvent(db, e, w.clock.current);
     expect(await processPylonEvents(ctx, pylon)).toEqual({ processed: 0, ignored: 3, retrying: 0, failed: 0 });
-    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', stage: 'NEW' });
+    expect(await order(orderId)).toMatchObject({ pylonProjectId: 'prj_1', stage: 'DESIGN' });
     expect(await db.quote.count({ where: { orderId } })).toBe(0);
     expect(await db.deposit.count({ where: { orderId } })).toBe(0);
     expect((await stored(foreign[0]!.data.id)).resultNote).toContain('linked to project prj_1');
@@ -490,7 +510,7 @@ describe('which project belongs to which order', () => {
   });
 
   it('lets a new project take over when the old one is gone from Pylon, or when a manager unlinks it', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));
@@ -519,7 +539,7 @@ describe('which project belongs to which order', () => {
   });
 
   it('catches up on events that arrived before the project could be matched to an order', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     // The reference was mistyped in Pylon at first.
@@ -553,7 +573,7 @@ describe('which project belongs to which order', () => {
 
 describe('reading a whole project', () => {
   it('brings in every design made before the project could be matched, and the site details Pylon knows', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     // Two options were designed long ago, before anyone typed the CRM order number into Pylon.
@@ -584,7 +604,7 @@ describe('reading a whole project', () => {
   });
 
   it('tries the full read again when Pylon could not be reached the first time', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.designs.set('des_a', design({ id: 'des_a' }));
@@ -603,7 +623,7 @@ describe('reading a whole project', () => {
   });
 
   it('archives a signature it finds on the project when the "signed" event never came', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     const url = 'https://app.getpylon.com/files/signed.pdf';
@@ -613,7 +633,7 @@ describe('reading a whole project', () => {
 
     await recordPylonEvent(db, event('solar_projects.updated', { project_reference_number: orderNo }, { solar_project: 'prj_1' }), w.clock.current);
     expect(await processPylonEvents(ctx, pylon)).toMatchObject({ processed: 1 });
-    expect((await order(orderId)).stage).toBe('SIGNED');
+    expect((await order(orderId)).stage).toBe('PROPOSAL_SENT');
     const contract = await db.contract.findFirstOrThrow({ where: { orderId, voidedAt: null } });
     expect(contract.source).toBe('PYLON');
     // Signed on the web, so there is nothing to nag sales about.
@@ -645,7 +665,7 @@ describe('linking an existing Pylon project by hand', () => {
   const link = 'https://app.getpylon.com/library/prj_1/view/des_1';
 
   it('shows which project it is, then links it and reads it in full', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const pylon = new FakePylon();
     pylon.designs.set('des_1', design({ title: 'Option A' }));
     pylon.projects.set('prj_1', project({ designIds: ['des_1'], site: { nmi: '41031234567', retailer: null, phases: 'one' } }));
@@ -681,8 +701,8 @@ describe('linking an existing Pylon project by hand', () => {
   });
 
   it('keeps one project to one order and respects who may work on the order', async () => {
-    const first = await orderAt(w, 'ASSIGNED');
-    const second = await orderAt(w, 'ASSIGNED', { externalId: 'second', email: 'someone.else@example.com', phone: '0411 222 333', address: '9 Other Rd' });
+    const first = await orderAt(w, 'OPENED');
+    const second = await orderAt(w, 'OPENED', { externalId: 'second', email: 'someone.else@example.com', phone: '0411 222 333', address: '9 Other Rd' });
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project());
     pylon.projects.set('prj_2', project({ id: 'prj_2' }));
@@ -756,7 +776,7 @@ describe('reading the event list every minute', () => {
   });
 
   it('clears out old events that never concerned an order', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const orderNo = (await order(orderId)).orderNo;
     const pylon = new FakePylon();
     pylon.projects.set('prj_1', project({ referenceNumber: orderNo }));

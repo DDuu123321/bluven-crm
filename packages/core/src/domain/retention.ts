@@ -26,17 +26,17 @@ export interface OrderEndFacts {
   sideState: SideState;
   lostAt: Date | null;
   cancelledAt: Date | null;
-  handedOverAt: Date | null;
+  completedAt: Date | null;
 }
 
 /**
- * The day an order ended: lost, cancelled, or accepted by operations. Null while the order is
- * still open, and then nothing of it expires. A lost order that is restored is open again.
+ * The day an order ended: lost, cancelled, or completed with the final payment. Null while the
+ * order is still open, and then nothing of it expires. A lost order that is restored is open again.
  */
 export function orderEndedAt(o: OrderEndFacts): Date | null {
   if (o.sideState === 'LOST') return o.lostAt;
   if (o.sideState === 'CANCELLED') return o.cancelledAt;
-  if (o.stage === 'HANDED_OVER') return o.handedOverAt;
+  if (o.stage === 'COMPLETED') return o.completedAt;
   return null;
 }
 

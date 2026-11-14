@@ -80,7 +80,7 @@ export default async function ChecklistPage() {
       />
       <div className="mb-4">
         <Alert tone="blue">
-          Three items are always required and are not configured here: a complete installation address, the signed contract, and a deposit confirmed by finance.
+          Three items are always required and are not configured here: a complete installation address, the proposal the customer accepted, and the proof of the deposit. A signed contract is not required.
         </Alert>
       </div>
       <Card>

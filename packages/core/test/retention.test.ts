@@ -7,7 +7,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   acceptHandoff,
   addYears,
+  archiveContract,
   cancelOrder,
+  confirmFinalPayment,
   createDocumentType,
   createQuote,
   deleteDocument,
@@ -23,23 +25,26 @@ import {
   listRetentionOrders,
   listReusableDocuments,
   lockOrder,
+  markJobDone,
   markLost,
   markQuoteSent,
   moveOrderToNewProperty,
   nextRetentionStep,
   openDocument,
+  openJob,
+  parseDateOnly,
   pushOrder,
   restoreLost,
   retentionAwaitingCount,
   reuseDocuments,
   runDocumentRetention,
   systemCtx,
+  type RetentionSettings,
   updateDocumentType,
   updateSettings,
   uploadDocument,
-  type RetentionSettings,
 } from '../src';
-import { as, docType, makeUser, pdf, png, resetDb, staged, stream, testDb } from './helpers';
+import { as, docType, leadOrigin, makeUser, pdf, png, resetDb, staged, stream, testDb } from './helpers';
 import { makeWorld, orderAt, type World } from './setup-order';
 
 const db = testDb();
@@ -77,7 +82,7 @@ async function setRetention(change: Partial<RetentionSettings>): Promise<void> {
 
 /** A lost order of Sam's with one bill, and the end of the bill's retention period. */
 async function lostOrderWithBill(over: Record<string, unknown> = {}): Promise<{ orderId: string; billId: string; deadline: Date }> {
-  const { orderId } = await orderAt(w, 'ASSIGNED', over);
+  const { orderId } = await orderAt(w, 'OPENED', over);
   const bill = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf(`bill ${orderId}`));
   const lostAt = await lose(orderId);
   return { orderId, billId: bill.id, deadline: addYears(lostAt, 2) };
@@ -90,7 +95,7 @@ beforeEach(async () => {
 
 describe('the retention period', () => {
   it('lets nothing expire while an order is open, and runs for two years from the day it ended', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     // Open for more than three years: still nothing to decide.
     w.clock.advanceDays(1200);
@@ -128,24 +133,31 @@ describe('the retention period', () => {
     expect(await retentionAwaitingCount(db, w.clock.current)).toBe(1);
   });
 
-  it('starts from the handover for a finished order and from the cancellation for a cancelled one', async () => {
+  it('starts when the job is closed for a finished order and from the cancellation for a cancelled one', async () => {
     const done = await orderAt(w, 'READY');
     await pushOrder(as(w.sam, w.clock), { orderId: done.orderId });
     w.clock.advanceDays(2);
-    await acceptHandoff(as(w.ops, w.clock), { orderId: done.orderId });
+    await acceptHandoff(as(w.ops, w.clock), { orderId: done.orderId, depositReceived: true });
+    // With operations, and then installed and waiting for the balance, the order is still open: nothing of it expires.
+    w.clock.advanceDays(30);
+    expect(await getOrderRetention(as(w.manager, w.clock), done.orderId)).toMatchObject({ status: 'OPEN', endedAt: null });
+    await markJobDone(as(w.ops, w.clock), { orderId: done.orderId });
+    expect(await getOrderRetention(as(w.manager, w.clock), done.orderId)).toMatchObject({ status: 'OPEN', endedAt: null });
+    w.clock.advanceDays(4);
+    await confirmFinalPayment(as(w.fin, w.clock), { orderId: done.orderId });
     const handedOverAt = w.clock.current;
 
-    const cancelled = await orderAt(w, 'DEPOSIT_PENDING', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
+    const cancelled = await orderAt(w, 'DEPOSIT_PAID', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
     await upload(cancelled.orderId, 'electricity_bill', 'bill.pdf', pdf('second bill'));
     w.clock.advanceDays(10);
     await cancelOrder(as(w.sam, w.clock), { orderId: cancelled.orderId, note: 'Changed their mind.', refundStatus: 'PENDING' });
     const cancelledAt = w.clock.current;
 
-    // The bill and the two site photos are under retention; the contract and the deposit proof are not.
+    // The proposal, the bill and the two site photos are under retention; the deposit proof is not.
     const first = await getOrderRetention(as(w.manager, w.clock), done.orderId);
-    expect(first).toMatchObject({ status: 'KEPT', endedAt: handedOverAt, deadline: addYears(handedOverAt, 2), retained: 3 });
+    expect(first).toMatchObject({ status: 'KEPT', endedAt: handedOverAt, deadline: addYears(handedOverAt, 2), retained: 4 });
     const second = await getOrderRetention(as(w.manager, w.clock), cancelled.orderId);
-    expect(second).toMatchObject({ status: 'KEPT', endedAt: cancelledAt, deadline: addYears(cancelledAt, 2), retained: 1 });
+    expect(second).toMatchObject({ status: 'KEPT', endedAt: cancelledAt, deadline: addYears(cancelledAt, 2), retained: 2 });
 
     // Operations and finance can open the orders but take no part in retention.
     expect(await getOrderRetention(as(w.ops, w.clock), done.orderId)).toBeNull();
@@ -154,7 +166,8 @@ describe('the retention period', () => {
   });
 
   it('never touches contract and deposit files, or types an admin marked as never deleted', async () => {
-    const { orderId } = await orderAt(w, 'DEPOSIT_PENDING');
+    const { orderId, quoteId } = await orderAt(w, 'DEPOSIT_PAID');
+    await archiveContract(as(w.sam, w.clock), { orderId, quoteId: quoteId!, signedOn: parseDateOnly('2026-11-09'), files: [await staged(pdf('signed'), 'signed.pdf')] });
     await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     await upload(orderId, 'other', 'compliance.pdf', pdf('compliance'));
     await db.documentType.update({ where: { key: 'other' }, data: { neverAutoDelete: true } });
@@ -166,8 +179,8 @@ describe('the retention period', () => {
     at(daysAfter(deadline, 1));
     expect(await job()).toMatchObject({ reminders: 1 });
     const state = await getOrderRetention(as(w.sam, w.clock), orderId);
-    expect(state!.expiring.map((d) => d.fileName)).toEqual(['bill.pdf']);
-    expect(await deleteExpiringDocuments(as(w.sam, w.clock), { orderId })).toEqual({ deleted: 1 });
+    expect(state!.expiring.map((d) => d.fileName).sort()).toEqual(['bill.pdf', 'proposal.pdf']);
+    expect(await deleteExpiringDocuments(as(w.sam, w.clock), { orderId })).toEqual({ deleted: 2 });
 
     const left = await db.document.findMany({ where: { orderId, deletedAt: null }, select: { fileName: true }, orderBy: { fileName: 'asc' } });
     expect(left.map((d) => d.fileName)).toEqual(['compliance.pdf', 'signed.pdf', 'transfer.pdf']);
@@ -182,7 +195,7 @@ describe('the retention period', () => {
     // The built-in types carry no period of their own, so the setting governs them.
     expect((await docType('electricity_bill')).retentionYears).toBeNull();
     await db.documentType.update({ where: { key: 'other' }, data: { retentionYears: 5 } });
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     await upload(orderId, 'other', 'warranty.pdf', pdf('warranty'));
     const lostAt = await lose(orderId);
@@ -205,7 +218,7 @@ describe('the retention period', () => {
   it('agrees with the calendar on a leap day', async () => {
     await setRetention({ years: 1 });
     at(new Date('2028-02-29T03:00:00Z'));
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     await lose(orderId);
     // A year after 29 February is 28 February; the list, the job and the page all read the same date.
@@ -279,7 +292,7 @@ describe('the decision', () => {
   });
 
   it('deletes softly, with an audit entry for every file, and is not stopped by the rules for orders in progress', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const quote = await createQuote(as(w.sam, w.clock), { orderId, title: '6.6 kW', dcWatts: 6600, storageWh: null, totalCents: 900_000, depositCents: 90_000, notes: '', file: await staged(pdf('quote file'), 'quote.pdf') });
     await markQuoteSent(as(w.sam, w.clock), { quoteId: quote.id });
     const photo = await upload(orderId, 'meter_box', 'meter.png', await png(4));
@@ -429,7 +442,7 @@ describe('when nobody decides', () => {
   it('deletes only what a reminder announced: a document whose own period ended later is told about first', async () => {
     // Bills go after two years, warranty papers after three.
     await db.documentType.update({ where: { key: 'other' }, data: { retentionYears: 3 } });
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const bill = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill'));
     const paper = await upload(orderId, 'other', 'warranty.pdf', pdf('warranty'));
     const lostAt = await lose(orderId);
@@ -524,7 +537,7 @@ describe('when nobody decides', () => {
 
 describe('removing deleted files from storage', () => {
   it('removes the file and its thumbnail 30 days after any deletion, keeps the row, and answers 410 from then on', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const photo = await upload(orderId, 'meter_box', 'meter.png', await png(7));
     const note = await upload(orderId, 'other', 'notes.txt', Buffer.from('hello'));
     await deleteDocument(as(w.sam, w.clock), { documentId: photo.id });
@@ -560,12 +573,13 @@ describe('removing deleted files from storage', () => {
   });
 
   it('keeps the bytes for as long as a later order at the same property still uses the photo', async () => {
-    const first = await orderAt(w, 'ASSIGNED');
+    const first = await orderAt(w, 'OPENED');
     const original = await upload(first.orderId, 'meter_box', 'meter.png', await png(21));
     const lostAt = await lose(first.orderId);
     // The customer comes back: a second order on the same property takes the photo over.
     const second = await orderAt(w, 'NEW');
     const sam = as(w.sam, w.clock);
+    await openJob(sam, { orderId: second.orderId, leadOriginId: (await leadOrigin('bluven_website')).id });
     const offered = await listReusableDocuments(sam, second.orderId);
     expect(await reuseDocuments(sam, { orderId: second.orderId, documentIds: offered.map((d) => d.id) })).toEqual({ reused: 1 });
     const copy = await db.document.findFirstOrThrow({ where: { orderId: second.orderId } });
@@ -598,11 +612,12 @@ describe('removing deleted files from storage', () => {
   });
 
   it('keeps the bytes when the reused copy goes first and the original is still in use', async () => {
-    const first = await orderAt(w, 'ASSIGNED');
+    const first = await orderAt(w, 'OPENED');
     const original = await upload(first.orderId, 'meter_box', 'meter.png', await png(33));
     await lose(first.orderId);
     const second = await orderAt(w, 'NEW');
     const sam = as(w.sam, w.clock);
+    await openJob(sam, { orderId: second.orderId, leadOriginId: (await leadOrigin('bluven_website')).id });
     await reuseDocuments(sam, { orderId: second.orderId, documentIds: [original.id] });
     // The second enquiry turns out to be for another house: the reused photo is set aside.
     await moveOrderToNewProperty(sam, { orderId: second.orderId, addressLine1: '9 Harbour Rd', addressLine2: '', suburb: 'Manly', state: 'NSW', postcode: '2095', propertyType: 'House' });
@@ -618,7 +633,7 @@ describe('removing deleted files from storage', () => {
   });
 
   it('removes the copy in the mail store of a file that came in by e-mail, and leaves the message itself', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const bill = await upload(orderId, 'electricity_bill', 'bill.pdf', pdf('bill from mail'));
     const o = await order(orderId);
     // The way reading a mailbox stores an attachment that was then filed as this document.
@@ -643,7 +658,7 @@ describe('removing deleted files from storage', () => {
   });
 
   it('does not purge a deleted file of a type that is never deleted automatically', async () => {
-    const { orderId } = await orderAt(w, 'ASSIGNED');
+    const { orderId } = await orderAt(w, 'OPENED');
     const paper = await upload(orderId, 'other', 'compliance.pdf', pdf('compliance'));
     await db.documentType.update({ where: { key: 'other' }, data: { neverAutoDelete: true } });
     await deleteDocument(as(w.sam, w.clock), { documentId: paper.id });
@@ -732,7 +747,8 @@ describe('a database that was seeded before the built-in types followed the sett
 
       await migrate();
       expect((await getOrderRetention(as(w.sam, w.clock), orderId))!.deadline).toEqual(addYears(lostAt, 3));
-      expect(await years()).toEqual({ signed_contract: null, deposit_proof: null, quote: null, electricity_bill: null, install_location: null, roof_photos: 2, meter_box: 2, additional_photos: null, other: 5 });
+      // The two types for operations' paperwork came later and never had a period of their own.
+      expect(await years()).toEqual({ signed_contract: null, deposit_proof: null, quote: null, electricity_bill: null, install_location: null, roof_photos: 2, meter_box: 2, additional_photos: null, approvals: null, installation_photos: null, other: 5 });
       expect(await columnDefault()).toBeNull();
       // Run a second time, as it would be on a database that never had the problem, it changes nothing.
       await migrate();
