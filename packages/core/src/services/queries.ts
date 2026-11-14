@@ -766,26 +766,40 @@ export async function getDashboard(ctx: Ctx, range: DashboardRange): Promise<Das
   // As text with its zone spelled out: a bare date parameter would be read in whatever time zone
   // the database session happens to use.
   const nowIso = now.toISOString();
+  // Each series counts by period in one pass over the orders of its window. The window's start
+  // is only there to leave older orders out early and is deliberately generous; which week or
+  // month an order falls into is decided by the same expression as the list of periods.
+  const since = (days: number) => new Date(now.getTime() - days * 86_400_000);
+  const perPeriod = (unit: 'week' | 'month', column: Prisma.Sql, extra: Prisma.Sql = Prisma.sql`TRUE`) => Prisma.sql`
+    SELECT date_trunc(${unit}, (${column} AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) AS "p", COUNT(*)::int AS "n"
+    FROM "Order" o
+    WHERE ${mine} AND ${column} >= ${since(unit === 'week' ? 70 : 400)} AND ${extra}
+    GROUP BY 1`;
   const weekly = await db.$queryRaw<Dashboard['weekly']>(Prisma.sql`
     WITH weeks AS (
       SELECT generate_series(date_trunc('week', (${nowIso}::timestamptz AT TIME ZONE ${tz})) - interval '7 weeks', date_trunc('week', (${nowIso}::timestamptz AT TIME ZONE ${tz})), interval '1 week') AS w
-    )
-    SELECT to_char(weeks.w, 'YYYY-MM-DD') AS "weekStart",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('week', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = weeks.w) AS "leads",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."depositAt" IS NOT NULL AND date_trunc('week', (o."depositAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = weeks.w) AS "deposits"
-    FROM weeks ORDER BY weeks.w`);
+    ),
+    leads AS (${perPeriod('week', Prisma.sql`o."leadCreatedAt"`)}),
+    deposits AS (${perPeriod('week', Prisma.sql`o."depositAt"`)})
+    SELECT to_char(weeks.w, 'YYYY-MM-DD') AS "weekStart", COALESCE(leads."n", 0) AS "leads", COALESCE(deposits."n", 0) AS "deposits"
+    FROM weeks LEFT JOIN leads ON leads."p" = weeks.w LEFT JOIN deposits ON deposits."p" = weeks.w
+    ORDER BY weeks.w`);
 
   const monthly = await db.$queryRaw<Dashboard['monthly']>(Prisma.sql`
     WITH months AS (
       SELECT generate_series(date_trunc('month', (${nowIso}::timestamptz AT TIME ZONE ${tz})) - interval '11 months', date_trunc('month', (${nowIso}::timestamptz AT TIME ZONE ${tz})), interval '1 month') AS m
-    )
+    ),
+    leads AS (${perPeriod('month', Prisma.sql`o."leadCreatedAt"`)}),
+    deposits AS (${perPeriod('month', Prisma.sql`o."depositAt"`)}),
+    accepted AS (${perPeriod('month', Prisma.sql`o."handedOverAt"`, Prisma.sql`o."stage" IN ('IN_PROGRESS', 'INSTALLED', 'COMPLETED')`)}),
+    completed AS (${perPeriod('month', Prisma.sql`o."completedAt"`)}),
+    lost AS (${perPeriod('month', Prisma.sql`o."lostAt"`, Prisma.sql`o."sideState" = 'LOST'`)})
     SELECT to_char(months.m, 'YYYY-MM') AS "month",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND date_trunc('month', (o."leadCreatedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "leads",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."depositAt" IS NOT NULL AND date_trunc('month', (o."depositAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "deposits",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."handedOverAt" IS NOT NULL AND o."stage" IN ('IN_PROGRESS', 'INSTALLED', 'COMPLETED') AND date_trunc('month', (o."handedOverAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "accepted",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."completedAt" IS NOT NULL AND date_trunc('month', (o."completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "completed",
-           (SELECT COUNT(*)::int FROM "Order" o WHERE ${mine} AND o."sideState" = 'LOST' AND o."lostAt" IS NOT NULL AND date_trunc('month', (o."lostAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})) = months.m) AS "lost"
-    FROM months ORDER BY months.m`);
+           COALESCE(leads."n", 0) AS "leads", COALESCE(deposits."n", 0) AS "deposits", COALESCE(accepted."n", 0) AS "accepted", COALESCE(completed."n", 0) AS "completed", COALESCE(lost."n", 0) AS "lost"
+    FROM months
+    LEFT JOIN leads ON leads."p" = months.m LEFT JOIN deposits ON deposits."p" = months.m LEFT JOIN accepted ON accepted."p" = months.m
+    LEFT JOIN completed ON completed."p" = months.m LEFT JOIN lost ON lost."p" = months.m
+    ORDER BY months.m`);
 
   return {
     range,
