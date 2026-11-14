@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getDailySummary, listNotifications, notificationKindCounts, relativeTime, type NotificationKind } from '@bluven/core';
+import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getDailySummary, listNotifications, notificationEmailRoute, notificationKindCounts, relativeTime, type NotificationKind } from '@bluven/core';
 import { ActionButton, ActionForm, FormMessage, SubmitButton } from '@/components/client';
 import { Card, CardBody, CardHeader, Checkbox, EmptyState, PageHeader, cx } from '@/components/ui';
 import { fmtDateTime } from '@/lib/fmt';
@@ -20,6 +20,7 @@ export default async function NotificationsPage({ searchParams }: { searchParams
   const unread = counts.reduce((sum, c) => sum + c.unread, 0);
   const total = counts.reduce((sum, c) => sum + c.total, 0);
   const now = new Date();
+  const emailSetUp = notificationEmailRoute() !== null;
   const href = (next: { kind?: NotificationKind | null; unread?: boolean }) => {
     const k = next.kind === undefined ? kind : next.kind;
     const u = next.unread === undefined ? unreadOnly : next.unread;
@@ -88,17 +89,24 @@ export default async function NotificationsPage({ searchParams }: { searchParams
         )}
       </Card>
 
-      <Card className="mt-4 max-w-2xl">
-        <CardHeader title="E-mail" description="Notifications are also sent to your e-mail address, unless you have already read them here." />
-        <CardBody>
-          <ActionForm action={dailySummaryAction} keepValues stayOpen className="space-y-3">
-            <Checkbox name="dailySummary" defaultChecked={dailySummary} label="Send me one summary each morning instead of an e-mail for every notification" />
-            <p className="text-xs text-slate-500">The summary goes out after 7 am and lists what is still unread. Everything keeps arriving here at once, whichever you choose.</p>
-            <FormMessage />
-            <SubmitButton variant="secondary">Save</SubmitButton>
-          </ActionForm>
-        </CardBody>
-      </Card>
+      {emailSetUp ? (
+        <Card className="mt-4 max-w-2xl">
+          <CardHeader title="E-mail" description="Notifications are also sent to your e-mail address, unless you have already read them here." />
+          <CardBody>
+            <ActionForm action={dailySummaryAction} keepValues stayOpen className="space-y-3">
+              <Checkbox name="dailySummary" defaultChecked={dailySummary} label="Send me one summary each morning instead of an e-mail for every notification" />
+              <p className="text-xs text-slate-500">The summary goes out after 7 am and lists what is still unread. Everything keeps arriving here at once, whichever you choose.</p>
+              <FormMessage />
+              <SubmitButton variant="secondary">Save</SubmitButton>
+            </ActionForm>
+          </CardBody>
+        </Card>
+      ) : (
+        <Card className="mt-4 max-w-2xl">
+          {/* A switch for e-mails this server cannot send would promise something that never arrives. */}
+          <CardHeader title="E-mail" description="Notification e-mail is not set up on this server, so notifications appear here only. An administrator can switch it on in the server settings." />
+        </Card>
+      )}
     </>
   );
 }

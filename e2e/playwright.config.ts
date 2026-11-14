@@ -56,7 +56,8 @@ export default defineConfig({
         STORAGE_DIR: E2E.storageDir,
         PYLON_WEBHOOK_SECRET: E2E.pylonWebhookSecret,
         PYLON_API_TOKEN: '',
-        SMTP_URL: '',
+        // Nothing is sent in this suite: no worker runs. The pages only need to see that notification e-mail is set up.
+        SMTP_URL: 'smtp://127.0.0.1:2525',
         NEXT_TELEMETRY_DISABLED: '1',
         ...zohoEnv,
         ...modelEnv,
