@@ -1,6 +1,6 @@
 // Every request to the model goes through here: it is recorded with what it used and how it
 // ended, and background work is held back when it keeps failing or has used up the day's allowance.
-import type { Db, Prisma } from '@bluven/db';
+import { Prisma, type Db } from '@bluven/db';
 import { FieldErrors, ForbiddenError, ValidationError, actorId, audit, can, inTx, isManager, newId, nowOf, requireUser, type Ctx } from '@bluven/core';
 import { AI_MESSAGES, AiError, type AiModel, type AiRequest, type AiUsage } from './model';
 
@@ -197,11 +197,13 @@ export async function automaticAllowanceLeft(db: Db, settings: AssistantSettings
 // Usage, for the administration page
 // ---------------------------------------------------------------------------
 
+type Price = [input: number, output: number, cacheRead?: number];
+
 /**
  * US dollars per million tokens as listed in November 2026: input, output and, where the price
  * list states it, input read from the cache (otherwise a tenth of the input price is assumed).
  */
-const PRICES: Record<string, [input: number, output: number, cacheRead?: number]> = {
+const PRICES: Record<string, Price> = {
   'claude-opus-5-5': [4, 20, 0.2],
   'claude-opus-5': [5, 25],
   'claude-opus-4-8': [5, 25],
@@ -210,9 +212,28 @@ const PRICES: Record<string, [input: number, output: number, cacheRead?: number]
   'claude-haiku-5-5': [0.1, 0.5],
 };
 
-/** A rough cost in US dollars, or null for a model whose price is not known here. */
-export function estimateCostUsd(model: string, usage: Pick<AiUsage, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>): number | null {
-  const price = PRICES[model];
+/** A request whose prompt is longer than this many tokens is charged by a model's second price list, where it has one. */
+export const LONG_PROMPT_TOKENS = 100_000;
+
+/** The prices for requests with a long prompt, for the models that charge those differently. */
+const LONG_PROMPT_PRICES: Record<string, Price> = {
+  'claude-haiku-5-5': [0.5, 2.5],
+};
+
+type TokenCounts = Pick<AiUsage, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>;
+
+/** The length of a request's prompt: what was sent as new input, read from the cache and written to it. */
+export const promptTokens = (usage: Pick<AiUsage, 'inputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>): number => usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+
+/**
+ * A rough cost in US dollars, or null for a model whose price is not known here. The counts may
+ * be those of one request or of many added up; `longPrompt` says that they are requests whose
+ * prompt was over LONG_PROMPT_TOKENS, which some models charge at a higher rate. For one
+ * request it is worked out from the counts when left out.
+ */
+export function estimateCostUsd(model: string, usage: TokenCounts, opts: { longPrompt?: boolean } = {}): number | null {
+  const longPrompt = opts.longPrompt ?? promptTokens(usage) > LONG_PROMPT_TOKENS;
+  const price = (longPrompt ? LONG_PROMPT_PRICES[model] : undefined) ?? PRICES[model];
   if (!price) return null;
   const [input, output, cacheRead = input / 10] = price;
   // Writing to the cache costs a quarter more than plain input.
@@ -234,12 +255,16 @@ export async function getAssistantUsage(ctx: Ctx, days = 30): Promise<AssistantU
   const now = nowOf(ctx);
   const since = new Date(now.getTime() - days * DAY_MS);
   const [groups, automaticLast24h, failures] = await Promise.all([
-    ctx.db.aiRun.groupBy({
-      by: ['kind', 'model', 'status'],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-      _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheWriteTokens: true },
-    }),
+    // Requests with a long prompt are added up apart from the others: a sum over all of them
+    // could not tell which tokens were charged at which rate.
+    ctx.db.$queryRaw<{ kind: string; model: string; status: string; longPrompt: boolean; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }[]>(Prisma.sql`
+      SELECT "kind", "model", "status"::text AS "status",
+             ("inputTokens" + "cacheReadTokens" + "cacheWriteTokens") > ${LONG_PROMPT_TOKENS} AS "longPrompt",
+             COUNT(*)::int AS "requests",
+             COALESCE(SUM("inputTokens"), 0)::float8 AS "inputTokens", COALESCE(SUM("outputTokens"), 0)::float8 AS "outputTokens",
+             COALESCE(SUM("cacheReadTokens"), 0)::float8 AS "cacheReadTokens", COALESCE(SUM("cacheWriteTokens"), 0)::float8 AS "cacheWriteTokens"
+      FROM "AiRun" WHERE "createdAt" >= ${since}
+      GROUP BY 1, 2, 3, 4`),
     ctx.db.aiRun.count({ where: { userId: null, createdAt: { gte: new Date(now.getTime() - DAY_MS) } } }),
     ctx.db.aiRun.findMany({ where: { status: { not: 'OK' }, createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 15 }),
   ]);
@@ -249,12 +274,12 @@ export async function getAssistantUsage(ctx: Ctx, days = 30): Promise<AssistantU
   const byKind = new Map<AiKind, ReturnType<typeof blank>>(AI_KINDS.map((k) => [k, blank()]));
   const total = blank();
   for (const g of groups) {
-    const usage = { inputTokens: g._sum.inputTokens ?? 0, outputTokens: g._sum.outputTokens ?? 0, cacheReadTokens: g._sum.cacheReadTokens ?? 0, cacheWriteTokens: g._sum.cacheWriteTokens ?? 0 };
-    const cost = estimateCostUsd(g.model, usage);
+    const usage = { inputTokens: g.inputTokens, outputTokens: g.outputTokens, cacheReadTokens: g.cacheReadTokens, cacheWriteTokens: g.cacheWriteTokens };
+    const cost = estimateCostUsd(g.model, usage, { longPrompt: g.longPrompt });
     for (const row of [byKind.get(g.kind as AiKind), total]) {
       if (!row) continue;
-      row.requests += g._count._all;
-      if (g.status !== 'OK') row.failed += g._count._all;
+      row.requests += g.requests;
+      if (g.status !== 'OK') row.failed += g.requests;
       row.inputTokens += usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
       row.outputTokens += usage.outputTokens;
       // One model without a known price makes the sum unknown rather than too low.
