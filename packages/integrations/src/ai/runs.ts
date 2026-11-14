@@ -159,23 +159,68 @@ export async function runAi<T>(ctx: Ctx, model: AiModel, meta: AiRunMeta, reques
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000;
-/** After this many failures within a day the item is left alone until the day has passed. */
-const MAX_FAILURES_PER_DAY = 4;
-const FIRST_RETRY_MS = 10 * 60_000;
+const MINUTE_MS = 60_000;
 
 /**
- * Whether background work on one item may be tried now. Each failure triples the wait
- * (10 minutes, 30, 90), and after four failures within a day the item rests for the day.
- * A failure that only a person can fix (the key, the account) holds everything back for a while.
+ * Waits after a failure that is about the item itself (a file the model cannot make sense of,
+ * a request the service will not take, a refusal): 10 minutes, 30, 90, and after the fourth
+ * such failure within a day the item rests until the day has passed.
  */
-export async function mayAttempt(db: Db, kind: AiKind, subjectId: string, now: Date): Promise<boolean> {
-  const failures = await db.aiRun.findMany({ where: { kind, subjectId, status: { not: 'OK' }, createdAt: { gte: new Date(now.getTime() - DAY_MS) } }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
-  if (failures.length === 0) return true;
-  if (failures.length >= MAX_FAILURES_PER_DAY) return false;
-  return now.getTime() - failures[0]!.createdAt.getTime() >= FIRST_RETRY_MS * 3 ** (failures.length - 1);
+const ITEM_WAITS_MIN = [10, 30, 90];
+const MAX_ITEM_FAILURES_PER_DAY = ITEM_WAITS_MIN.length + 1;
+/**
+ * Waits after a failure of the service (it could not be reached, it was overloaded, it took too
+ * long). These say little about the item, so they do not use up its four chances, and after an
+ * outage of a morning the item is tried again within the hour. They still space its attempts
+ * out, because a file that times out every time looks exactly like this: 10 minutes, 30, then
+ * every hour, and a rest after eight within a day.
+ */
+const SERVICE_WAITS_MIN = [10, 30, 60];
+const MAX_SERVICE_FAILURES_PER_DAY = 8;
+
+/**
+ * Which of these items background work may try now. A failure of the key or the account is
+ * never held against an item: it holds everything back for a while instead (see servicePause).
+ * One query for the whole batch, so that a long queue costs no more to look at than a short one.
+ */
+export async function dueSubjects(db: Db, kind: AiKind, subjectIds: string[], now: Date): Promise<Set<string>> {
+  const due = new Set(subjectIds);
+  if (subjectIds.length === 0) return due;
+  const groups = await db.aiRun.groupBy({
+    by: ['subjectId', 'failure'],
+    where: { kind, subjectId: { in: subjectIds }, status: { in: ['FAILED', 'REFUSED'] }, createdAt: { gte: new Date(now.getTime() - DAY_MS) } },
+    _count: { _all: true },
+    _max: { createdAt: true },
+  });
+  const held = new Map<string, { item: number; itemAt: number; service: number; serviceAt: number }>();
+  for (const g of groups) {
+    if (!g.subjectId || g.failure === 'setup') continue;
+    const h = held.get(g.subjectId) ?? { item: 0, itemAt: 0, service: 0, serviceAt: 0 };
+    const at = g._max.createdAt?.getTime() ?? 0;
+    if (g.failure === 'unavailable') {
+      h.service += g._count._all;
+      h.serviceAt = Math.max(h.serviceAt, at);
+    } else {
+      h.item += g._count._all;
+      h.itemAt = Math.max(h.itemAt, at);
+    }
+    held.set(g.subjectId, h);
+  }
+  for (const [id, h] of held) {
+    const itemDue = h.item === 0 || (h.item < MAX_ITEM_FAILURES_PER_DAY && now.getTime() - h.itemAt >= ITEM_WAITS_MIN[h.item - 1]! * MINUTE_MS);
+    const serviceDue = h.service === 0 || (h.service < MAX_SERVICE_FAILURES_PER_DAY && now.getTime() - h.serviceAt >= SERVICE_WAITS_MIN[Math.min(h.service, SERVICE_WAITS_MIN.length) - 1]! * MINUTE_MS);
+    if (!itemDue || !serviceDue) due.delete(id);
+  }
+  return due;
 }
 
-const SETUP_PAUSE_MS = 15 * 60_000;
+/** Whether background work on one item may be tried now. See dueSubjects for the rule. */
+export async function mayAttempt(db: Db, kind: AiKind, subjectId: string, now: Date): Promise<boolean> {
+  return (await dueSubjects(db, kind, [subjectId], now)).has(subjectId);
+}
+
+const SETUP_PAUSE_MS = 15 * MINUTE_MS;
+const OUTAGE_PAUSE_MS = 5 * MINUTE_MS;
 
 /**
  * What the service last said was wrong with the key or the account, when that was within the
@@ -187,10 +232,53 @@ export async function recentSetupProblem(db: Db, now: Date): Promise<string | nu
   return last && last.status !== 'OK' ? (last.error ?? 'The key or the account is not accepted.') : null;
 }
 
+/**
+ * Why background work as a whole should wait, or null when it may go on. A wrong key or account
+ * holds it for a quarter of an hour; a service that could not be reached holds it for five
+ * minutes. Either is over as soon as any request has succeeded. Trouble of this kind hits every
+ * item alike, so it is waited out once, here, and not charged to whichever item was being tried.
+ */
+export async function servicePause(db: Db, now: Date): Promise<{ reason: 'setup' | 'unavailable'; detail: string } | null> {
+  const setup = await recentSetupProblem(db, now);
+  if (setup) return { reason: 'setup', detail: setup };
+  const last = await db.aiRun.findFirst({ where: { createdAt: { gte: new Date(now.getTime() - OUTAGE_PAUSE_MS) }, OR: [{ status: 'OK' }, { failure: 'unavailable' }] }, orderBy: { createdAt: 'desc' }, select: { status: true, error: true } });
+  return last && last.status !== 'OK' ? { reason: 'unavailable', detail: last.error ?? 'The service could not be reached.' } : null;
+}
+
 /** How many more requests the background process may make now without passing the daily allowance. */
 export async function automaticAllowanceLeft(db: Db, settings: AssistantSettings, now: Date): Promise<number> {
   const used = await db.aiRun.count({ where: { userId: null, createdAt: { gte: new Date(now.getTime() - DAY_MS) } } });
   return Math.max(0, settings.dailyAutomaticLimit - used);
+}
+
+/**
+ * The most requests the background process makes for one order in any 24 hours. One customer who
+ * sends forty attachments must not use up the day's allowance for everybody else's orders: what
+ * is over the limit waits until the day has passed.
+ */
+export const AUTOMATIC_REQUESTS_PER_ORDER_PER_DAY = 25;
+
+/** How many automatic requests each of these orders has had in the last 24 hours. Orders without any are not in the map. */
+export async function automaticRequestsByOrder(db: Db, orderIds: string[], now: Date): Promise<Map<string, number>> {
+  const ids = [...new Set(orderIds)];
+  if (ids.length === 0) return new Map();
+  const groups = await db.aiRun.groupBy({ by: ['orderId'], where: { userId: null, orderId: { in: ids }, createdAt: { gte: new Date(now.getTime() - DAY_MS) } }, _count: { _all: true } });
+  return new Map(groups.filter((g) => g.orderId).map((g) => [g.orderId!, g._count._all]));
+}
+
+/**
+ * Whether a rejection that has just been recorded for an item settles it for good. The service
+ * rejects a request about a file it cannot process, and then asking again only costs money. But
+ * it answers the same way when the account has reached a spend limit its owner set, or when
+ * something is wrong with requests in general, and then every waiting item would be written off
+ * one after the other. So a rejection counts as the item's own only once the service has shown
+ * that it works: this item was rejected before, and some request has succeeded since then.
+ */
+export async function rejectionSettles(db: Db, kind: AiKind, subjectId: string): Promise<boolean> {
+  const rejections = await db.aiRun.findMany({ where: { kind, subjectId, failure: 'rejected' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 2, select: { createdAt: true } });
+  const earlier = rejections[1];
+  if (!earlier) return false;
+  return !!(await db.aiRun.findFirst({ where: { status: 'OK', createdAt: { gt: earlier.createdAt } }, select: { id: true } }));
 }
 
 // ---------------------------------------------------------------------------

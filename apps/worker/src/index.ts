@@ -160,8 +160,9 @@ if (assistant) {
       const r = await runAssistantWork(systemCtx(db, 'Assistant'), assistant);
       if (!r) return undefined;
       if (r.setupProblem) return `not working, waiting for the key or the account to be fixed: ${r.setupProblem}`;
+      if (r.serviceDown && r.failed === 0) return undefined; // waiting out an outage that was reported when it was found
       const done = some([[r.briefs, 'briefs for operations'], [r.attachments, 'attachments looked at'], [r.bills, 'bills read'], [r.summaries, 'summaries rewritten'], [r.failed, 'requests failed']]);
-      return [done, r.allowanceUsedUp ? 'the day’s allowance for automatic requests is used up' : ''].filter(Boolean).join('; ') || undefined;
+      return [done, r.serviceDown ? `the service could not be reached, waiting a few minutes: ${r.serviceDown}` : '', r.allowanceUsedUp ? 'the day’s allowance for automatic requests is used up' : ''].filter(Boolean).join('; ') || undefined;
     },
   });
 }

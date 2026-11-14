@@ -5,7 +5,7 @@ import { nowOf, type Ctx } from '@bluven/core';
 import { quotedLine } from './context';
 import { MIN_IMAGE_BYTES, isReadableType, loadForModel } from './files';
 import { AiError, type AiModel } from './model';
-import { getAssistantSettings, runAi, type AssistantLanguage } from './runs';
+import { getAssistantSettings, rejectionSettles, runAi, type AssistantLanguage } from './runs';
 import { S, choice, record, text } from './shape';
 import { LANGUAGE_NAME } from './summary';
 
@@ -56,14 +56,14 @@ export const parseAttachmentReading =
 const LOOK_BACK_MS = 30 * 86_400_000;
 
 /** Attachments from customers, on an order, that nobody has filed and the assistant has not looked at yet. Oldest first. */
-export async function pendingAttachments(db: Db, now: Date, limit: number): Promise<string[]> {
+export async function pendingAttachments(db: Db, now: Date, limit: number): Promise<{ id: string; orderId: string }[]> {
   const rows = await db.emailAttachment.findMany({
     where: { aiReadAt: null, documentId: null, storageKey: { not: null }, message: { direction: 'IN', orderId: { not: null }, sentAt: { gte: new Date(now.getTime() - LOOK_BACK_MS) } } },
-    orderBy: { createdAt: 'asc' },
-    select: { id: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, message: { select: { orderId: true } } },
     take: limit,
   });
-  return rows.map((r) => r.id);
+  return rows.map((r) => ({ id: r.id, orderId: r.message.orderId! }));
 }
 
 /**
@@ -109,8 +109,9 @@ export async function readAttachment(ctx: Ctx, attachmentId: string, model: AiMo
     await settle({ aiKind: value.folder, aiConfidence: value.confidence, aiNote: value.description || null });
     return 'read';
   } catch (e) {
-    // A file the model will not or cannot open stays that way: asking again only costs money.
-    if (e instanceof AiError && (e.failure === 'rejected' || e.failure === 'refused')) {
+    // A file the model will not open stays that way: asking again only costs money. One the
+    // service would not take is settled only once that is known to be about the file (see rejectionSettles).
+    if (e instanceof AiError && (e.failure === 'refused' || (e.failure === 'rejected' && (await rejectionSettles(ctx.db, 'attachment', attachment.id))))) {
       await settle({ aiKind: null, aiNote: null });
       return 'read';
     }
