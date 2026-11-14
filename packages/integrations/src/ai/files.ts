@@ -25,11 +25,11 @@ export function isReadableType(mimeType: string): boolean {
 }
 
 /** Loads a stored PDF or picture for the model, or says why it cannot be read. */
-export async function loadForModel(file: { storageKey: string; mimeType: string; fileName: string; sizeBytes: number }): Promise<ReadableFile> {
+export async function loadForModel(file: { storageKey: string; mimeType: string; sizeBytes: number }): Promise<ReadableFile> {
   if (file.mimeType === 'application/pdf') {
     if (file.sizeBytes > MAX_PDF_BYTES) return { ok: false, reason: 'The PDF is too large to be read.' };
     try {
-      return { ok: true, input: { type: 'pdf', data: await readFile(getStorage().absolutePath(file.storageKey)), title: file.fileName } };
+      return { ok: true, input: { type: 'pdf', data: await readFile(getStorage().absolutePath(file.storageKey)) } };
     } catch {
       return { ok: false, reason: 'The file is no longer in storage.' };
     }
