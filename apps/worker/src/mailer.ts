@@ -6,7 +6,7 @@
 //                                     one at /api/send-mail). For hosts that block outgoing SMTP.
 //   SMTP_URL                          talk to the mail server directly.
 import nodemailer, { type Transporter } from 'nodemailer';
-import type { Db } from '@bluven/db';
+import type { Db, Prisma } from '@bluven/db';
 import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getConfig, localDateTimeInput, notificationKind, parseDateOnly, withJobLock, type NotificationKind } from '@bluven/core';
 
 /** Give the person a moment to see it in the app before an email goes out. */
@@ -97,15 +97,25 @@ export async function sendNotificationEmails(db: Db, now: Date = new Date()): Pr
       return true;
     }
     const config = getConfig();
-    const candidates = await db.notification.findMany({
-      // People who chose a daily summary get theirs in one e-mail each morning instead.
-      where: { emailStatus: 'PENDING', createdAt: { lte: new Date(now.getTime() - GRACE_MS) }, user: { dailySummary: false } },
+    // A message that failed before waits its turn; the wait grows with every failure. The wait is
+    // part of the question put to the database: a message that is waiting must not take the
+    // place of one that is due, or an afternoon's worth of failures holds up everything after it.
+    const waitedLongEnough: Prisma.NotificationWhereInput[] = RETRY_AFTER_MS.map((wait, i) => ({
+      emailAttempts: i === RETRY_AFTER_MS.length - 1 ? { gte: i + 1 } : i + 1,
+      emailLastAttemptAt: { lte: new Date(now.getTime() - wait) },
+    }));
+    const due = await db.notification.findMany({
+      where: {
+        emailStatus: 'PENDING',
+        createdAt: { lte: new Date(now.getTime() - GRACE_MS) },
+        // People who chose a daily summary get theirs in one e-mail each morning instead.
+        user: { dailySummary: false },
+        OR: [{ emailLastAttemptAt: null }, ...waitedLongEnough],
+      },
       include: { user: { select: { email: true, name: true, isActive: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: 200,
     });
-    // A message that failed before waits its turn; the wait grows with every failure.
-    const due = candidates.filter((n) => !n.emailLastAttemptAt || now.getTime() - n.emailLastAttemptAt.getTime() >= RETRY_AFTER_MS[Math.min(n.emailAttempts, RETRY_AFTER_MS.length) - 1]!);
     for (const n of due) {
       if (n.readAt || !n.user.isActive) {
         await db.notification.update({ where: { id: n.id }, data: { emailStatus: 'SKIPPED' } });
