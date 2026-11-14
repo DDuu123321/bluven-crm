@@ -1,7 +1,7 @@
 # Bluven CRM 部署与上线指南
 
-版本：v1.3
-日期：2026-11-14
+版本：v1.4
+日期：2026-11-15
 读者：负责安装、上线和日常维护系统的人
 
 ---
@@ -63,11 +63,11 @@ CRM 不放在 `www.bluven.com.au/某个路径` 下面，原因有两个：网站
 |---|---|---|
 | `manager@bluven.demo` | 经理 | 报表、全部订单、未分配线索 |
 | `sam@bluven.demo`、`alex@bluven.demo` | 销售 | 自己的订单、任务和提醒 |
-| `finance@bluven.demo` | 财务 | 等待确认的定金 |
-| `ops@bluven.demo` | 运营 | 销售推送过来的订单 |
+| `finance@bluven.demo` | 财务 | 定金、应收尾款和已到账的尾款 |
+| `ops@bluven.demo` | 运营 | 待接收的订单、安排中的工单、已安装待尾款的工单 |
 | `admin@bluven.demo` | 管理员 | 用户、规则和各项接入设置 |
 
-演示数据是 13 张处在不同阶段的订单：两条未分配线索，以及新建、已联系、已报价（其中一张六天没动静，能看到闲置提醒）、已签约、等待财务、可以推送、运营处理中、已交接各一两张，另有丢单和暂缓各一张。演示里没有接客户邮件、AI 助手、Pylon 和通知邮件，对应页面会显示"未设置"。
+演示数据是 16 张处在不同阶段的订单：两条未分配线索、一条已分派还没开工的线索，以及跟进中、设计方案、方案已发（其中一张六天没动静，能看到闲置提醒）、已付定金（一张资料夹齐全可以推送，一张还差资料）、已推送待接收、运营处理中、已安装待尾款（尾款已逾期）、已完成各一两张，另有丢单和暂缓各一张。演示里没有接客户邮件、AI 助手、Pylon 和通知邮件，对应页面会显示"未设置"；自动发给客户的邮件会写好留在订单上，注明没有发出。
 
 用完在终端里按 Ctrl+C 停止。想清空重来，运行 `docker compose -f docker-compose.local.yml down -v`，下次启动会重新生成演示数据。3000 端口被占用时，在命令前加 `CRM_PORT=3001`（PowerShell 里先执行一行 `$env:CRM_PORT=3001`）。
 
@@ -179,6 +179,8 @@ ANTHROPIC_API_KEY=<见第 8 节，可先留空>
 
 把新代码推送到 Railway 跟踪的分支，Railway 会自动重新构建并部署。数据库结构的变更在新版本启动时自动执行。
 
+从流程改版之前的版本升级时，数据库迁移会自动把已有订单换算到新的阶段：按订单上已经发生的事实重新计算，例如"已联系"变为"跟进中"，"已报价""已签约"变为"方案已发"，"定金待确认""定金已确认"变为"已付定金"，"运营已接收"变为"运营处理中"。不需要手工处理，升级前照常备份即可。
+
 因为挂了磁盘，重新部署时会有几十秒的中断（Railway 不允许新旧两个版本同时挂同一块磁盘）。挑没人用的时间推送。
 
 ### 2.9 在 Railway 上要知道的几件事
@@ -288,7 +290,7 @@ docker compose up -d --build       # 重新构建并启动；数据库结构变�
 docker compose ps
 ```
 
-`migrate` 这个一次性容器负责数据库结构升级，它成功退出后 web 和 worker 才会启动。
+`migrate` 这个一次性容器负责数据库结构升级，它成功退出后 web 和 worker 才会启动。从流程改版之前的版本升级时，已有订单会自动换算到新的阶段，见 2.8 的说明。
 
 ---
 
@@ -304,7 +306,7 @@ docker compose ps
 
 2. **网站后台这边**：Railway → 网站后台（CMS）服务 → Variables，把 `CRM_SYNC_KEY` 设成这把密钥。保存后它会自动重新部署。
 3. **CRM 这边**：把 `BLUVEN_LEADS_KEY` 设成同一把密钥，`BLUVEN_LEADS_URL` 设成 `https://cms.bluven.com.au/api/crm/leads`。方式 A 填在 Railway 的 Variables 里，方式 B 填在 `.env` 里然后 `docker compose up -d`。
-4. 登录 CRM，打开 Administration → Lead sources。最上面的 "Bluven website" 应显示绿色的 **Connected** 和最近一次检查的时间。显示红色 Failing 时，旁边会写明原因，例如密钥不一致。
+4. 登录 CRM，打开 Administration → Intake channels。最上面的 "Bluven website" 应显示绿色的 **Connected** 和最近一次检查的时间。显示红色 Failing 时，旁边会写明原因，例如密钥不一致。
 5. 在网站上提交一条测试询价，一两分钟内它会出现在 CRM 的 Unassigned leads 里。
 
 要知道的几点：
@@ -323,28 +325,32 @@ docker compose ps
 1. **建用户。** Administration → Users → Add user。每个人一个账号，勾选角色：
    - Sales：销售，只看到自己的订单。
    - Manager：经理，看到全部订单，负责分派。
-   - Finance：财务，确认定金。
-   - Operations：运营，接收或退回订单。
-   - Admin：管理员，管用户、线索来源和规则。
+   - Finance：财务，查看定金和尾款，确认尾款到账，处理退款。
+   - Operations：运营，接收订单并确认定金到账，安排工单，标记完工，关闭工单。
+   - Admin：管理员，管用户、接入渠道、规则和客户邮件模板。
 
    一个人可以有多个角色。你给每个人设一个临时密码，当面或电话告诉对方，对方第一次登录时会被要求改密码。
 
-2. **确认网站线索已接通。** Administration → Lead sources，见第 4 节。
+2. **确认网站线索已接通。** Administration → Intake channels，见第 4 节。
 
-3. **检查交接清单。** Administration → Handoff checklist。默认必填：电费账单、安装位置照片、电表箱照片。地址完整、签字合同、定金已确认这三项是内置的，始终必填。可以按需要增减资料类型。
+   **补全线索来源。** Administration → Lead sources（经理也能改）。这是销售开工时必选的"客户从哪里来"，合作方按它结算。默认七项：Bluven website、Partner、Purchased lead、Referral from a customer、Advertising、Called or walked in、Other / not known。可以把每家合作方单独列一项，也可以只留一个 Partner、让销售在旁边的备注里写是哪家。
+
+3. **检查交接清单。** Administration → Handoff checklist。默认必填：电费账单、安装位置照片、电表箱照片。地址完整、客户接受的方案、定金付款凭证这三项是内置的，始终必填；签字合同不是必填。可以按需要增减资料类型。
 
 4. **检查丢单原因。** Administration → Lost reasons。默认给了十个，可以增删改。
 
-5. **检查规则。** Administration → Rules。默认 5 天提醒销售、10 天提醒经理、15 天回池，定金建议比例 10%。
+5. **检查规则。** Administration → Rules。默认 5 天提醒销售、8 天提醒经理、10 天回池，定金建议比例 10%。
    同一页还有资料保留的设置：默认订单结束后保留 2 年，到期前 30 天提醒销售和经理，**不自动删除**。要不要打开"到期自动删除"由你们决定；不打开的话，过期的资料每周提醒经理一次，直到有人处理。
 
-6. **接 Pylon（可选）。** 见第 6 节。不接也能用，报价和合同由销售手动录入和上传。
+   **检查运营的提醒和客户邮件。** Administration → Operations and customer e-mails。默认完工后 2 个工作日提醒运营申请补贴，请客户在 5 个工作日内付尾款。同一页是自动发给客户的三封邮件（欢迎、安装日期、感谢并请付尾款）的英文文字，请负责人过目；每封可以单独关掉。从哪个邮箱发也在这一页选，见 7.5。
+
+6. **接 Pylon（可选）。** 见第 6 节。不接也能用，报价版本由销售手动录入。
 
 7. **接客户邮件（可选）。** 见第 7 节。不接也能用，只是和客户的邮件往来不会出现在订单里。
 
 8. **开启 AI 助手（可选）。** 见第 8 节。不开也能用，只是没有总结、回信草稿、附件识别、账单读取和交接简报。
 
-9. **看一眼邮件模板（接了客户邮件才用得上）。** Administration → Email templates。系统自带四个英文模板：首次联系、索要账单和照片、报价跟进、签约后的下一步。经理可以改写、增加、隐藏或删除。
+9. **看一眼邮件模板（接了客户邮件才用得上）。** Administration → Email templates。系统自带四个英文模板：首次联系、索要账单和照片、报价跟进、确认成交后的定金与下一步。经理可以改写、增加、隐藏或删除。
 
 ---
 
@@ -364,13 +370,13 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 
 接好之后的效果：
 
-- 销售在订单的 "Quote, contract & deposit" 页点 Design in Pylon，Pylon 会带着客户信息和 CRM 订单号打开。**订单号就是两边对账的依据，不要在 Pylon 里改项目的 reference number。**
-- 项目已经在 Pylon 里、当初没带订单号的：在同一页点 Link Pylon project，粘贴这个项目在 Pylon 里的地址（浏览器地址栏里 `https://app.getpylon.com/library/...` 那一串），先点 Check 核对客户和地址，再点 Link project。它已有的设计会立刻变成报价版本；客户已经签过字的，签字 PDF 直接归档为合同。
-- Pylon 里每做一版设计，CRM 自动出现一个报价版本。这一步不改变订单阶段。
-- 客户在 Pylon 网页上签字，CRM 自动把签字 PDF 归档，订单变为 Signed。
-- 客户通过 Pylon 支付网关付定金，CRM 自动生成一条待财务确认的定金。
+- 销售在订单的 "Proposal & deposit" 页点 Design in Pylon，Pylon 会带着客户信息和 CRM 订单号打开。**订单号就是两边对账的依据，不要在 Pylon 里改项目的 reference number。**
+- 项目已经在 Pylon 里、当初没带订单号的：在同一页点 Link Pylon project，粘贴这个项目在 Pylon 里的地址（浏览器地址栏里 `https://app.getpylon.com/library/...` 那一串），先点 Check 核对客户和地址，再点 Link project。它已有的设计会立刻变成报价版本；客户已经签过字的，签字 PDF 直接存进订单，那一版标为客户接受。
+- Pylon 里每做一版设计，CRM 自动出现一个报价版本，订单进入 Design。
+- 客户在 Pylon 网页上签字，CRM 自动把签字 PDF 存进订单，把那一版标为客户接受，并提醒销售记录定金。订单阶段不因签字改变。
+- 客户通过 Pylon 支付网关付定金，CRM 自动生成定金记录，订单变为 Deposit paid；运营接收订单时确认到账。
 
-说明：读取 Pylon 的事件、项目和设计，关联项目生成报价，以及已签字项目的合同归档，都已经用 Bluven 的真实 Pylon 账号验证过（只读，没有改动 Pylon 里的任何东西）。Webhook 投递和支付网关付款这两条还没有在真实账号上见过，第一次出现时请在 Administration → Pylon 页面确认事件是 Done；如果出现 Failed，把页面上的错误信息发给开发者。
+说明：读取 Pylon 的事件、项目和设计，关联项目生成报价，以及已签字项目的签字文件存档，都已经用 Bluven 的真实 Pylon 账号验证过（只读，没有改动 Pylon 里的任何东西）。Webhook 投递和支付网关付款这两条还没有在真实账号上见过，第一次出现时请在 Administration → Pylon 页面确认事件是 Done；如果出现 Failed，把页面上的错误信息发给开发者。
 
 ---
 
@@ -421,7 +427,7 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 - 客户来信时，订单的负责销售会在 CRM 里收到一条通知。这类通知只在系统内显示，不另发邮件。
 - 客户同时有几张进行中的订单时，系统不替人决定这封信属于哪一张：它出现在这位客户各张订单 Email 页的 **Not on an order yet** 里，负责销售会收到一条通知去认领。认领之前，这封信不进任何订单的时间线，AI 也不处理它的附件。
 - **"是谁发的"不听邮件自己说的。** 只有已发送文件夹里的邮件，以及本人从那里挪到自建文件夹里的邮件，才算销售发出的；收件箱里一封自称是本人发的信不算。发件地址不在客户资料上，或者这个地址是随网站表单进来、还没有人确认过的，邮件上方会有黄色提示，回复时也不会默认发给这个地址。
-- 邮件带的附件跟着邮件保存。销售在订单的 Email 页给附件选一个资料类型，点 File，它就进了订单的资料；签字合同可以直接归档为合同。
+- 邮件带的附件跟着邮件保存。销售在订单的 Email 页给附件选一个资料类型，点 File，它就进了订单的资料；客户签过字的文件可以直接存为签字版（Signed copy）。
 - 销售从订单里发信时，可以勾选订单里已有的资料作为附件，单封合计不超过 20 MB。收件人里至少要有一个是客户资料上已确认的地址，防止把客户的资料发错人。
 - 同一位客户一天之内发来的附件累计超过 250 MB 后，后面的附件不再保存，留在邮箱里看。一时取不到的附件，系统会在之后几个小时里再试三次。
 - 运营能在自己的订单页上看这些邮件，只读。财务看不到。
@@ -439,7 +445,24 @@ Pylon 那边，进入 Settings → Integrations & API → API settings：
 - 一个邮箱只能被一个 CRM 用户连接。
 - 如果公司的 Zoho 账号不在澳大利亚数据中心，另外设置 `ZOHO_ACCOUNTS_URL` 和 `ZOHO_MAIL_URL`，例如 `https://accounts.zoho.com` 和 `https://mail.zoho.com`，并到对应数据中心的 API console 登记。
 
-说明：这部分是按 Zoho 的官方接口文档写的，自动测试对着的是一个替身 Zoho 服务，**还没有连过真实的 Zoho 账号**。第一次连接时请先用一个人的邮箱试：连接、看最近的客户邮件是否出现、从订单里发一封信给自己。如果连接失败或读取失败，把 Mailbox 页或 Administration → Email 页上显示的错误信息发给开发者。
+### 7.5 运营自动发给客户的三封邮件
+
+运营接收订单、发送安装日期、标记完工时，系统各自动给客户发一封邮件（欢迎、安装日期与到货、感谢并请付尾款）。它们也走 Zoho，所以要先完成 7.1。
+
+1. 决定从哪个邮箱发。建议用运营的公共邮箱（例如 `operations@...`），这样客户的回信都回到那里。
+2. 用管这个邮箱的人的 CRM 账号登录，点右上角名字 → Mailbox → Connect Zoho Mail，登录的是那个公共邮箱。一个邮箱只能连到一个 CRM 账号上。
+3. 管理员打开 Administration → Operations and customer e-mails，在 **Send from** 里选这个邮箱，保存。
+
+要知道的几件事：
+
+- **Send from** 不选时，每封邮件从执行那一步的运营自己连接的邮箱发出。那个人没有连接邮箱的话，邮件发不出去。
+- 发不出去的邮件不会丢：它留在订单页的 E-mails to the customer 一栏，写着原因，执行那一步的人会收到通知。问题解决后点 Send again。
+- 只发到已确认的客户邮箱。客户没有邮箱、或者邮箱是随网站表单进来还没人确认的，邮件不发并注明原因。
+- 后台任务每分钟发送一次。发送失败按 5 分钟、30 分钟、3 小时重试。
+- 完全没有接 Zoho 时，这三封邮件照样写好留在订单上，注明没有发出，由运营自己联系客户。其余流程不受影响。
+- 邮件文字在同一页修改，每封可以单独关掉。改动只影响之后排队的邮件。
+
+说明：这部分是按 Zoho 的官方接口文档写的，自动测试对着的是一个替身 Zoho 服务，**还没有连过真实的 Zoho 账号**。第一次连接时请先用一个人的邮箱试：连接、看最近的客户邮件是否出现、从订单里发一封信给自己。运营的三封自动邮件同样先用一张测试订单走一遍：接收、发送日期、完工，看三封邮件是否到达。如果连接失败或读取失败，把 Mailbox 页或 Administration → Email 页上显示的错误信息发给开发者。
 
 ---
 
@@ -508,7 +531,7 @@ Administration → AI assistant 页面列出最近 30 天每类功能的请求�
 ### 8.5 要知道的几件事
 
 - **AI 会出错。** 总结、简报、账单数字都只是帮人省时间的初稿，用之前要对照时间线和原文件。页面上每一处都有这句提醒。
-- **它不替人做决定。** 回信草稿只填进输入框，要销售自己看过、改过、点 Send 才发出。附件只给出建议，归档要人点 File。识别成签字合同的附件也只是把 Signed contract 按钮标出来，合同归档仍然要人确认报价版本和签字日期。
+- **它不替人做决定。** 回信草稿只填进输入框，要销售自己看过、改过、点 Send 才发出。附件只给出建议，归档要人点 File。识别成签字文件的附件也只是把 Signed copy 按钮标出来，存档仍然要人确认报价版本和签字日期。
 - **账单只填空的，而且只在地址对得上时才填。** NMI 和零售商已经有值的不覆盖，页面会提示不一致，由销售决定用哪个。账单上的供电地址和订单地址对不上时什么都不填，并通知负责销售；账单上读不出地址、或者订单还没有地址时也不填，销售核对后在账单卡片上点 Use the bill’s 即可填上。
 - AI 填的值在房产信息里带着 from the bill 或 from the summary 的标记。有人手动改过之后标记消失，操作日志里两次都有记录。
 - 财务看不到总结、简报和账单读取结果。运营在订单推送之后能看，不能改。
@@ -553,7 +576,7 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 
 `MAX_UPLOAD_MB` 是资料页上传单个文件的上限，方式 B 默认 500。如果调大，同时把 `deploy/Caddyfile` 里的 `max_size` 调到比它略大。方式 A 建议保持 200，原因见 2.9。
 
-报价文件、签字合同和定金凭证走的是另一条上传通道，固定为一次提交合计不超过 60 MB、最多 10 个文件，不受 `MAX_UPLOAD_MB` 影响。
+报价文件、签字版和定金凭证走的是另一条上传通道，固定为一次提交合计不超过 60 MB、最多 10 个文件，不受 `MAX_UPLOAD_MB` 影响。
 
 ---
 
@@ -563,14 +586,14 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 |---|---|---|
 | 系统是否活着 | 浏览器打开 `https://crm.bluven.com.au/api/intake/health` | 显示 `{"ok":true}` |
 | 服务状态 | 方式 A：Railway 面板里服务是绿色。方式 B：`docker compose ps` | 都在运行 |
-| 网站线索 | CRM 的 Administration → Lead sources | "Bluven website" 显示 Connected，检查时间在几分钟内 |
+| 网站线索 | CRM 的 Administration → Intake channels | "Bluven website" 显示 Connected，检查时间在几分钟内 |
 | 后台任务 | 方式 A：Railway 的部署日志。方式 B：`docker compose logs --since 1h worker` | 有提醒、回池、新线索时才有日志，没有报错 |
 | Pylon 事件 | CRM 的 Administration → Pylon | 没有 Failed，最近收到事件的时间合理 |
 | 客户邮件 | CRM 的 Administration → Email | 每个邮箱都是 Working，Last read 在几分钟内 |
 | AI 助手 | CRM 的 Administration → AI assistant | Failed 一栏是 0 或很少，"Requests that did not succeed" 里没有新的记录 |
 | 磁盘空间 | 方式 A：Railway 磁盘的用量。方式 B：`df -h` | 留有余量 |
 
-后台任务负责的事：从网站取线索、闲置 5 / 10 / 15 天的提醒和回池、暂缓到期自动恢复、待办到期提醒、通知邮件和每日摘要、处理 Pylon 事件、读取已连接的邮箱、AI 助手自动做的那几件事、资料到期提醒，以及把删除满 30 天的文件从磁盘上移除。**后台任务不在运行时这些都不会发生**，但不影响大家正常使用系统，恢复运行后会补上。
+后台任务负责的事：从网站取线索、闲置 5 / 8 / 10 天的提醒和回池、暂缓到期自动恢复、待办到期提醒、完工后提醒运营申请补贴和查看尾款、把自动邮件发给客户、通知邮件和每日摘要、处理 Pylon 事件、读取已连接的邮箱、AI 助手自动做的那几件事、资料到期提醒，以及把删除满 30 天的文件从磁盘上移除。**后台任务不在运行时这些都不会发生**，但不影响大家正常使用系统，恢复运行后会补上。
 
 ---
 
@@ -582,7 +605,7 @@ MAIL_FROM=Bluven CRM <crm@bluven.com.au>
 **登录后马上又被退回登录页。**
 请用 `https://` 开头的正式地址访问。`APP_URL` 以 `https://` 开头时，登录凭证只在 HTTPS 下有效，用 `http://` 打开就会登录不上。方式 A 的 `APP_URL` 写成 `https://crm.bluven.com.au`；方式 B 的 `CRM_DOMAIN` 只填域名 `crm.bluven.com.au`，不要带 `https://`，系统会自己加上。
 
-**Lead sources 页显示 Failing。**
+**Intake channels 页显示 Failing。**
 页面上会写原因。最常见的是两边的密钥不一致：CRM 的 `BLUVEN_LEADS_KEY` 必须和网站后台的 `CRM_SYNC_KEY` 完全相同。提示 "not switched on there" 说明网站后台那边还没设 `CRM_SYNC_KEY`。
 
 **忘记密码。**
@@ -605,7 +628,7 @@ cd /repo/packages/core && node --import tsx src/cli/reset-password.ts 管理员�
 同一个邮箱 5 分钟内输错 5 次，会暂停几分钟。之后每再错一次，账号锁定的时间加倍，最长 15 分钟。输对一次即恢复正常。着急的话请管理员在 Users 里重置密码，重置会同时解除锁定。已经登录的人不受影响。
 
 **上传大文件失败。**
-方式 A：文件要在 5 分钟内传完，换个快一点的网络，或者把视频压缩后再传。方式 B：检查 `MAX_UPLOAD_MB` 和 `deploy/Caddyfile` 里的 `max_size`，以及磁盘空间。报价文件、合同和定金凭证被拒绝时，看是不是一次提交超过了 60 MB，这个上限是固定的。
+方式 A：文件要在 5 分钟内传完，换个快一点的网络，或者把视频压缩后再传。方式 B：检查 `MAX_UPLOAD_MB` 和 `deploy/Caddyfile` 里的 `max_size`，以及磁盘空间。报价文件、签字版和定金凭证被拒绝时，看是不是一次提交超过了 60 MB，这个上限是固定的。
 
 **收不到通知邮件。**
 方式 A 只能走邮件中继，直接填 `SMTP_URL` 是发不出去的。检查 `MAIL_RELAY_URL` 和 `MAIL_RELAY_KEY` 是否和网站后台的一致。系统内的通知不受影响。

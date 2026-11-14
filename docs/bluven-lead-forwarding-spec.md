@@ -1,7 +1,7 @@
 # Bluven 网站 → CRM 线索对接说明
 
-版本：v2.0
-日期：2026-11-11
+版本：v2.1
+日期：2026-11-15
 读者：维护 Bluven 网站（仓库 `Website-Restructuring`）的人
 配套文档：`docs/sales-crm-design.md` 第 5 节，`docs/deployment-guide.md` 第 4 节
 
@@ -33,7 +33,7 @@
 - 网站后台（Railway 上的 CMS 服务）：`CRM_SYNC_KEY=<密钥>`
 - CRM：`BLUVEN_LEADS_URL=https://cms.bluven.com.au/api/crm/leads`，`BLUVEN_LEADS_KEY=<同一把密钥>`
 
-接通后在 CRM 的 Administration → Lead sources 页能看到连接状态、最近一次检查时间和最近一条线索的到达时间。
+接通后在 CRM 的 Administration → Intake channels 页能看到连接状态、最近一次检查时间和最近一条线索的到达时间。
 
 ## A.2 CRM 依赖网站接口的哪些行为
 
@@ -47,7 +47,7 @@
 
 CRM 的做法：记住上次取到的最后一条的时间，下次从那个时间取；边界上那一条会被再次返回，CRM 认得它，不会重复入库。某一类取满 200 条时，说明后面还有，CRM 会接着取，直到取完。
 
-一个已知的边界：如果有超过 200 条线索的 `createdAt` 精确到毫秒完全相同，CRM 无法翻过这一页，会在 Lead sources 页报错并通知管理员。正常提交不会出现这种情况。
+一个已知的边界：如果有超过 200 条线索的 `createdAt` 精确到毫秒完全相同，CRM 无法翻过这一页，会在 Intake channels 页报错并通知管理员。正常提交不会出现这种情况。
 
 ## A.3 现在带过来哪些信息
 
@@ -103,14 +103,14 @@ CRM 的做法：记住上次取到的最后一条的时间，下次从那个时�
 - **去重规则和其他入口一样。** 同一个人同一个地址已有进行中的订单时，新线索并入那张订单的时间线，不另建订单。
 - **网站里之后的修改不会同步。** 线索进了 CRM 之后，在网站后台再改状态、改备注，CRM 不会跟着变。销售在 CRM 里跟进。
 - **进不来的线索会报出来。** 例如电话号码不合规则。经理会收到通知，审计日志里有记录，线索本身仍在网站后台。
-- **连接出问题会报出来。** 连续 5 次失败，管理员收到通知；Lead sources 页显示原因。
+- **连接出问题会报出来。** 连续 5 次失败，管理员收到通知；Intake channels 页显示原因。
 
 ## A.6 验收
 
 - 在网站提交一条询价，两分钟内出现在 CRM 的 Unassigned leads 里，姓名、电话、地址正确。
 - 同一条线索不会出现两次。
 - 把 CRM 停掉，在网站提交一条询价，再启动 CRM：这条线索在启动后一两分钟内出现。
-- 把 CRM 的密钥改错：Lead sources 页显示 Failing 和原因；改回后恢复 Connected。
+- 把 CRM 的密钥改错：Intake channels 页显示 Failing 和原因；改回后恢复 Connected。
 
 ---
 
@@ -118,7 +118,7 @@ CRM 的做法：记住上次取到的最后一条的时间，下次从那个时�
 
 以下是 CRM 的线索接收接口的完整规范。用方式一上线时可以不看这一部分。
 
-这个接口也用于其他系统向 CRM 送线索（例如合作方）。其他系统的密钥由管理员在 Administration → Lead sources 里新建来源后生成。**其他公司的系统权限更小**：不能用 `dryRun` 和 `backfill`；它送来的线索如果和已有客户重复，只会被告知"重复"，不会得到订单号，也不会改动已有客户的联系方式。
+这个接口也用于其他系统向 CRM 送线索（例如合作方）。其他系统的密钥由管理员在 Administration → Intake channels 里新建渠道后生成。**其他公司的系统权限更小**：不能用 `dryRun` 和 `backfill`；它送来的线索如果和已有客户重复，只会被告知"重复"，不会得到订单号，也不会改动已有客户的联系方式。
 
 ## 1. 目标
 
@@ -148,7 +148,7 @@ Bluven 网站每收到一条新线索，立即转发一份到 CRM。Bluven 仍�
 POST https://crm.bluven.com.au/api/intake/leads
 ```
 
-token 由 CRM 管理员在 Administration → Lead sources 里为 "Bluven website" 这个来源生成，只显示一次。CRM 侧的这个接口已经实现，本文描述的行为均有自动化测试覆盖。
+token 由 CRM 管理员在 Administration → Intake channels 里为 "Bluven website" 这个渠道生成，只显示一次。CRM 侧的这个接口已经实现，本文描述的行为均有自动化测试覆盖。
 
 健康检查（可选，用于发送前探活）：
 
@@ -340,7 +340,7 @@ HTTP 200 中 `ok: false` 的行不是网络问题，不要自动重试。在 Blu
 
 ## 6. 联调流程
 
-1. 在 CRM 的 Administration → Lead sources 里为 "Bluven website" 生成 token。没有单独的测试环境时，用 `dryRun: true` 联调，它不会写入任何数据。
+1. 在 CRM 的 Administration → Intake channels 里为 "Bluven website" 生成 token。没有单独的测试环境时，用 `dryRun: true` 联调，它不会写入任何数据。
 2. 用 `dryRun: true` 发一批样例，确认校验通过。
 3. 正式发送三类样例：字段齐全的、只有 `firstName` + `phone` + `externalId` 的、故意带错误枚举值的。
 4. 幂等验证：同一 `externalId` 连发两次，第二次应返回 `already_received`。

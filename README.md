@@ -1,23 +1,27 @@
 # Bluven CRM
 
-Sales CRM for Bluven, a residential solar and battery installer. It takes a lead from the moment it
-arrives to the moment operations accepts the finished order:
+CRM for Bluven, a residential solar and battery installer. It takes a lead from the moment it
+arrives to the moment the job is closed with the final payment:
 
-lead intake and duplicate detection → assignment → follow-up (timeline, tasks, documents) → quote and
-signed contract (designed in Pylon) → deposit confirmed by finance → handoff to operations, with a
-return loop when something is missing.
+lead intake and duplicate detection → assignment by the manager → the salesperson opens the job and
+says where the customer came from → follow-up (timeline, tasks, documents) → design in Pylon and
+proposal by e-mail → deposit → push to operations → operations accept the order (confirming the
+deposit), arrange the installation and mark the job as done → final payment, job closed. The
+customer is written to automatically at three points; operations send an order back to sales only
+when they cannot sort something out themselves.
 
-**Status:** Phases 1 to 3 and most of Phase 4 are built and tested: the sales side, customer
+**Status:** the whole flow is built and tested: sales, operations up to the closed job, customer
 e-mail through Zoho Mail, the AI assistant, document retention, the report and e-mail templates.
-Zoho Mail and the assistant have only been run against local stand-ins, never against the real
-services. Not built: creating Pylon projects through the API, converting HEIC photos, and a
-layout for phones.
+Zoho Mail (including the automatic e-mails to customers) and the assistant have only been run
+against local stand-ins, never against the real services. Not built: a connection to accounting
+software, a time zone per customer or salesperson, public holidays in working-day counts, creating
+Pylon projects through the API, converting HEIC photos, and a layout for phones.
 
 ## Documentation
 
 | Document | For | Language |
 |---|---|---|
-| [docs/sales-process-guide.md](docs/sales-process-guide.md) | Sales, managers, finance, operations: how the process works | 中文 |
+| [docs/sales-process-guide.md](docs/sales-process-guide.md) | Sales, managers, operations, finance: how an order goes from lead to closed job | 中文 |
 | [docs/deployment-guide.md](docs/deployment-guide.md) | Whoever installs and runs the system | 中文 |
 | [docs/bluven-lead-forwarding-spec.md](docs/bluven-lead-forwarding-spec.md) | Whoever maintains the Bluven website: how its leads reach the CRM | 中文 |
 | [docs/sales-crm-design.md](docs/sales-crm-design.md) | Developers: design, data model, rules, phases | 中文 |
@@ -26,9 +30,11 @@ layout for phones.
 
 ```
 apps/web                Next.js 16 application: all pages, Server Actions and the HTTP API
-apps/worker             Background process: idle rules, reminders, notification emails and daily
-                        summaries, Pylon events, collecting the website's leads, reading connected
-                        mailboxes, the assistant's unattended work, document retention
+apps/worker             Background process: idle rules, reminders (tasks, and for operations the
+                        rebate and the balance after a job is done), the automatic e-mails to
+                        customers, notification emails and daily summaries, Pylon events, collecting
+                        the website's leads, reading connected mailboxes, the assistant's
+                        unattended work, document retention
 packages/db             Prisma schema, migrations and the database client
 packages/core           Business rules (src/domain) and application services (src/services)
 packages/integrations   Pylon (API client, webhook verification, event processing), the pull of new
@@ -43,8 +49,17 @@ docs                    The documents listed above
 Things worth knowing before changing the code:
 
 - **The stage of an order is derived, never set.** `deriveStage` in `packages/core/src/domain/stages.ts`
-  computes it from recorded facts (first contact, quote sent, live contract, open deposit, latest
-  handoff decision). Services change a fact and call `syncOrderStage`.
+  computes it from recorded facts (job opened, design started, proposal sent, open deposit, latest
+  handoff decision, job done, job closed). Services change a fact and call `syncOrderStage`.
+- **A lead is not a job until its salesperson opens it.** Work on an order (calls and notes, files,
+  quotes, the deposit, sending e-mail) goes through `lockOrderForWork`, which requires that;
+  correcting the customer's details does not.
+- **Two things are called a source.** `LeadSource` is the channel a lead arrived through (the
+  website, a file, by hand): "intake channel" in the interface. `LeadOrigin` is where the customer
+  came from, chosen by the salesperson when opening the job: "lead source" in the interface, and
+  what partners are paid by.
+- **E-mails that go to customers by themselves** are rows in `CustomerNotice`, written from
+  templates an admin keeps and fixed at the moment they are queued. The worker sends them.
 - **Permissions live in the services.** Every function in `packages/core/src/services` checks who is
   acting. Pages and Server Actions only establish the signed-in user and call a service.
 - **Everything is audited.** Each change writes a row to `AuditLog` in the same transaction.
@@ -69,15 +84,17 @@ The first start builds the application and takes several minutes. Then open
 |---|---|---|
 | `manager@bluven.demo` | Manager | The dashboard, every order, the unassigned leads |
 | `sam@bluven.demo`, `alex@bluven.demo` | Sales | Their own orders, tasks and reminders |
-| `finance@bluven.demo` | Finance | The deposit waiting to be confirmed |
-| `ops@bluven.demo` | Operations | The order pushed to them |
+| `finance@bluven.demo` | Finance | Deposits, balances that are due, final payments |
+| `ops@bluven.demo` | Operations | The order to accept, the jobs being arranged and the one waiting for its balance |
 | `admin@bluven.demo` | Admin | Users, rules and the integrations |
 
-The sample data is thirteen orders at different points of the sale: two unassigned leads, orders
-that are new, contacted, quoted (one of them quiet for six days, so the idle reminder shows),
-signed, waiting for finance, ready to push, with operations and handed over, and one each lost and
-on hold. Customer e-mail, the AI assistant, Pylon and notification e-mails are not connected in
-the demo; their pages say so.
+The sample data is sixteen orders at different points: two unassigned leads, a lead that is
+assigned and not opened yet, orders being followed up, in design and with a proposal out (one of
+them quiet for six days, so the idle reminder shows), two with a deposit (one ready to push), one
+pushed and waiting for operations, one being arranged by operations, one installed with its
+balance overdue, one completed, and one each lost and on hold. Customer e-mail, the AI assistant,
+Pylon and notification e-mails are not connected in the demo; their pages say so, and the e-mails
+to customers are kept on the orders, marked as not sent.
 
 Stop it with Ctrl+C. `docker compose -f docker-compose.local.yml down -v` throws the demo
 database away, so the next start begins with fresh sample data. If port 3000 is taken, put
@@ -158,20 +175,20 @@ CRM, backups and upgrades are in [docs/deployment-guide.md](docs/deployment-guid
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string | required |
 | `APP_URL` | Public address of the CRM, no trailing slash. Used in links and for the secure-cookie decision | `http://localhost:3000` |
-| `APP_TIMEZONE` | Business time zone for dates on screen and date-only fields | `Australia/Sydney` |
+| `APP_TIMEZONE` | Business time zone for dates on screen, date-only fields and the working days counted after a job is done | `Australia/Sydney` |
 | `STORAGE_DIR` | Directory for uploaded files | `./data/storage` |
-| `MAX_UPLOAD_MB` | Largest single file on the Documents tab. Quote files, signed contracts and deposit proofs go through forms with a fixed limit of 60 MB and ten files per submission | `500` |
+| `MAX_UPLOAD_MB` | Largest single file on the Documents tab. Proposal files, signed copies and deposit proofs go through forms with a fixed limit of 60 MB and ten files per submission | `500` |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_NAME`, `SEED_ADMIN_PASSWORD` | First administrator, created by `pnpm db:seed` when no user exists | none |
 | `BLUVEN_LEADS_URL`, `BLUVEN_LEADS_KEY` | Collect new leads from the Bluven website's CMS once a minute (`GET /api/crm/leads` there). The key equals `CRM_SYNC_KEY` on the CMS | off |
 | `BLUVEN_LEADS_SINCE` | First run only: also take over leads created since this time, as history | from now |
 | `MAIL_RELAY_URL`, `MAIL_RELAY_KEY` | Send notification emails through an HTTPS relay (the website's `/api/send-mail`). For hosts that block outgoing SMTP; wins over SMTP when both are set | off |
 | `SMTP_URL`, `MAIL_FROM` | Send notification emails by SMTP | off |
-| `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET` | Customer e-mail: the Zoho application through which each salesperson connects their own mailbox (redirect address `<APP_URL>/api/zoho/callback`). The secret also protects the stored mailbox tokens | off |
+| `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET` | Customer e-mail: the Zoho application through which each salesperson connects their own mailbox (redirect address `<APP_URL>/api/zoho/callback`). The automatic e-mails to customers go out through a connected mailbox too. The secret also protects the stored mailbox tokens | off |
 | `ZOHO_ACCOUNTS_URL`, `ZOHO_MAIL_URL` | Zoho's sign-in and mail addresses, for an account outside the Australian data centre | `accounts.zoho.com.au`, `mail.zoho.com.au` |
 | `ZOHO_REQUESTS_PER_MINUTE` | The most requests the worker sends Zoho in a minute while reading mailboxes, all mailboxes together. Zoho blocks an application that passes 30 | `24` |
 | `ANTHROPIC_API_KEY` | The AI assistant: order summaries, drafts for e-mails, recognising attachments, reading electricity bills, the brief for operations. A key for Anthropic's API | off |
 | `AI_MODEL` | The model the assistant uses | `claude-opus-5-5` |
-| `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quotes and contracts are entered by hand | off |
+| `PYLON_API_TOKEN`, `PYLON_API_BASE` | Pylon connection: the worker reads Pylon's events every minute. Without a token quote versions are entered by hand | off |
 | `PYLON_WEBHOOK_SECRET` | Optional: lets Pylon deliver the same events within seconds through `/api/webhooks/pylon` | off |
 | `DATABASE_URL_TEST` | Database for `pnpm test` | see `.env.example` |
 | `DATABASE_URL_E2E`, `E2E_PORT` | Database and port for `pnpm e2e`, so two checkouts can run it side by side | `bluven_e2e` on the local server, `3100` |
