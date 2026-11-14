@@ -1,6 +1,7 @@
 'use server';
 
 import {
+  PROPERTY_FIELD_NAMES,
   acceptQuote,
   assignOrders,
   cancelOrder,
@@ -148,10 +149,23 @@ function propertyFields(formData: FormData) {
   };
 }
 
+/**
+ * What the property form showed when the page was rendered, sent back with it. A field the
+ * person did not touch is then left alone, whatever happened to it in the meantime.
+ */
+function propertyAsShown(formData: FormData): Partial<Record<(typeof PROPERTY_FIELD_NAMES)[number], string>> | undefined {
+  const shown: Partial<Record<(typeof PROPERTY_FIELD_NAMES)[number], string>> = {};
+  for (const field of PROPERTY_FIELD_NAMES) {
+    const value = formData.get(`shown.${field}`);
+    if (typeof value === 'string') shown[field] = value;
+  }
+  return Object.keys(shown).length > 0 ? shown : undefined;
+}
+
 export async function updatePropertyAction(orderId: string, formData: FormData): Promise<ActionResult> {
   if (!validArgs(orderId, formData)) return INVALID_REQUEST;
   return runAction(async (ctx) => {
-    await updateProperty(ctx, { orderId, ...propertyFields(formData) });
+    await updateProperty(ctx, { orderId, ...propertyFields(formData), original: propertyAsShown(formData) });
   });
 }
 

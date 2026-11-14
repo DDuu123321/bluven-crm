@@ -1,5 +1,5 @@
 // Editing the customer and the property behind an order.
-import type { Prisma, Tx } from '@bluven/db';
+import { Prisma, type Tx } from '@bluven/db';
 import { inTx, nowOf, type Ctx } from '../context';
 import { AU_STATES, PROPERTY_TYPES, addressKey, formatAddress, isManager, isOrderStaff, normalizeEmail, normalizePhone, orderViewFor } from '../domain';
 import { FieldErrors, ForbiddenError, NotFoundError } from '../errors';
@@ -188,22 +188,46 @@ function cleanProperty(input: PropertyFields, errors: FieldErrors): PropertyFiel
   return f;
 }
 
-/** Edits the property the order is for. The property is shared by every order at that address. */
-export async function updateProperty(ctx: Ctx, input: { orderId: string } & PropertyFields): Promise<void> {
+/**
+ * Row-locks a property for the rest of the transaction. One property is shared by every order
+ * at its address, so the lock on one of those orders does not keep two writers apart.
+ */
+async function lockProperty(tx: Tx, propertyId: string): Promise<void> {
+  await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Property" WHERE "id" = ${propertyId} FOR UPDATE`);
+}
+
+export const PROPERTY_FIELD_NAMES = ['addressLine1', 'addressLine2', 'suburb', 'state', 'postcode', 'propertyType', 'nmi', 'retailer', 'phase', 'roofType', 'storeys', 'notes'] as const satisfies readonly (keyof PropertyFields)[];
+
+/**
+ * Edits the property the order is for. The property is shared by every order at that address.
+ *
+ * `original` is what the form showed when the page was rendered. A field the person left as it
+ * was is not written: something else may have filled it in meanwhile (the meter number and the
+ * retailer from a bill, a value taken over from the summary, a colleague on another order of the
+ * same address), and saving a different field must not put the old value back. Without
+ * `original` every field counts as meant.
+ */
+export async function updateProperty(ctx: Ctx, input: { orderId: string; original?: Partial<PropertyFields> } & PropertyFields): Promise<void> {
   const errors = new FieldErrors();
   const f = cleanProperty(input, errors);
   errors.throwIfAny();
+  // The same cleaning on both sides, so that a field is "unchanged" exactly when the form came back as it went out.
+  const shown = input.original ? cleanProperty({ ...input, ...input.original }, new FieldErrors()) : null;
+  const leftAlone = (field: keyof PropertyFields): boolean => !!shown && input.original![field] !== undefined && shown[field] === f[field];
   await inTx(ctx.db, async (tx) => {
     const order = await lockOrderForEdit(tx, ctx, input.orderId);
+    await lockProperty(tx, order.propertyId);
     const property = await tx.property.findUniqueOrThrow({ where: { id: order.propertyId } });
-    const change = diff(property as unknown as Record<string, unknown>, f as unknown as Record<string, unknown>);
+    const next = Object.fromEntries(PROPERTY_FIELD_NAMES.map((field) => [field, leftAlone(field) ? property[field] : f[field]])) as unknown as PropertyFields;
+    const change = diff(property as unknown as Record<string, unknown>, next as unknown as Record<string, unknown>);
     if (!change) return;
     // A value somebody has now typed is theirs: it no longer counts as read from a bill.
     const sources = readFieldSources(property.fieldSources);
     for (const field of Object.keys(change.after)) delete sources[field];
     await tx.property.update({
       where: { id: property.id },
-      data: { ...f, addressKey: addressKey({ line1: f.addressLine1, suburb: f.suburb, postcode: f.postcode }), fieldSources: sources as unknown as Prisma.InputJsonValue },
+      // Only the columns that change are written.
+      data: { ...(change.after as Partial<PropertyFields>), addressKey: addressKey({ line1: next.addressLine1, suburb: next.suburb, postcode: next.postcode }), fieldSources: sources as unknown as Prisma.InputJsonValue },
     });
     await audit(tx, ctx, {
       action: 'property.update',
@@ -286,6 +310,7 @@ export async function setSourcedPropertyFields(
   origin: { source: PropertyFieldSource['source']; documentId?: string },
   opts: { onlyEmpty: boolean },
 ): Promise<SourcedPropertyField[]> {
+  await lockProperty(tx, order.propertyId);
   const property = await tx.property.findUniqueOrThrow({ where: { id: order.propertyId } });
   const sources = readFieldSources(property.fieldSources);
   const data: Partial<Record<SourcedPropertyField, string>> = {};
