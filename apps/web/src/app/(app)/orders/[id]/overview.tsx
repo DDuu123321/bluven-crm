@@ -4,6 +4,7 @@ import {
   AU_STATES,
   BEST_TIME_LABEL,
   PHASES,
+  PROPERTY_FIELD_NAMES,
   PROPERTY_TYPES,
   TIMELINE_LABEL,
   formatAddress,
@@ -234,6 +235,10 @@ export async function OverviewTab({ ctx, header, editable, staff, opened }: { ct
               editable && (
                 <Modal trigger="Edit" title="Edit property" size="sm">
                   <ActionForm action={updatePropertyAction.bind(null, order.id)} keepValues className="space-y-4">
+                    {/* What the form shows now goes back with it, so that a field left as it is is not written over something filled in meanwhile. */}
+                    {PROPERTY_FIELD_NAMES.map((field) => (
+                      <input key={field} type="hidden" name={`shown.${field}`} value={p[field]} />
+                    ))}
                     <PropertyFields p={p} full />
                     <FormMessage />
                     <div className="flex justify-end gap-2">
