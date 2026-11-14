@@ -7,7 +7,7 @@
 //   SMTP_URL                          talk to the mail server directly.
 import nodemailer, { type Transporter } from 'nodemailer';
 import type { Db, Prisma } from '@bluven/db';
-import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getConfig, localDateTimeInput, notificationKind, parseDateOnly, withJobLock, type NotificationKind } from '@bluven/core';
+import { NOTIFICATION_KINDS, NOTIFICATION_KIND_LABEL, getConfig, localDateTimeInput, notificationEmailRoute, notificationKind, parseDateOnly, withJobLock, type NotificationKind } from '@bluven/core';
 
 /** Give the person a moment to see it in the app before an email goes out. */
 const GRACE_MS = 2 * 60_000;
@@ -54,10 +54,11 @@ function smtpSender(transport: Transporter, from: string): MailSender {
 
 function getSender(): MailSender | null {
   if (sender !== undefined) return sender;
-  const { smtpUrl, mailFrom, mailRelay } = getConfig();
-  if (mailRelay.url && mailRelay.key) sender = relaySender(mailRelay.url, mailRelay.key);
+  const config = getConfig();
+  const route = notificationEmailRoute(config);
+  if (route === 'relay') sender = relaySender(config.mailRelay.url, config.mailRelay.key);
   // Short timeouts: a host that silently drops SMTP must not pin the job for minutes per message.
-  else if (smtpUrl) sender = smtpSender(nodemailer.createTransport({ url: smtpUrl, connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 }), mailFrom);
+  else if (route === 'smtp') sender = smtpSender(nodemailer.createTransport({ url: config.smtpUrl, connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 }), config.mailFrom);
   else sender = null;
   return sender;
 }
@@ -69,9 +70,10 @@ export function setMailSender(next: MailSender | null | undefined): void {
 
 /** How notification emails go out, for the start-up log. */
 export function describeMailSetup(): string {
-  const { smtpUrl, mailRelay } = getConfig();
-  if (mailRelay.url && mailRelay.key) return `on, through the relay at ${new URL(mailRelay.url).host}`;
-  if (smtpUrl) return 'on, by SMTP';
+  const config = getConfig();
+  const route = notificationEmailRoute(config);
+  if (route === 'relay') return `on, through the relay at ${new URL(config.mailRelay.url).host}`;
+  if (route === 'smtp') return 'on, by SMTP';
   return 'off (neither MAIL_RELAY_URL nor SMTP_URL is set)';
 }
 

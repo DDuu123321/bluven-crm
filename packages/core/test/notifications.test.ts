@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { NOTIFICATION_KINDS, getDailySummary, listNotifications, notificationKind, notificationKindCounts, notifyUsers, setDailySummary, systemCtx, type NotificationKind } from '../src';
+import { NOTIFICATION_KINDS, getDailySummary, listNotifications, notificationEmailRoute, notificationKind, notificationKindCounts, notifyUsers, setDailySummary, systemCtx, type NotificationKind } from '../src';
 import { as, makeUser, resetDb, testDb, type TestUser } from './helpers';
 
 const db = testDb();
@@ -9,9 +9,9 @@ let sam: TestUser;
 const TYPES: Record<NotificationKind, string[]> = {
   leads: ['order.assigned', 'order.unassigned', 'order.possible_duplicate', 'order.restored', 'pool.new_leads', 'lead.duplicate', 'intake.pull_failing', 'intake.pull_rejected'],
   idle: ['order.idle_owner', 'order.idle_manager', 'order.idle_returned'],
-  email: ['mail.received', 'mail.reconnect'],
-  deposits: ['deposit.submitted', 'deposit.confirmed', 'deposit.rejected', 'deposit.reopened', 'deposit.gateway', 'refund.pending', 'refund.updated', 'order.cancelled'],
-  handoff: ['handoff.pushed', 'handoff.returned', 'handoff.accepted', 'handoff.withdrawn'],
+  email: ['mail.received', 'mail.reconnect', 'mail.unplaced', 'mail.unreadable', 'mail.notice_failed'],
+  deposits: ['deposit.received', 'deposit.gateway', 'payment.final', 'refund.pending', 'refund.updated', 'order.cancelled'],
+  handoff: ['handoff.pushed', 'handoff.returned', 'handoff.accepted', 'handoff.withdrawn', 'ops.install_date', 'ops.job_done', 'ops.rebate_due', 'ops.balance_due', 'ops.balance_chase'],
   tasks: ['task.due', 'order.hold_ended'],
   documents: ['retention.reminder', 'retention.overdue', 'retention.auto_deleted', 'bill.address_differs'],
   pylon: ['pylon.signed', 'pylon.accepted', 'pylon.conflict', 'pylon.event_failed', 'pylon.unreachable', 'pylon.payment_not_applied', 'pylon.signed_not_applied', 'pylon.signed_other_version'],
@@ -44,7 +44,8 @@ describe('notification kinds', () => {
     await db.notification.updateMany({ where: { userId: sam.id, type: 'task.due' }, data: { readAt: new Date() } });
     const counts = await notificationKindCounts(as(sam));
     expect(counts.map((c) => c.kind)).toEqual([...NOTIFICATION_KINDS]);
-    expect(counts.find((c) => c.kind === 'handoff')).toEqual({ kind: 'handoff', total: 4, unread: 0 });
+    // Four read out of nine: the kind takes in what operations does after accepting an order as well.
+    expect(counts.find((c) => c.kind === 'handoff')).toEqual({ kind: 'handoff', total: 9, unread: 5 });
     expect(counts.find((c) => c.kind === 'tasks')).toEqual({ kind: 'tasks', total: 2, unread: 1 });
     expect((await listNotifications(as(sam), { kind: 'tasks', unreadOnly: true })).map((n) => n.type)).toEqual(['order.hold_ended']);
     // A kind without notifications is not offered as a filter.
@@ -71,5 +72,18 @@ describe('the daily summary preference', () => {
     // Saying the same thing twice changes nothing and logs nothing.
     await setDailySummary(as(sam), false);
     expect(await db.auditLog.count({ where: { action: 'user.preference' } })).toBe(2);
+  });
+});
+
+describe('whether this server can send notification e-mail', () => {
+  it('is one answer for the worker that sends and the page that offers the daily summary', () => {
+    const off = { mailRelay: { url: '', key: '' }, smtpUrl: '' };
+    expect(notificationEmailRoute(off)).toBeNull();
+    expect(notificationEmailRoute({ ...off, smtpUrl: 'smtp://mail.example.com' })).toBe('smtp');
+    // The relay needs both its address and its key; half a setting is no setting.
+    expect(notificationEmailRoute({ ...off, mailRelay: { url: 'https://www.example.com/api/send-mail', key: '' } })).toBeNull();
+    expect(notificationEmailRoute({ ...off, mailRelay: { url: 'https://www.example.com/api/send-mail', key: 'k' } })).toBe('relay');
+    // With both, the relay wins: it is there for hosts that block SMTP.
+    expect(notificationEmailRoute({ smtpUrl: 'smtp://mail.example.com', mailRelay: { url: 'https://www.example.com/api/send-mail', key: 'k' } })).toBe('relay');
   });
 });

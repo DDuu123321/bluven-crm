@@ -87,3 +87,13 @@ export function getConfig(): AppConfig {
 export function resetConfigCache(): void {
   cached = undefined;
 }
+
+/**
+ * How notification e-mails leave this server, or null when they cannot: through the HTTPS
+ * relay when both its address and its key are set, else by SMTP when that is set. The worker
+ * sends by this, and the pages that offer anything to do with these e-mails ask the same question.
+ */
+export function notificationEmailRoute(config: Pick<AppConfig, 'mailRelay' | 'smtpUrl'> = getConfig()): 'relay' | 'smtp' | null {
+  if (config.mailRelay.url && config.mailRelay.key) return 'relay';
+  return config.smtpUrl ? 'smtp' : null;
+}
