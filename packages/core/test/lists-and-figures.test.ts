@@ -240,6 +240,29 @@ describe('the report over time', () => {
     expect((await getDashboard(as(w.manager, w.clock), { from: '2026-09-01', to: '2026-11-30' })).monthly.at(-1)).toMatchObject({ month: '2026-11', lost: 1 });
   });
 
+  it('keeps to the edges of the twelve months and of the eight weeks, as the days fall in Sydney', async () => {
+    const sourceId = (await source('bluven-website')).id;
+    const add = (id: string, n: number, iso: string) =>
+      ingestLeads(systemCtx(db, 'Bluven website', () => new Date(iso)), [lead({ externalId: id, phone: `0400 000 02${n}`, email: `${id}@example.com`, address: `${n} Edge St` })], { sourceId, requireExternalId: true });
+    // The clock stands at Tuesday 10 November 2026: the months shown are December 2025 to November 2026.
+    await add('first-month', 1, '2025-11-30T13:30:00Z'); // 1 December 2025, 00:30 in Sydney
+    await add('month-before', 2, '2025-11-30T12:30:00Z'); // 30 November 2025, 23:30
+    // The weeks shown start on Mondays, from 21 September to 9 November.
+    await add('first-week', 3, '2026-09-20T14:30:00Z'); // Monday 21 September, 00:30
+    await add('week-before', 4, '2026-09-20T13:30:00Z'); // Sunday 20 September, 23:30
+
+    const d = await getDashboard(as(w.manager, w.clock), { from: '2026-11-01', to: '2026-11-30' });
+    expect(d.monthly[0]).toEqual({ month: '2025-12', leads: 1, deposits: 0, accepted: 0, completed: 0, lost: 0 });
+    // The one from November 2025 is in no month; both from September 2026 are in theirs.
+    expect(d.monthly.map((m) => m.leads).reduce((a, b) => a + b)).toBe(3);
+    expect(d.monthly.find((m) => m.month === '2026-09')).toMatchObject({ leads: 2 });
+    expect(d.weekly.map((x) => x.weekStart)).toEqual(['2026-09-21', '2026-09-28', '2026-10-05', '2026-10-12', '2026-10-19', '2026-10-26', '2026-11-02', '2026-11-09']);
+    expect(d.weekly[0]).toEqual({ weekStart: '2026-09-21', leads: 1, deposits: 0 });
+    expect(d.weekly.map((x) => x.leads).reduce((a, b) => a + b)).toBe(1);
+    // A salesperson's own report counts only their orders, in the same periods.
+    expect((await getDashboard(as(w.sam, w.clock), { from: '2026-11-01', to: '2026-11-30' })).monthly.every((m) => m.leads === 0)).toBe(true);
+  });
+
   it('counts the jobs operations accepted and the ones that were closed, each in its month', async () => {
     await orderAt(w, 'ACCEPTED');
     const closed = await orderAt(w, 'INSTALLED', { phone: '0400 555 666', email: 'second@example.com', address: '2 Other Rd' });
