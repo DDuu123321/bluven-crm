@@ -12,6 +12,9 @@ const nextConfig: NextConfig = {
   // Trace from the monorepo root so the standalone build includes the workspace packages.
   outputFileTracingRoot: repoRoot,
   poweredByHeader: false,
+  // The project's working instructions are in the AGENTS.md at the top level. The development
+  // server is not to write a file of its own into this folder.
+  agentRules: false,
   serverExternalPackages: ['sharp', 'pg'],
   experimental: {
     serverActions: {

@@ -66,6 +66,8 @@ Things worth knowing before changing the code:
   Database triggers refuse UPDATE, DELETE and TRUNCATE on that table.
 - **Uploaded files** go to `STORAGE_DIR` on disk and are only served through `/api/documents/…`
   after an access check. Each view and download is logged.
+- **Next.js 16 differs from earlier versions** in its APIs, its conventions and its file layout.
+  The documentation that matches the installed version is in `apps/web/node_modules/next/dist/docs/`.
 
 ## A look on your own computer
 
