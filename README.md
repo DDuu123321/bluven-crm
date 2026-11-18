@@ -12,9 +12,11 @@ when they cannot sort something out themselves.
 
 **Status (18 November 2026):** development is complete; the system is not in use yet. The whole
 flow is built and tested: sales, operations up to the closed job, customer e-mail through Zoho Mail,
-the AI assistant, document retention, the report and e-mail templates. Zoho Mail (including the
-automatic e-mails to customers) and the assistant have only been run against local stand-ins, never
-against the real services. Not built: a connection to accounting software, a time zone per customer
+the AI assistant, document retention, the report and e-mail templates. Pylon has been checked
+read-only against the real account; its webhook and gateway payments have not been seen there yet.
+Zoho Mail (including the automatic e-mails to customers), the assistant, the website's lead feed and
+the notification mail relay have only been run against local stand-ins, never against the real
+services. Not built: a connection to accounting software, a time zone per customer
 or salesperson, public holidays in working-day counts, a self-service page for customers, creating
 Pylon projects through the API, converting HEIC photos, and a layout for phones. What comes before
 go-live, and who does it: [docs/project-status.md](docs/project-status.md).
