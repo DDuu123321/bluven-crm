@@ -1,6 +1,8 @@
 # Working in this repository
 
 `README.md` describes the layout, the commands and the conventions of the code. Read it first.
+Where the project stands, and what is still to be done before it is used, is in
+`docs/project-status.md`. Keep that page current when the state changes.
 
 ## Who a commit is attributed to
 

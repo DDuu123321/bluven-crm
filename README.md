@@ -10,17 +10,20 @@ deposit), arrange the installation and mark the job as done → final payment, j
 customer is written to automatically at three points; operations send an order back to sales only
 when they cannot sort something out themselves.
 
-**Status:** the whole flow is built and tested: sales, operations up to the closed job, customer
-e-mail through Zoho Mail, the AI assistant, document retention, the report and e-mail templates.
-Zoho Mail (including the automatic e-mails to customers) and the assistant have only been run
-against local stand-ins, never against the real services. Not built: a connection to accounting
-software, a time zone per customer or salesperson, public holidays in working-day counts, creating
-Pylon projects through the API, converting HEIC photos, and a layout for phones.
+**Status (18 November 2026):** development is complete; the system is not in use yet. The whole
+flow is built and tested: sales, operations up to the closed job, customer e-mail through Zoho Mail,
+the AI assistant, document retention, the report and e-mail templates. Zoho Mail (including the
+automatic e-mails to customers) and the assistant have only been run against local stand-ins, never
+against the real services. Not built: a connection to accounting software, a time zone per customer
+or salesperson, public holidays in working-day counts, a self-service page for customers, creating
+Pylon projects through the API, converting HEIC photos, and a layout for phones. What comes before
+go-live, and who does it: [docs/project-status.md](docs/project-status.md).
 
 ## Documentation
 
 | Document | For | Language |
 |---|---|---|
+| [docs/project-status.md](docs/project-status.md) | Everyone: where the project stands and what comes before go-live | 中文 |
 | [docs/sales-process-guide.md](docs/sales-process-guide.md) | Sales, managers, operations, finance: how an order goes from lead to closed job | 中文 |
 | [docs/deployment-guide.md](docs/deployment-guide.md) | Whoever installs and runs the system | 中文 |
 | [docs/bluven-lead-forwarding-spec.md](docs/bluven-lead-forwarding-spec.md) | Whoever maintains the Bluven website: how its leads reach the CRM | 中文 |
